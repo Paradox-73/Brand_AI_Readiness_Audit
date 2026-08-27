@@ -1,0 +1,24 @@
+{
+  "fixture": "good-site",
+  "why": "A well-built B2B site that does everything this marketplace recommends: Organization and Article and FAQPage markup, a quotable entity definition, answer-first sections, prices and address in plain text, breadcrumbs, recent dates, llms.txt, a press page. It is the false-positive guard. If a check fires here, the check is wrong, not the site.",
+  "expect_zero_findings": true,
+  "must_find": [],
+  "must_not_find": [
+    "robots-block", "bot-manager-block", "sitemap-missing", "non-200", "noindex",
+    "canonical-broken", "js-shell", "thin-html", "image-locked-facts",
+    "pdf-locked-facts", "no-org-schema", "no-product-schema", "no-article-schema",
+    "invalid-jsonld", "schema-text-mismatch", "meta-hygiene", "no-entity-definition",
+    "heading-structure", "fluff-first", "missing-core-fact", "name-inconsistency",
+    "stale-content", "no-date-signal", "nap-inconsistency", "no-orientation",
+    "dead-end", "orphan-pages", "broken-links", "no-breadcrumbs", "title-body-drift",
+    "readability", "form-friction"
+  ],
+  "must_recommend": ["R-BOILERPLATE"],
+  "must_not_recommend": [
+    "R-LLMS-TXT", "R-FAQ-SCHEMA", "R-PRESS-PAGE", "R-DATE-SIGNALS",
+    "R-ANSWER-FIRST", "R-WAYFINDING", "R-HTML-FOR-PDF", "R-EMAIL-TEXT-FIRST",
+    "R-SAMEAS-WIKIDATA", "R-AUTHOR-PAGES"
+  ],
+  "expect_page_types": ["home", "about", "contact", "pricing", "faq", "article", "press", "service", "legal"],
+  "citation_simulation_all_found": true
+}

@@ -1,0 +1,32 @@
+{
+  "fixture": "js-shell-site",
+  "why": "A client-side rendered studio site. The homepage and work index are empty framework shells with the real content sitting in __NEXT_DATA__; the about page carries its story in three large images; the pricing page points at a rate-card PDF instead of stating a number; the contact page hides its form in an iframe beside an autoplaying video. Nothing is blocked, so this isolates gate 2 and gate 3 from gate 1.",
+  "expect_zero_findings": false,
+  "expect_critical_at_least": 1,
+  "must_find": [
+    "js-shell",
+    "image-locked-facts",
+    "pdf-locked-facts",
+    "iframe-content",
+    "no-transcript",
+    "no-org-schema",
+    "no-entity-definition",
+    "missing-core-fact",
+    "weak-corroboration",
+    "no-orientation",
+    "dead-end",
+    "meta-hygiene"
+  ],
+  "must_not_find": [
+    "robots-block",
+    "bot-manager-block",
+    "sitemap-missing",
+    "noindex",
+    "no-product-schema",
+    "stale-content"
+  ],
+  "must_recommend": ["R-LLMS-TXT", "R-HTML-FOR-PDF", "R-SAMEAS-WIKIDATA", "R-BOILERPLATE"],
+  "must_not_recommend": ["R-EMAIL-TEXT-FIRST"],
+  "critical_root_causes": ["js-shell"],
+  "citation_simulation_none_for_types": ["home", "about", "contact"]
+}

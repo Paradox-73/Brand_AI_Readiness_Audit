@@ -1,0 +1,26 @@
+{
+  "fixture": "stale-site",
+  "why": "An independent publisher whose site is technically sound but frozen. Every article predates the reference date by two to seven years, one carries no date at all, the footer says 2019 on every page, the catalogue says 'current as of 2021', the sitemap has not moved since 2021, no social or authoritative profile is linked, and the about page's Organization block gives a different telephone number and a different description from the homepage. This is the mechanism-D fixture.",
+  "expect_zero_findings": false,
+  "reference_date": "2026-09-01",
+  "must_find": [
+    "stale-content",
+    "no-date-signal",
+    "weak-corroboration",
+    "nap-inconsistency",
+    "missing-schema-props"
+  ],
+  "must_not_find": [
+    "robots-block",
+    "bot-manager-block",
+    "js-shell",
+    "no-org-schema",
+    "no-entity-definition",
+    "missing-core-fact",
+    "invalid-jsonld",
+    "broken-links",
+    "orphan-pages"
+  ],
+  "must_recommend": ["R-SAMEAS-WIKIDATA", "R-DATE-SIGNALS", "R-PRESS-PAGE", "R-BOILERPLATE"],
+  "note": "nap-inconsistency must be high severity: a site that contradicts itself on contact details poisons every downstream source that copies from it. This fixture depends on the fixed reference date; without --now the staleness thresholds drift with the calendar."
+}

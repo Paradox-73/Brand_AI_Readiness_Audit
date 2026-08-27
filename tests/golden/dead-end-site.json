@@ -1,0 +1,30 @@
+{
+  "fixture": "dead-end-site",
+  "why": "A consultancy site that a visitor arriving from an AI answer cannot use. The homepage H1 is 'Welcome', the nav has one item, the only onward link 404s, and a cookie dialog is open in the delivered markup. Interior pages have no header or footer at all, so there is no way back. Three sitemap URLs are linked from nowhere. The services page promises pricing and turnaround times in its title and delivers neither, in two paragraphs of over 200 words each. The enquiry form requires twelve fields. No page declares a viewport. This is the mechanism-G fixture.",
+  "expect_zero_findings": false,
+  "must_find": [
+    "no-orientation",
+    "dead-end",
+    "orphan-pages",
+    "broken-links",
+    "title-body-drift",
+    "intrusive-interstitial",
+    "form-friction",
+    "readability",
+    "no-entity-definition",
+    "missing-core-fact",
+    "no-org-schema"
+  ],
+  "must_not_find": [
+    "robots-block",
+    "bot-manager-block",
+    "js-shell",
+    "noindex",
+    "canonical-broken",
+    "invalid-jsonld",
+    "no-product-schema",
+    "stale-content"
+  ],
+  "must_recommend": ["R-WAYFINDING", "R-EMAIL-TEXT-FIRST", "R-LLMS-TXT", "R-BOILERPLATE"],
+  "note": "R-EMAIL-TEXT-FIRST must appear here and nowhere else: this is the only fixture with a newsletter signup, and mechanism F guidance is irrelevant to a brand that does not send email. The newsletter itself must never be reported as a finding."
+}

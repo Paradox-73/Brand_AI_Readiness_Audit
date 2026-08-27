@@ -1,0 +1,29 @@
+{
+  "fixture": "blocked-site",
+  "why": "An ironmongery merchant whose content is good but whose access is shut. robots.txt disallows four answer crawlers and two training crawlers, and also disallows two real content paths; a WAF returns 403 to any AI user agent robots.txt does allow; one product page carries X-Robots-Tag noindex; the about page canonicalises to a different domain; the sitemap advertises a URL that 404s. This is the gate-1 fixture, and it also proves the answer-crawler versus training-crawler split.",
+  "expect_zero_findings": false,
+  "expect_critical_at_least": 1,
+  "must_find": [
+    "robots-block",
+    "bot-manager-block",
+    "noindex",
+    "canonical-broken",
+    "sitemap-broken",
+    "host-inconsistency",
+    "non-200"
+  ],
+  "must_not_find": [
+    "js-shell",
+    "no-org-schema",
+    "no-entity-definition",
+    "no-product-schema",
+    "missing-core-fact",
+    "stale-content"
+  ],
+  "must_recommend": ["R-LLMS-TXT", "R-BOILERPLATE"],
+  "critical_root_causes": ["bot-manager-block"],
+  "expect_info_at_least": 1,
+  "blocked_answer_crawlers": ["GPTBot", "OAI-SearchBot", "ClaudeBot", "PerplexityBot"],
+  "blocked_training_crawlers": ["Google-Extended", "CCBot"],
+  "note": "The training-crawler block must be reported at info severity, never as a defect: opting out of training corpora is a rights decision. The answer-crawler block must be high."
+}

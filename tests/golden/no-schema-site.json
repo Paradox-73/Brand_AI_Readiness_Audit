@@ -1,0 +1,27 @@
+{
+  "fixture": "no-schema-site",
+  "why": "A pottery shop with genuinely good prose: prices, dimensions, address and opening hours are all stated in plain text. What it lacks is machine-readable structure. No JSON-LD anywhere except one product page whose block has a double comma and will not parse; three pages share the title 'About'; no page declares a language or any Open Graph tag; the listing page hides its catalogue behind a load-more button; the sitemap carries no lastmod. This isolates gate 3 from gates 1 and 2.",
+  "expect_zero_findings": false,
+  "must_find": [
+    "invalid-jsonld",
+    "no-org-schema",
+    "no-product-schema",
+    "meta-hygiene",
+    "uncrawlable-pagination",
+    "weak-corroboration",
+    "no-date-signal"
+  ],
+  "must_not_find": [
+    "robots-block",
+    "bot-manager-block",
+    "js-shell",
+    "image-locked-facts",
+    "pdf-locked-facts",
+    "noindex",
+    "missing-core-fact",
+    "stale-content",
+    "broken-links"
+  ],
+  "must_recommend": ["R-FAQ-SCHEMA", "R-SAMEAS-WIKIDATA", "R-BOILERPLATE"],
+  "note": "must_not_find includes missing-core-fact deliberately. The prose states price, address and contact clearly, so the extractability skill must stay quiet even though the structured data is absent. A skill that conflates the two would fire here."
+}
