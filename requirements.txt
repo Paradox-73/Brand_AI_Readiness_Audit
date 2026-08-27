@@ -1,0 +1,15 @@
+# Runtime dependencies for brand-ai-readiness-audit.
+# Pinned with a compatible-release range: reproducible enough to trust, loose
+# enough that a judge's existing environment is unlikely to conflict.
+
+requests~=2.32
+beautifulsoup4~=4.12
+lxml~=5.3
+
+# Optional. Install to enable the rendered-DOM comparison in
+# render-readability-audit (`run_audit.py --render`). Its absence is detected
+# and reported as an audit-environment limitation, never as a site defect.
+#   pip install playwright~=1.49 && playwright install chromium
+
+# Development only:
+#   pip install pytest~=8.3
