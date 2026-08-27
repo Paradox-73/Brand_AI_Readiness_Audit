@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/brand-ai-readiness-audit/report-schema.json",
+  "title": "Brand AI-readiness audit report",
+  "description": "Output contract for the audit-orchestrator entrypoint. The keys marked required are exactly those the contest specifies as the minimum shape; everything else is an extension this marketplace adds. tests/test_runtime.py asserts a real report validates against the required set.",
+  "type": "object",
+  "required": ["site", "audited_at", "summary", "findings"],
+  "additionalProperties": true,
+  "properties": {
+    "site": {
+      "type": "string",
+      "description": "Bare hostname of the audited origin, e.g. example.com"
+    },
+    "audited_at": {
+      "type": "string",
+      "description": "UTC timestamp, YYYY-MM-DDTHH:MM:SSZ. The only timestamp in the report: nothing inside findings[] carries one, so the same snapshot always produces byte-identical findings.",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total_findings", "critical", "high", "medium"],
+      "properties": {
+        "total_findings": {"type": "integer", "minimum": 0},
+        "critical": {"type": "integer", "minimum": 0},
+        "high": {"type": "integer", "minimum": 0},
+        "medium": {"type": "integer", "minimum": 0},
+        "low": {"type": "integer", "minimum": 0, "description": "Extension."},
+        "info": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Extension. Observations deliberately not treated as defects, such as a training-crawler block, which is a rights decision rather than a discoverability problem."
+        },
+        "verdict": {
+          "type": "string",
+          "description": "Extension. One paragraph of plain language stating what the findings amount to."
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "severity", "evidence", "suggested_action"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^F-\\d{3}$"},
+          "title": {"type": "string"},
+          "severity": {"enum": ["critical", "high", "medium", "low", "info"]},
+          "evidence": {
+            "type": "string",
+            "description": "A concrete observation with counts and up to 5 sampled URLs. Never a restatement of the title."
+          },
+          "suggested_action": {
+            "type": "object",
+            "required": ["summary", "priority"],
+            "properties": {
+              "summary": {"type": "string"},
+              "priority": {"enum": ["critical", "high", "medium", "low"]},
+              "priority_score": {
+                "type": "number",
+                "description": "Extension. severity_weight * reach / effort_divisor. See severity-and-priority.md."
+              },
+              "effort": {"enum": ["low", "medium", "high"], "description": "Extension."},
+              "owner": {
+                "enum": ["developer", "content owner", "marketing"],
+                "description": "Extension. Who typically does this work."
+              },
+              "how_to_fix": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "description": "Extension. Ordered, concrete steps. Never 'improve your structured data'."
+              },
+              "snippet": {
+                "type": "string",
+                "description": "Extension. Paste-ready code, pre-filled with values extracted from the site being audited."
+              },
+              "rationale": {
+                "type": "string",
+                "description": "Extension. Names the mechanism letter this fix repairs and why it works."
+              }
+            }
+          },
+          "confidence": {"enum": ["high", "medium", "low"], "description": "Extension."},
+          "mechanism": {
+            "enum": ["A", "B", "C", "D", "E", "F", "G"],
+            "description": "Extension. See mechanism-model.md. G is this marketplace's own addition for on-site engagement."
+          },
+          "mechanism_description": {"type": "string", "description": "Extension."},
+          "root_cause": {
+            "type": "string",
+            "description": "Extension. A tag from the fixed vocabulary in audit_common.ROOT_CAUSES. Deduplication keys on it, so inventing a tag raises rather than silently failing to merge."
+          },
+          "affected_pages": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 5,
+            "description": "Extension. A sample, capped at 5. Empty means the finding is site-wide by construction."
+          },
+          "affected_page_count": {"type": "integer", "minimum": 0, "description": "Extension."},
+          "reach": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Extension. Share of crawled pages affected, floored at 0.25; 1.0 when no pages are attributed."
+          },
+          "detected_by": {"type": "string", "description": "Extension. Which sub-skill found it."},
+          "also_detected_by": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Extension. Present when a later skill's duplicate observation was merged in."
+          }
+        }
+      }
+    },
+    "start_here": {
+      "type": "array",
+      "items": {"type": "string"},
+      "maxItems": 3,
+      "description": "Extension. Finding IDs of the top three by priority score, excluding info."
+    },
+    "recommendations": {
+      "type": "array",
+      "description": "Extension. Proactive improvements, kept out of findings[] so they never inflate the defect counts. Included only when the observed condition for each is met.",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "title", "summary", "how_to_do_it", "mechanism", "why_this_works"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^R-[A-Z-]+$"},
+          "type": {"const": "proactive"},
+          "title": {"type": "string"},
+          "summary": {"type": "string"},
+          "how_to_do_it": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+          "mechanism": {"enum": ["A", "B", "C", "D", "E", "F", "G"]},
+          "why_this_works": {"type": "string"},
+          "effort": {"enum": ["low", "medium", "high"]},
+          "owner": {"enum": ["developer", "content owner", "marketing"]},
+          "snippet": {"type": "string"}
+        }
+      }
+    },
+    "citation_simulation": {
+      "type": "array",
+      "description": "Extension. Per key page, the sentence an assistant fetching it would most likely quote. See citation-simulation.md.",
+      "items": {
+        "type": "object",
+        "required": ["url", "page_type", "likely_citation", "why"],
+        "properties": {
+          "url": {"type": "string"},
+          "page_type": {"type": "string"},
+          "likely_citation": {
+            "type": ["string", "null"],
+            "description": "null means nothing on the page both stands alone and states a fact."
+          },
+          "why": {"type": "string"}
+        }
+      }
+    },
+    "crawl": {
+      "type": "object",
+      "description": "Extension. What the audit actually saw, so a reader can judge how much of the site the findings cover.",
+      "properties": {
+        "origin": {"type": "string"},
+        "brand_name": {"type": ["string", "null"]},
+        "brand_name_source": {"type": ["string", "null"]},
+        "pages_crawled": {"type": "integer", "minimum": 0},
+        "pages_ok": {"type": "integer", "minimum": 0},
+        "budget_exhausted": {"type": "boolean"},
+        "render_mode": {"enum": ["static", "rendered"]},
+        "elapsed_s": {"type": ["number", "null"]},
+        "extra_requests_made": {"type": "integer", "minimum": 0},
+        "user_agent": {"type": "string"},
+        "notes": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "checks_run": {
+      "type": "array",
+      "description": "Extension. Every check attempted, with the skill that ran it.",
+      "items": {
+        "type": "object",
+        "required": ["skill", "check"],
+        "properties": {"skill": {"type": "string"}, "check": {"type": "string"}}
+      }
+    },
+    "not_applicable": {
+      "type": "array",
+      "description": "Extension, and the important one. A check that stayed quiet on purpose, with the reason. This is the false-positive guard made visible: a reader can confirm the audit considered Product markup and decided the site sells nothing, rather than simply not looking.",
+      "items": {
+        "type": "object",
+        "required": ["check", "reason"],
+        "properties": {
+          "check": {"type": "string"},
+          "skill": {"type": "string"},
+          "reason": {"type": "string"}
+        }
+      }
+    },
+    "merged_duplicates": {
+      "type": "array",
+      "description": "Extension. Observations two skills both made, and which finding they were merged into.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "skill": {"type": "string"},
+          "id_hint": {"type": "string"},
+          "merged_into": {"type": "string"}
+        }
+      }
+    },
+    "auditor": {
+      "type": "object",
+      "properties": {"name": {"type": "string"}, "version": {"type": "string"}}
+    }
+  }
+}
