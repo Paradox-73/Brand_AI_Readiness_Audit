@@ -1,0 +1,681 @@
+#!/usr/bin/env python3
+"""fact-extractability-audit: can a machine quote a clear fact? (mechanisms B, C)
+
+The question this skill asks is narrower and harder than "is there content":
+if an assistant fetched this page to answer "what is X", "how much does X cost"
+or "where is X", is there a sentence it could lift verbatim and stand behind?
+
+Makes no network requests.
+
+Usage:
+    python check.py --snapshot snapshot.json --out fact-extractability-audit.findings.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(_HERE)),
+                                "audit-orchestrator", "scripts"))
+
+from audit_common import (  # noqa: E402
+    SkillResult, has_price, load_snapshot, pages_of, pct, sample, sentences,
+    truncate, word_count,
+)
+
+SKILL = "fact-extractability-audit"
+
+# Thresholds and why they sit here.
+DEFINITION_WINDOW_WORDS = 150   # an assistant reads the top of a page first; a definition below this is rarely used
+MIN_DEFINITION_PREDICATE = 20   # "Acme is a company." is technically a definition and tells nobody anything
+ANSWER_FIRST_MIN_SECTIONS = 3   # below 3 sections the share is noise
+FLUFF_FIRST_SHARE = 0.5         # more than half the sections opening with warm-up prose is a pattern
+SLOGAN_HEADING_SHARE = 0.8      # nearly every heading using words the page never uses again
+SLOGAN_MIN_SECTIONS = 5         # below 5 headings the share is one bad heading, not a pattern
+LONG_SENTENCE_SHARE = 0.25      # a quarter of sentences over 30 words makes a page hard to excerpt
+
+# Page types where a visitor arrives with a specific question, so the first
+# paragraph of each section is expected to answer it.
+ANSWER_FIRST_TYPES = ("pricing", "faq", "product", "service", "location", "comparison")
+
+COPULAR_RE_TEMPLATE = r"\b{brand}\b\s+(?:is|are|was|remains)\s+(?:an?|the)?\s*(?P<rest>[^.!?]{{{minlen},400}})"
+
+CONCRETE_VALUE_RE = re.compile(
+    r"\d"                                                    # any number
+    r"|[$€£¥₹]"                                              # any currency mark
+    r"|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b"
+    r"|\b(?:is|are)\s+(?:an?|the)\b"                         # a definition
+    r"|\b(?:means|refers to|defined as|consists of|includes)\b",
+    re.I,
+)
+
+PRICING_ESCAPE_RE = re.compile(
+    r"\b(?:contact (?:us )?for (?:a )?(?:price|pricing|quote)"
+    r"|request a quote|custom(?:ised|ized)? pricing|pricing on (?:request|application)"
+    r"|talk to sales|get a quote|poa)\b", re.I)
+
+FOUNDING_FACT_RE = re.compile(
+    r"\b(?:founded|established|incorporated|started|launched|since|operating since|"
+    r"in business since)\b[^.!?]{0,60}\b(?:19|20)\d{2}\b"
+    r"|\b(?:19|20)\d{2}\b[^.!?]{0,30}\b(?:founded|established|incorporated)\b", re.I)
+
+TEAM_FACT_RE = re.compile(
+    r"\b(?:our team|the team|founder|co-founder|chief executive|ceo|managing director|"
+    r"employees|people work|staff of|headed by|led by|partners?)\b", re.I)
+
+SERVICE_AREA_RE = re.compile(
+    r"\b(?:serving|we serve|available (?:in|across|throughout)|operating (?:in|across)|"
+    r"customers (?:in|across)|nationwide|worldwide|across the|based in|located in)\b", re.I)
+
+STOPWORDS = frozenset("""
+a an the and or but for nor so yet of to in on at by with from as is are was were be been being
+your our their its it this that these those we you they he she what how why when where which who
+whom whose can could will would shall should may might must do does did done have has had not no
+more most other some such only own same than too very just about into over under again further
+then once here there all any both each few own s t don now
+""".split())
+
+
+def run(snapshot):
+    result = SkillResult(SKILL)
+    pages = pages_of(snapshot, content_only=True)
+    brand = snapshot.get("brand") or {}
+    brand_name = (brand.get("name") or "").strip()
+
+    if not pages:
+        for name in ("entity-definition", "heading-hierarchy", "answer-first-paragraphs",
+                     "core-facts-present", "brand-naming-consistency", "jargon-density"):
+            result.skip(name, "no content pages returned HTTP 200")
+        return result
+
+    _check_entity_definition(result, snapshot, pages, brand_name)
+    _check_heading_hierarchy(result, pages)
+    _check_answer_first(result, pages, brand_name)
+    _check_core_facts(result, snapshot, pages, brand_name)
+    _check_naming_consistency(result, snapshot, pages, brand)
+    _check_jargon_density(result, pages)
+    return result
+
+
+# --------------------------------------------------------------------------
+
+def _brand_pattern(brand_name):
+    """Match the brand name allowing for extra internal whitespace."""
+    tokens = [re.escape(t) for t in brand_name.split() if t]
+    if not tokens:
+        return None
+    return r"\s+".join(tokens)
+
+
+def _top_words(page, limit=DEFINITION_WINDOW_WORDS):
+    """The opening of the page: headings plus the first N words of body text."""
+    headings = page.get("headings") or {}
+    lead = " ".join((headings.get("h1") or [])[:1] + (headings.get("h2") or [])[:2])
+    body = page.get("body_text", "")
+    words = body.split()
+    return "{} {}".format(lead, " ".join(words[:limit])).strip()
+
+
+def _find_definition(text, brand_name):
+    """A quotable one-line definition: `<Brand> is a <category> that ...`."""
+    pattern = _brand_pattern(brand_name)
+    if not pattern:
+        return None
+    regex = re.compile(
+        COPULAR_RE_TEMPLATE.format(brand=pattern, minlen=MIN_DEFINITION_PREDICATE), re.I)
+    match = regex.search(text)
+    if not match:
+        return None
+    return truncate(match.group(0), 300)
+
+
+def _check_entity_definition(result, snapshot, pages, brand_name):
+    """The single most quotable fact on any site: what this brand actually is.
+
+    Assistants need an identity sentence before they can say anything else
+    about a brand, and it is the sentence most sites never write.
+    """
+    result.check("entity-definition")
+    if not brand_name:
+        result.skip("entity-definition",
+                    "no brand name could be determined from structured data, og:site_name or "
+                    "the page title, so a definition sentence cannot be looked for")
+        return
+
+    identity = [p for p in pages if p["page_type"] in ("home", "about")]
+    if not identity:
+        result.skip("entity-definition",
+                    "neither a home nor an about page was crawled")
+        return
+
+    found = None
+    for page in identity:
+        definition = _find_definition(_top_words(page), brand_name)
+        if definition:
+            found = (page, definition)
+            break
+
+    result.signal("entity_definition_found", bool(found))
+    if found:
+        page, definition = found
+        result.signal("entity_definition", definition)
+        result.skip("entity-definition",
+                    'a quotable definition is present on {}: "{}"'.format(page["url"], definition))
+        return
+
+    # Distinguish "the brand is named but never defined" from "the brand is
+    # never named at the top of its own homepage", because the fixes differ.
+    pattern = _brand_pattern(brand_name)
+    home = identity[0]
+    top = _top_words(home)
+    named = bool(pattern and re.search(pattern, top, re.I))
+    pronouns = len(re.findall(r"\b(?:we|our|us)\b", top, re.I))
+
+    if not named and pronouns >= 3:
+        evidence = ('The first {} words of {} use "we" or "our" {} times and never state the '
+                    'brand name "{}". A machine reading this page cannot tell whose site it '
+                    'is.'.format(DEFINITION_WINDOW_WORDS, home["url"], pronouns, brand_name))
+        root = "no-entity-definition"
+    else:
+        evidence = ('No sentence of the form "{} is a ..." appears in the first {} words or the '
+                    'opening headings of {}{}.'.format(
+                        brand_name, DEFINITION_WINDOW_WORDS, home["url"],
+                        " or the about page" if len(identity) > 1 else ""))
+        root = "no-entity-definition"
+
+    result.add(
+        id_hint="no-quotable-entity-definition",
+        title="No page states in one sentence what the brand is",
+        severity="high", confidence="high",
+        evidence=evidence,
+        mechanism="B", root_cause=root,
+        summary='Add one sentence near the top of the homepage: "{} is a <category> that '
+                '<does what> for <whom>."'.format(brand_name),
+        how_to_fix=[
+            "Write the sentence in that exact shape. Name the brand as the subject; do not "
+            "open with \"We\".",
+            "Put it in the first paragraph of the homepage, in plain HTML text, not inside an "
+            "image or a slider.",
+            "Repeat the same sentence verbatim on the about page, in the Organization "
+            "`description` property, on your LinkedIn page and in your press kit.",
+            "Keep it under 30 words and make it specific enough that a competitor could not "
+            "use the same sentence.",
+        ],
+        effort="low", owner="marketing",
+        rationale="Mechanism B: assistants quote what is easy to lift. Identity is the first "
+                  "thing they need and the hardest thing to infer from marketing copy, so a "
+                  "brand with no definition sentence gets described in whatever words a third "
+                  "party used instead.",
+        affected_pages=[p["url"] for p in identity],
+        snippet="<h1>{brand}</h1>\n"
+                "<p><strong>{brand} is a &lt;category&gt; that &lt;does what&gt; for "
+                "&lt;whom&gt;.</strong> &lt;One more sentence with a concrete fact: a number, "
+                "a place, or a name.&gt;</p>".format(brand=brand_name),
+    )
+
+
+def _check_heading_hierarchy(result, pages):
+    result.check("heading-hierarchy")
+    no_h1 = [p for p in pages if len(p.get("headings", {}).get("h1") or []) == 0]
+    many_h1 = [p for p in pages if len(p.get("headings", {}).get("h1") or []) > 1]
+    skipped = []
+    for page in pages:
+        levels = [level for level, _ in (page.get("heading_sequence") or [])]
+        for previous, current in zip(levels, levels[1:]):
+            if current - previous > 1:
+                skipped.append(page)
+                break
+
+    if not (no_h1 or many_h1 or skipped):
+        result.skip("heading-hierarchy",
+                    "every crawled content page has exactly one H1 and no skipped heading levels")
+    else:
+        problems = []
+        affected = set()
+        if no_h1:
+            problems.append("{} page(s) have no H1".format(len(no_h1)))
+            affected.update(p["url"] for p in no_h1)
+        if many_h1:
+            problems.append("{} page(s) have more than one H1".format(len(many_h1)))
+            affected.update(p["url"] for p in many_h1)
+        if skipped:
+            problems.append("{} page(s) skip a heading level".format(len(skipped)))
+            affected.update(p["url"] for p in skipped)
+
+        result.add(
+            id_hint="heading-structure-unclear",
+            title="Heading structure does not describe the page reliably",
+            severity="medium" if (no_h1 or many_h1) else "low", confidence="high",
+            evidence="{}. Examples: {}.".format("; ".join(problems),
+                                                ", ".join(sample(sorted(affected), 5))),
+            mechanism="C", root_cause="heading-structure",
+            summary="Give every page exactly one H1 that names its subject, and use H2/H3 in order.",
+            how_to_fix=[
+                "Set one H1 per page stating what the page is about, not a slogan.",
+                "Demote extra H1s to H2. Styling can stay the same; only the tag changes.",
+                "Do not skip levels: an H4 should follow an H3, not an H2.",
+            ],
+            effort="low", owner="developer",
+            rationale="Mechanism C: headings are how a machine works out which part of a long "
+                      "page answers which question. Broken structure means the whole page is "
+                      "treated as one undifferentiated block.",
+            affected_pages=sorted(affected),
+        )
+
+    _check_slogan_headings(result, pages)
+
+
+def _check_slogan_headings(result, pages):
+    """H2s whose vocabulary appears nowhere in the page are slogans.
+
+    A slogan heading ("Built to fly", "Dream bigger") tells a machine nothing
+    about what follows, so a page of them has no navigable structure.
+
+    The comparison is against the whole page text rather than the paragraph
+    directly beneath, and the bar is set deliberately high. A good heading
+    often does not repeat itself in its own first sentence - "Starter plan"
+    followed by "$480 per month" is correct writing - and the earlier, stricter
+    version of this check flagged exactly that. Only a page where nearly every
+    heading is vocabulary the page never uses again is reported.
+    """
+    result.check("headings-name-their-topic")
+    candidates = [p for p in pages if len(_content_sections(p)) >= SLOGAN_MIN_SECTIONS]
+    if not candidates:
+        result.skip("headings-name-their-topic",
+                    "no crawled page has {} or more H2 sections, so heading vocabulary cannot "
+                    "be assessed meaningfully".format(SLOGAN_MIN_SECTIONS))
+        return
+
+    offenders = []
+    for page in candidates:
+        body = page.get("body_text", "").lower()
+        judged = 0
+        disconnected = 0
+        for section in _content_sections(page):
+            tokens = {w for w in re.findall(r"[a-z]{4,}", section["heading"].lower())
+                      if w not in STOPWORDS}
+            # A heading made entirely of short or common words ("Who it is for")
+            # carries no vocabulary to match, so it is not evidence either way.
+            if not tokens:
+                continue
+            judged += 1
+            if not any(t[:6] in body for t in tokens):
+                disconnected += 1
+        if judged >= SLOGAN_MIN_SECTIONS and disconnected / float(judged) > SLOGAN_HEADING_SHARE:
+            offenders.append((page, disconnected, judged))
+
+    if not offenders:
+        result.skip("headings-name-their-topic",
+                    "headings on the crawled pages use vocabulary that appears in the page text")
+        return
+
+    result.add(
+        id_hint="headings-are-slogans",
+        title="{} page(s) use slogan headings that do not name their topic".format(len(offenders)),
+        severity="low", confidence="medium",
+        evidence="Pages where over {}% of H2s use vocabulary that appears nowhere else in the "
+                 "page text: {}.".format(
+                     int(SLOGAN_HEADING_SHARE * 100),
+                     "; ".join("{} ({}/{} headings)".format(p["url"], d, t)
+                               for p, d, t in sorted(offenders, key=lambda x: x[0]["url"])[:4])),
+        mechanism="B", root_cause="heading-structure",
+        summary="Rewrite section headings to name what the section is about.",
+        how_to_fix=[
+            'Replace slogans with the question or topic: "Built for speed" becomes '
+            '"How fast the platform delivers results".',
+            "Use the words a customer would use, and the words that appear in the paragraph below.",
+            "Keep the slogan as a subheading or in the body copy if it matters to the brand.",
+        ],
+        effort="low", owner="content owner",
+        rationale="Mechanism B: a heading is a machine's index into a long page. A heading that "
+                  "does not name its topic means the section beneath it cannot be matched to a "
+                  "question.",
+        affected_pages=[p["url"] for p, _, _ in offenders],
+    )
+
+
+def _content_sections(page):
+    """Sections that make a claim, excluding related-links and share blocks.
+
+    Judging a "Read next" block for whether it opens with a number would
+    penalise exactly the wayfinding this marketplace recommends elsewhere.
+    """
+    return [s for s in (page.get("sections") or []) if not s.get("navigational")]
+
+
+def _check_answer_first(result, pages, brand_name):
+    result.check("answer-first-paragraphs")
+    candidates = [p for p in pages
+                  if p["page_type"] in ANSWER_FIRST_TYPES
+                  and len(_content_sections(p)) >= ANSWER_FIRST_MIN_SECTIONS]
+    if not candidates:
+        result.skip("answer-first-paragraphs",
+                    "no pricing, FAQ, product, service, location or comparison page with at "
+                    "least {} sections was crawled".format(ANSWER_FIRST_MIN_SECTIONS))
+        result.signal("fluff_first", False)
+        return
+
+    total_sections = 0
+    fluff_sections = 0
+    offenders = []
+    examples = []
+    for page in candidates:
+        sections = _content_sections(page)
+        fluff = [s for s in sections
+                 if not CONCRETE_VALUE_RE.search(_first_sentence(s["first_paragraph"]))]
+        total_sections += len(sections)
+        fluff_sections += len(fluff)
+        if len(sections) and len(fluff) / float(len(sections)) > FLUFF_FIRST_SHARE:
+            offenders.append((page, len(fluff), len(sections)))
+            if fluff and len(examples) < 2:
+                examples.append('{} - "{}" opens with: "{}"'.format(
+                    page["url"], truncate(fluff[0]["heading"], 60),
+                    truncate(_first_sentence(fluff[0]["first_paragraph"]), 110)))
+
+    result.signal("fluff_first", bool(offenders))
+    result.signal("fluff_first_share", round(fluff_sections / float(total_sections), 3) if total_sections else 0.0)
+
+    if not offenders:
+        result.skip("answer-first-paragraphs",
+                    "{} of {} sections on question-answering pages open with a concrete value, "
+                    "so they are already answer-first".format(
+                        total_sections - fluff_sections, total_sections))
+        return
+
+    result.add(
+        id_hint="sections-do-not-answer-first",
+        title="{} page(s) open their sections with warm-up prose instead of the answer".format(
+            len(offenders)),
+        severity="medium", confidence="medium",
+        evidence="{} of {} sections on pages a buyer visits with a specific question ({}%) begin "
+                 "with no number, date, price or definition. {}".format(
+                     fluff_sections, total_sections, pct(fluff_sections, total_sections),
+                     " ".join(examples)),
+        mechanism="B", root_cause="fluff-first",
+        summary="Put the concrete answer in the first sentence of every section, then explain it.",
+        how_to_fix=[
+            "For each section, move the number, price, date or definition into sentence one.",
+            "Keep the context and the persuasion; they work better after the fact than before it.",
+            'Test each section by reading only its first sentence: does it answer the heading? '
+            "If not, it is not answer-first yet.",
+            "Add a two-to-three sentence summary block at the top of each key page containing "
+            "the facts you most want quoted.",
+        ],
+        effort="medium", owner="content owner",
+        rationale="Mechanism B: an assistant lifts a short passage, usually the opening of the "
+                  "most relevant section. If the opening is throat-clearing, the passage that "
+                  "gets quoted contains no facts, and a competitor's page gets used instead.",
+        affected_pages=[p["url"] for p, _, _ in offenders],
+        snippet="<h2>How much does it cost?</h2>\n"
+                "<p><strong>{brand} costs $X per month on the Starter plan and $Y on Growth.</strong> "
+                "Both include &lt;what is included&gt;. Setup is &lt;free / $Z&gt;.</p>".format(
+                    brand=brand_name or "The product"),
+    )
+
+
+def _first_sentence(text):
+    parts = sentences(text)
+    return parts[0] if parts else (text or "")
+
+
+def _check_core_facts(result, snapshot, pages, brand_name):
+    """The five facts a buyer asks an assistant for, checked one at a time."""
+    result.check("core-facts-present")
+    by_type = {}
+    for page in pages:
+        by_type.setdefault(page["page_type"], []).append(page)
+
+    missing = []
+    found = {}
+
+    # 1. Price, or an explicit statement that pricing is on request.
+    price_page = next((p for p in pages if has_price(p.get("body_text", ""))), None)
+    escape_page = next((p for p in pages if PRICING_ESCAPE_RE.search(p.get("body_text", ""))), None)
+    if price_page:
+        found["pricing"] = price_page["url"]
+    elif escape_page:
+        found["pricing"] = "{} (states pricing is on request)".format(escape_page["url"])
+    else:
+        has_pricing_page = bool(by_type.get("pricing"))
+        missing.append(("pricing", "high" if has_pricing_page else "medium",
+                        "a pricing page was crawled but shows no figure and no "
+                        "'contact us for pricing' statement" if has_pricing_page
+                        else "no price and no 'pricing on request' statement appears anywhere "
+                             "on the crawled pages"))
+
+    # 2. Where the business is, or who it serves.
+    address_page = next((p for p in pages if (p.get("contact_facts") or {}).get("has_address")), None)
+    area_page = next((p for p in pages if SERVICE_AREA_RE.search(p.get("body_text", ""))), None)
+    local_signals = bool(by_type.get("location")) or any(
+        "localbusiness" in {t.lower() for t in p.get("jsonld_types") or []} for p in pages)
+    if address_page:
+        found["location"] = address_page["url"]
+    elif area_page:
+        found["service area"] = area_page["url"]
+    else:
+        missing.append(("location or service area", "high" if local_signals else "medium",
+                        "no postal address and no statement of where the business operates "
+                        "appears in the page text"))
+
+    # 3. A way to make contact.
+    contact_page = next((p for p in pages
+                         if (p.get("contact_facts") or {}).get("has_email")
+                         or (p.get("contact_facts") or {}).get("has_phone")), None)
+    form_page = next((p for p in pages if (p.get("contact_facts") or {}).get("has_contact_form")), None)
+    if contact_page:
+        found["contact"] = contact_page["url"]
+    elif form_page:
+        found["contact"] = "{} (form only, no email or phone in text)".format(form_page["url"])
+    else:
+        missing.append(("contact method", "medium",
+                        "no email address, telephone number or contact form was found in the "
+                        "text of any crawled page"))
+
+    # 4. Founding or team facts - the corroborating detail that separates one
+    #    brand from another with a similar name.
+    fact_page = next((p for p in pages if FOUNDING_FACT_RE.search(p.get("body_text", ""))), None)
+    team_page = next((p for p in pages if TEAM_FACT_RE.search(p.get("body_text", ""))), None)
+    if fact_page:
+        found["founding facts"] = fact_page["url"]
+    elif team_page:
+        found["team facts"] = team_page["url"]
+    else:
+        missing.append(("founding or team facts", "medium",
+                        "no founding year and no named team or leadership detail appears in "
+                        "the page text"))
+
+    result.signal("core_facts_found", sorted(found.keys()))
+    result.signal("core_facts_missing", [name for name, _, _ in missing])
+
+    if not missing:
+        result.skip("core-facts-present",
+                    "all four core facts are stated in plain text: {}".format(
+                        "; ".join("{} on {}".format(k, v) for k, v in sorted(found.items()))))
+        return
+
+    for name, severity, why in missing:
+        result.add(
+            id_hint="core-fact-missing-{}".format(re.sub(r"[^a-z]+", "-", name.lower()).strip("-")),
+            title="The site never states its {} in plain text".format(name),
+            severity=severity, confidence="medium",
+            evidence="Across {} crawled content page(s), {}.".format(len(pages), why),
+            mechanism="B", root_cause="missing-core-fact",
+            summary="State the {} explicitly, in a sentence, on the page where a visitor would "
+                    "look for it.".format(name),
+            how_to_fix=_core_fact_steps(name, brand_name),
+            effort="low", owner="content owner",
+            rationale="Mechanism B: an assistant answers with facts it can quote. A fact that "
+                      "is implied, shown only in an image, or held only in a form nobody fills "
+                      "in is a fact it will not state, so the brand loses that question to "
+                      "whoever did write it down.",
+            affected_pages=sorted({p["url"] for p in pages if p["page_type"] in
+                                   ("home", "about", "contact", "pricing")})[:5],
+        )
+
+
+def _core_fact_steps(name, brand_name):
+    brand = brand_name or "the brand"
+    if name == "pricing":
+        return [
+            "Publish the actual figures on a pricing page, even as a starting-from number.",
+            'If you genuinely cannot publish prices, write the sentence explicitly: "{} does '
+            'not publish prices; contact sales for a quote, typically returned within N days." '
+            "An explicit statement is quotable; silence is not.".format(brand),
+            "Add the same figure to Product/Offer structured data so it is unambiguous.",
+        ]
+    if name.startswith("location"):
+        return [
+            "Put the full postal address in text on the contact page, inside an <address> element.",
+            'If the business has no public premises, state the service area instead: '
+            '"{} serves customers across &lt;regions&gt;."'.format(brand),
+            "Repeat the address in the footer of every page and in Organization structured data.",
+        ]
+    if name == "contact method":
+        return [
+            "Put an email address and a telephone number in text, not only behind a form.",
+            "Use mailto: and tel: links so both a person and a machine can act on them.",
+            "State response times: an answer time is itself a quotable fact.",
+        ]
+    return [
+        'Add a short paragraph on the about page: "{} was founded in &lt;year&gt; in '
+        '&lt;place&gt; by &lt;names&gt;."'.format(brand),
+        "Name the leadership team with their roles.",
+        "These details are what distinguishes you from another company with a similar name.",
+    ]
+
+
+def _check_naming_consistency(result, snapshot, pages, brand):
+    """The same brand written several ways reads as several brands.
+
+    Only names the site *asserts* as its identity are compared: Organization
+    `name` and og:site_name. Names guessed from a <title> are excluded, because
+    "Brand | Tagline" splits into a brand and a tagline, and treating the
+    tagline as a name variant would fire this finding on almost every site.
+    """
+    result.check("brand-naming-consistency")
+    variants = [v for v in (brand.get("authoritative_variants") or []) if v]
+    if len(variants) < 2:
+        result.skip("brand-naming-consistency",
+                    "the site declares its name in {} authoritative place(s) ({}), so there is "
+                    "nothing to disagree with. Names guessed from page titles were deliberately "
+                    "not compared.".format(
+                        len(variants), ", ".join(brand.get("authoritative_sources") or []) or "none"))
+        return
+
+    normalised = {}
+    for variant in variants:
+        key = re.sub(r"[^a-z0-9]+", "", variant.lower())
+        if len(key) < 3:
+            continue
+        normalised.setdefault(key, set()).add(variant)
+
+    # Variants that normalise to the same string differ only in spacing or
+    # capitalisation; variants that normalise differently are separate names.
+    spelling_conflicts = [group for group in normalised.values() if len(group) > 1]
+    distinct = list(normalised.keys())
+    declared_alternates = {re.sub(r"[^a-z0-9]+", "", a.lower()) for a in brand.get("alternate_names") or []}
+
+    # A second name already declared as `alternateName` is not a contradiction:
+    # the site has explicitly said the two refer to one entity.
+    undeclared = [k for k in distinct if k not in declared_alternates]
+
+    if not spelling_conflicts and len(undeclared) < 2:
+        result.skip("brand-naming-consistency",
+                    "the brand name is written consistently, or the alternative forms are "
+                    "declared in Organization `alternateName`")
+        return
+
+    detail = []
+    if spelling_conflicts:
+        detail.append("the same name is written as {}".format(
+            " / ".join('"{}"'.format(x) for group in spelling_conflicts for x in sorted(group)[:3])))
+    if len(undeclared) >= 2:
+        detail.append("{} distinct names are asserted as the site's identity: {}".format(
+            len(undeclared), ", ".join('"{}"'.format(v) for v in sorted(variants)[:4])))
+
+    result.add(
+        id_hint="brand-name-written-inconsistently",
+        title="The brand name is written more than one way",
+        severity="medium", confidence="medium",
+        evidence="Sources checked: Organization JSON-LD `name` and og:site_name. "
+                 "Result: {}. The primary form was taken to be \"{}\" (from {}).".format(
+                     "; ".join(detail), brand.get("name"), brand.get("source")),
+        mechanism="D", root_cause="name-inconsistency",
+        summary="Pick one written form of the name and use it everywhere, character for character.",
+        how_to_fix=[
+            'Choose the canonical form, including capitalisation and spacing.',
+            "Set it identically in Organization `name`, og:site_name, the <title> suffix and "
+            "the visible logo alt text.",
+            "Add the other forms to Organization `alternateName` so they are declared as the "
+            "same entity rather than being guessed at.",
+            "Update the same string on your off-site profiles.",
+        ],
+        effort="low", owner="marketing",
+        rationale="Mechanism D: agreement across sources is what makes a fact trustworthy. Two "
+                  "spellings halve the evidence for each and make it harder to tell that both "
+                  "refer to one company.",
+    )
+
+
+def _check_jargon_density(result, pages):
+    result.check("jargon-density")
+    measurable = [p for p in pages
+                  if (p.get("readability") or {}).get("sentence_count", 0) >= 8]
+    if not measurable:
+        result.skip("jargon-density",
+                    "no crawled page has enough prose (8+ sentences) to measure sentence length")
+        return
+
+    offenders = [p for p in measurable
+                 if (p.get("readability") or {}).get("long_sentence_share", 0) > LONG_SENTENCE_SHARE]
+    if not offenders:
+        result.skip("jargon-density",
+                    "fewer than {}% of sentences run over 30 words on every measurable "
+                    "page".format(int(LONG_SENTENCE_SHARE * 100)))
+        return
+
+    result.add(
+        id_hint="sentences-too-long-to-quote",
+        title="{} page(s) are written in sentences too long to quote".format(len(offenders)),
+        severity="low", confidence="medium",
+        evidence="Pages where over {}% of sentences exceed 30 words: {}.".format(
+            int(LONG_SENTENCE_SHARE * 100),
+            "; ".join("{} ({}% long, average {} words)".format(
+                p["url"],
+                int((p.get("readability") or {}).get("long_sentence_share", 0) * 100),
+                (p.get("readability") or {}).get("avg_sentence_words"))
+                for p in sorted(offenders, key=lambda x: x["url"])[:4])),
+        mechanism="B", root_cause="jargon-density",
+        summary="Break long sentences into single-claim sentences.",
+        how_to_fix=[
+            "Split any sentence carrying more than one claim into one sentence per claim.",
+            "Aim for an average of 15 to 20 words; keep the occasional long sentence for rhythm.",
+            "Put each concrete fact in its own short sentence so it can be lifted on its own.",
+        ],
+        effort="medium", owner="content owner",
+        rationale="Mechanism B: a quotable fact has to survive being taken out of its paragraph. "
+                  "A 40-word sentence carrying three qualifications cannot be excerpted without "
+                  "changing its meaning, so it tends not to be excerpted at all.",
+        affected_pages=[p["url"] for p in offenders],
+    )
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--snapshot", required=True)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--no-network", action="store_true", help="accepted for interface parity")
+    args = parser.parse_args(argv)
+
+    result = run(load_snapshot(args.snapshot))
+    result.write(args.out)
+    print("{}: {} finding(s)".format(SKILL, len(result.findings)), file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

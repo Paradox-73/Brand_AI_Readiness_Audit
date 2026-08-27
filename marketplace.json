@@ -1,0 +1,44 @@
+{
+  "name": "brand-ai-readiness-audit",
+  "version": "1.0.0",
+  "description": "Audits any website for the reasons a brand is missing, misrepresented or ignored by AI assistants, and for the reasons visitors who do arrive leave again. Emits one prioritised report of findings and fixes.",
+  "license": "MIT",
+  "skills": [
+    {
+      "id": "audit-orchestrator",
+      "path": "skills/audit-orchestrator",
+      "entrypoint": true,
+      "summary": "Crawls the site once, runs the six sub-skills over that snapshot, deduplicates and prioritises their findings, and emits report.json and report.md."
+    },
+    {
+      "id": "crawl-access-audit",
+      "path": "skills/crawl-access-audit",
+      "summary": "Gate A: is the crawler let in at all? robots.txt, AI crawler user agents, bot managers, sitemaps, status codes, noindex and canonicals."
+    },
+    {
+      "id": "render-readability-audit",
+      "path": "skills/render-readability-audit",
+      "summary": "Gate A/C: can a machine read what is delivered? JavaScript shells, facts locked in images, PDFs, video or iframes."
+    },
+    {
+      "id": "structured-data-audit",
+      "path": "skills/structured-data-audit",
+      "summary": "Gate C: are the facts machine-readable? JSON-LD presence, validity, completeness and agreement with the visible page, keyed to detected page type."
+    },
+    {
+      "id": "fact-extractability-audit",
+      "path": "skills/fact-extractability-audit",
+      "summary": "Gate C: is there a sentence an assistant could quote? Entity definition, answer-first sections, core facts, naming consistency."
+    },
+    {
+      "id": "freshness-corroboration-audit",
+      "path": "skills/freshness-corroboration-audit",
+      "summary": "Mechanism D: is the brand current, corroborated across independent sources, and distinguishable from others sharing its name?"
+    },
+    {
+      "id": "engagement-audit",
+      "path": "skills/engagement-audit",
+      "summary": "Mechanism G: does a visitor who arrives mid-journey get oriented, given a next step, and able to get back?"
+    }
+  ]
+}

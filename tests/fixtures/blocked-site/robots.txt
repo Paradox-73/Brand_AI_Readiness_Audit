@@ -1,0 +1,26 @@
+User-agent: GPTBot
+Disallow: /
+
+User-agent: OAI-SearchBot
+Disallow: /
+
+User-agent: ClaudeBot
+Disallow: /
+
+User-agent: PerplexityBot
+Disallow: /
+
+User-agent: CCBot
+Disallow: /
+
+User-agent: Google-Extended
+Disallow: /
+
+User-agent: *
+Disallow: /cart
+Disallow: /checkout
+Disallow: /search
+Disallow: /products/trade-only
+Disallow: /guides
+
+Sitemap: {{BASE}}/sitemap.xml

@@ -1,0 +1,42 @@
+# Audit output. Every run writes here; none of it belongs in the repository.
+out/
+*.snapshot.json
+snapshot.json
+report.json
+report.md
+report.html
+*.findings.json
+
+# The packaged submission
+brand-ai-readiness-audit.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+
+# Test and tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Playwright, when the optional rendered pass is installed
+.playwright/
+playwright-report/
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

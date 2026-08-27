@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>{{BASE}}/index.html</loc></url>
+  <url><loc>{{BASE}}/shop/index.html</loc></url>
+  <url><loc>{{BASE}}/shop/walmgate-mug.html</loc></url>
+  <url><loc>{{BASE}}/shop/ouse-serving-bowl.html</loc></url>
+  <url><loc>{{BASE}}/about.html</loc></url>
+  <url><loc>{{BASE}}/faq.html</loc></url>
+  <url><loc>{{BASE}}/contact.html</loc></url>
+</urlset>

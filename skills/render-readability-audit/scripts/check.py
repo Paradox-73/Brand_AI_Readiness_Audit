@@ -1,0 +1,509 @@
+#!/usr/bin/env python3
+"""render-readability-audit: can a machine read the delivered HTML? (mechanisms A, C)
+
+Reads snapshot.json, writes findings JSON. Makes no network requests: every
+judgement comes from the HTML the crawl already captured, plus the optional
+Playwright measurements if the crawl ran with --render.
+
+Usage:
+    python check.py --snapshot snapshot.json --out render-readability-audit.findings.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(_HERE)),
+                                "audit-orchestrator", "scripts"))
+
+from audit_common import (  # noqa: E402
+    CONTENT_TYPES, SkillResult, has_price, load_snapshot, pages_of, pct, sample,
+)
+
+SKILL = "render-readability-audit"
+
+# Thresholds, each with the reason it sits where it does.
+MIN_QUOTABLE_TEXT = 300      # below ~300 chars a page carries no self-contained fact
+HEAVY_SCRIPT_BYTES = 50000   # 50 KB of script alongside no prose means the page is assembled client-side
+EMPTY_ROOT_TEXT = 200        # a framework root with under 200 chars has not rendered content
+SHELL_SHARE_HIGH = 0.5       # more than half of content pages being shells is a site-wide failure
+RENDER_GAP_SIGNIFICANT = 0.6 # JavaScript adding 60%+ of the text means the static HTML is a stub
+IMAGE_DOMINANT_TEXT = 400    # a page with a hero image and under 400 chars is carrying facts in pixels
+
+# Link text that promises the numbers a buyer needs.
+FACT_BEARING_PDF_RE = re.compile(
+    r"\b(price|pricing|rate card|tariff|fee|cost|quote|spec|specification|"
+    r"datasheet|data sheet|brochure|catalog(ue)?|menu|product sheet|"
+    r"technical detail|dimensions|sizing|price list)\b", re.I)
+
+LOAD_MORE_RE = re.compile(r"\b(load more|show more|view more|see more|load additional)\b", re.I)
+PAGINATION_RE = re.compile(r"(?:[?&](?:page|p|offset|start)=\d+|/page/\d+|/p/\d+/?$)", re.I)
+
+
+def run(snapshot):
+    result = SkillResult(SKILL)
+    content_pages = [p for p in pages_of(snapshot, content_only=True)]
+    render_mode = (snapshot.get("crawl") or {}).get("render_mode", "static")
+
+    result.check("render-mode")
+    if render_mode == "rendered":
+        result.check("static-vs-rendered-text-gap")
+    else:
+        result.skip("static-vs-rendered-text-gap",
+                    "Playwright was not available on the auditing machine, so only the "
+                    "delivered HTML was analysed. This is a property of the audit run, "
+                    "not a defect on the site.")
+
+    if not content_pages:
+        for name in ("thin-html", "spa-shell-detection", "facts-locked-in-images",
+                     "facts-locked-in-pdfs", "video-transcripts", "iframed-main-content",
+                     "image-alt-coverage", "crawlable-pagination"):
+            result.skip(name, "no content pages returned HTTP 200, so there is no delivered "
+                              "HTML to assess")
+        return result
+
+    shells = _check_shells(result, snapshot, content_pages, render_mode)
+    _check_render_gap(result, content_pages, render_mode)
+    _check_image_locked(result, content_pages, shells)
+    _check_pdf_locked(result, content_pages)
+    _check_video_transcripts(result, content_pages)
+    _check_iframed_content(result, content_pages, shells)
+    _check_alt_coverage(result, content_pages)
+    _check_pagination(result, snapshot, content_pages)
+
+    result.signal("shell_page_count", len(shells))
+    result.signal("render_mode", render_mode)
+    return result
+
+
+# --------------------------------------------------------------------------
+
+def _shell_reasons(page):
+    """Why this page looks like a container rather than content.
+
+    Two independent signals are required before calling a page a shell, so a
+    genuinely short page (a thin contact page, say) is not misread as broken.
+    """
+    spa = page.get("spa_shell") or {}
+    scripts = page.get("scripts") or {}
+    reasons = []
+
+    text_len = page.get("body_text_len", 0)
+    script_bytes = scripts.get("inline_bytes", 0) + spa.get("state_blob_bytes", 0)
+
+    if text_len < MIN_QUOTABLE_TEXT and script_bytes > HEAVY_SCRIPT_BYTES:
+        reasons.append("{} chars of visible text against {:,} bytes of script".format(
+            text_len, script_bytes))
+    root_len = spa.get("root_text_len")
+    if spa.get("root_selector") and root_len is not None and root_len < EMPTY_ROOT_TEXT:
+        reasons.append("framework root `{}` contains {} chars".format(
+            spa["root_selector"], root_len))
+    if spa.get("state_blobs") and text_len < MIN_QUOTABLE_TEXT * 2:
+        reasons.append("content held in {} rather than in HTML".format(
+            ", ".join(spa["state_blobs"][:2])))
+    if spa.get("noscript_demands_js"):
+        reasons.append("<noscript> tells the visitor to enable JavaScript")
+    return reasons if len(reasons) >= 2 else []
+
+
+def _check_shells(result, snapshot, content_pages, render_mode):
+    result.check("thin-html")
+    result.check("spa-shell-detection")
+
+    shells = [p for p in content_pages if _shell_reasons(p)]
+    home = next((p for p in content_pages if p.get("page_type") == "home"), None)
+    home_is_shell = home is not None and bool(_shell_reasons(home))
+    recovered = None
+    if home_is_shell and "rendered_text_len" in (home or {}):
+        recovered = home["rendered_text_len"] >= MIN_QUOTABLE_TEXT * 3
+
+    if home_is_shell:
+        if recovered is True:
+            severity, confidence = "high", "high"
+            extra = ("A Playwright pass recovered {} chars after JavaScript ran, so the content "
+                     "exists but only for consumers that execute JavaScript.".format(
+                         home.get("rendered_text_len")))
+        elif recovered is False:
+            severity, confidence = "critical", "high"
+            extra = "A Playwright pass recovered only {} chars, so the content is not reachable " \
+                    "even with JavaScript enabled.".format(home.get("rendered_text_len"))
+        else:
+            severity, confidence = "critical", "medium"
+            extra = ("No rendered pass was available on this machine, so it could not be "
+                     "confirmed whether JavaScript recovers the text.")
+        result.add(
+            id_hint="homepage-is-javascript-shell",
+            title="The homepage is delivered as an empty JavaScript shell",
+            severity=severity, confidence=confidence,
+            evidence="{}: {}. {}".format(home["url"], "; ".join(_shell_reasons(home)), extra),
+            mechanism="C", root_cause="js-shell",
+            summary="Server-render the homepage, or pre-render it to static HTML at build time.",
+            how_to_fix=[
+                "Turn on server-side rendering or static generation for the homepage in your "
+                "framework (Next.js, Nuxt, Remix, Angular Universal and SvelteKit all support this).",
+                "Verify with `curl -s <url> | grep -c '<h1'` or by using View Source, not "
+                "DevTools: DevTools shows the page after JavaScript has run.",
+                "At minimum, put the H1, the one-sentence description of the brand, and the "
+                "primary facts into the server response even if the rest hydrates client-side.",
+                "Keep the client-side app; this is about what the first response contains, "
+                "not about abandoning the framework.",
+            ],
+            effort="high", owner="developer",
+            rationale="Mechanism C: a page that looks complete to a human can be empty to a "
+                      "machine. Many crawlers and assistant fetchers read only the first HTML "
+                      "response, so an empty shell means the brand has no homepage at all.",
+            affected_pages=[home["url"]],
+        )
+
+    others = [p for p in shells if p is not home]
+    if others:
+        rate = len(shells) / float(len(content_pages))
+        result.add(
+            id_hint="content-pages-are-javascript-shells",
+            title="{} of {} content pages are delivered as JavaScript shells".format(
+                len(shells), len(content_pages)),
+            severity="high" if rate > SHELL_SHARE_HIGH else "medium",
+            confidence="high",
+            evidence="{}% of crawled content pages carry two or more shell signals. "
+                     "Examples: {}.".format(
+                         pct(len(shells), len(content_pages)),
+                         "; ".join("{} ({})".format(p["url"], _shell_reasons(p)[0])
+                                   for p in sorted(others, key=lambda x: x["url"])[:3])),
+            mechanism="C", root_cause="js-shell",
+            summary="Server-render or pre-render the page templates that currently ship empty.",
+            how_to_fix=[
+                "Identify the templates behind the pages listed (they are usually one or two "
+                "templates, not one problem per page).",
+                "Enable server-side rendering or static generation for those routes.",
+                "Re-check with View Source that the main heading and body copy are present in "
+                "the delivered HTML.",
+            ],
+            effort="high", owner="developer",
+            rationale="Mechanism C: these pages are invisible to any consumer that does not run "
+                      "JavaScript, which includes a large share of the crawlers that feed "
+                      "AI answers.",
+            affected_pages=[p["url"] for p in others],
+        )
+
+    if not shells:
+        result.skip("spa-shell-detection",
+                    "every crawled content page delivered readable text in the initial HTML "
+                    "response")
+    return shells
+
+
+def _check_render_gap(result, content_pages, render_mode):
+    if render_mode != "rendered":
+        return
+    measured = [p for p in content_pages if "rendered_text_len" in p]
+    if not measured:
+        result.skip("static-vs-rendered-text-gap",
+                    "the rendered pass produced no measurements for the sampled pages")
+        return
+
+    gaps = []
+    for page in measured:
+        static_len = max(page.get("body_text_len", 0), 1)
+        rendered_len = page["rendered_text_len"]
+        gap = (rendered_len - static_len) / float(max(rendered_len, 1))
+        if gap >= RENDER_GAP_SIGNIFICANT and rendered_len > MIN_QUOTABLE_TEXT:
+            gaps.append((page, gap))
+
+    if not gaps:
+        result.skip("static-vs-rendered-text-gap",
+                    "on {} rendered page(s) JavaScript added less than {}% of the text, so the "
+                    "delivered HTML already carries the content".format(
+                        len(measured), int(RENDER_GAP_SIGNIFICANT * 100)))
+        return
+
+    result.add(
+        id_hint="javascript-supplies-most-page-text",
+        title="JavaScript supplies most of the readable text on sampled pages",
+        severity="high", confidence="high",
+        evidence="On {} of {} rendered pages, JavaScript added {}% or more of the final text. "
+                 "Examples: {}.".format(
+                     len(gaps), len(measured), int(RENDER_GAP_SIGNIFICANT * 100),
+                     "; ".join("{} ({} chars static -> {} rendered)".format(
+                         p["url"], p.get("body_text_len"), p["rendered_text_len"])
+                         for p, _ in sorted(gaps, key=lambda x: x[0]["url"])[:3])),
+        mechanism="C", root_cause="js-shell",
+        summary="Move the primary copy into the server response so it does not depend on the "
+                "consumer running JavaScript.",
+        how_to_fix=[
+            "For each template listed, render the main content on the server.",
+            "Where full SSR is not practical, inline the key facts (heading, description, "
+            "price, location) as static HTML and let the interactive parts hydrate afterwards.",
+            "Re-measure by comparing View Source against the rendered page.",
+        ],
+        effort="high", owner="developer",
+        rationale="Mechanism C: the gap is the exact amount of content that disappears for any "
+                  "consumer that does not execute JavaScript.",
+        affected_pages=[p["url"] for p, _ in gaps],
+    )
+
+
+def _check_image_locked(result, content_pages, shells):
+    result.check("facts-locked-in-images")
+    shell_urls = {p["url"] for p in shells}
+    locked = []
+    for page in content_pages:
+        if page["url"] in shell_urls:
+            continue  # already reported as a shell; do not double-count
+        images = page.get("images") or {}
+        text_len = page.get("body_text_len", 0)
+        if text_len >= IMAGE_DOMINANT_TEXT:
+            continue
+        if images.get("large_image_count", 0) >= 1 or images.get("count", 0) >= 5:
+            locked.append((page, "{} chars of text beside {} image(s)".format(
+                text_len, images.get("count", 0))))
+        elif images.get("svg_text_nodes", 0) >= 15 or images.get("canvas_count", 0) >= 1:
+            locked.append((page, "{} chars of text; text rendered in SVG or canvas".format(text_len)))
+
+    if not locked:
+        result.skip("facts-locked-in-images",
+                    "no content page relies on imagery to carry its main message")
+        return
+
+    result.add(
+        id_hint="facts-locked-in-images",
+        title="{} page(s) carry their main content in images rather than text".format(len(locked)),
+        severity="medium", confidence="medium",
+        evidence="Pages with under {} chars of readable text but substantial imagery: {}.".format(
+            IMAGE_DOMINANT_TEXT,
+            "; ".join("{} ({})".format(p["url"], why) for p, why in sorted(locked, key=lambda x: x[0]["url"])[:5])),
+        mechanism="C", root_cause="image-locked-facts",
+        summary="Restate the facts shown in the images as HTML text on the same page.",
+        how_to_fix=[
+            "For each page, write out in HTML what the image says: the price, the specification, "
+            "the opening hours, the offer.",
+            "Keep the image; it is the text beside it that is missing, not the design.",
+            "Give every content image a descriptive alt attribute that states its content, "
+            "not its filename.",
+            "A short paragraph above or below the image is enough; it does not need to be visible "
+            "at large size to be quotable.",
+        ],
+        effort="medium", owner="content owner",
+        rationale="Mechanism C: text baked into an image is not text. A machine that fetches the "
+                  "page sees markup around a picture and finds no fact it can lift.",
+        affected_pages=[p["url"] for p, _ in locked],
+    )
+
+
+def _check_pdf_locked(result, content_pages):
+    result.check("facts-locked-in-pdfs")
+    locked = []
+    for page in content_pages:
+        pdfs = [pdf for pdf in (page.get("pdf_links") or [])
+                if FACT_BEARING_PDF_RE.search(pdf.get("text") or "")
+                or FACT_BEARING_PDF_RE.search(pdf.get("url") or "")]
+        if not pdfs:
+            continue
+        # Only a problem when the same facts are absent from the HTML.
+        if has_price(page.get("body_text", "")):
+            continue
+        locked.append((page, pdfs[0]))
+
+    if not locked:
+        result.skip("facts-locked-in-pdfs",
+                    "no page links to a pricing or specification PDF whose numbers are missing "
+                    "from the page text")
+        return
+
+    result.add(
+        id_hint="facts-locked-in-pdfs",
+        title="Pricing or specification facts are available only inside PDFs",
+        severity="medium", confidence="medium",
+        evidence="{} page(s) link to a fact-bearing PDF while stating no equivalent figure in "
+                 "HTML. Examples: {}.".format(
+                     len(locked),
+                     "; ".join('{} -> "{}"'.format(p["url"], pdf["text"] or pdf["url"])
+                               for p, pdf in sorted(locked, key=lambda x: x[0]["url"])[:5])),
+        mechanism="C", root_cause="pdf-locked-facts",
+        summary="Publish an HTML version of the numbers that currently live only in the PDF.",
+        how_to_fix=[
+            "Create an HTML page holding the same table or figures as the PDF.",
+            "Link the PDF from that page as a download rather than as the only source.",
+            "Keep both in sync by generating the PDF from the HTML, not the other way round.",
+        ],
+        effort="medium", owner="content owner",
+        rationale="Mechanism C: PDFs are fetched inconsistently, parsed unevenly, and rarely "
+                  "quoted with confidence. A number that exists only in a PDF is a number the "
+                  "assistant will not state.",
+        affected_pages=[p["url"] for p, _ in locked],
+    )
+
+
+def _check_video_transcripts(result, content_pages):
+    result.check("video-transcripts")
+    thin_video = []
+    for page in content_pages:
+        video = page.get("video") or {}
+        if not (video.get("native_count") or video.get("embed_count")):
+            continue
+        if video.get("transcript_nearby") or video.get("track_count"):
+            continue
+        if page.get("body_text_len", 0) >= 800:
+            continue  # the page explains itself in text regardless of the video
+        thin_video.append(page)
+
+    if not thin_video:
+        result.skip("video-transcripts",
+                    "no page relies on video to carry content that is missing from its text")
+        return
+
+    result.add(
+        id_hint="video-without-transcript",
+        title="{} page(s) lead with video and carry little readable text".format(len(thin_video)),
+        severity="medium", confidence="medium",
+        evidence="Pages with an embedded or native video, no caption track, no nearby "
+                 "transcript, and under 800 chars of body text: {}.".format(
+                     ", ".join(sample([p["url"] for p in thin_video], 5))),
+        mechanism="C", root_cause="no-transcript",
+        summary="Publish a transcript or a written summary alongside each video.",
+        how_to_fix=[
+            "Generate a transcript (most video platforms produce one automatically) and paste "
+            "it into the page inside a collapsible section.",
+            "Add a 3 to 5 sentence written summary above the player stating what the video says.",
+            "Attach a <track kind=\"captions\"> file to native <video> elements.",
+        ],
+        effort="low", owner="content owner",
+        rationale="Mechanism C: nothing inside a video file is readable text. A page whose "
+                  "substance is spoken aloud is, to a machine, a page with almost nothing on it.",
+        affected_pages=[p["url"] for p in thin_video],
+    )
+
+
+def _check_iframed_content(result, content_pages, shells):
+    result.check("iframed-main-content")
+    shell_urls = {p["url"] for p in shells}
+    iframed = []
+    for page in content_pages:
+        if page["url"] in shell_urls:
+            continue
+        frames = [f for f in (page.get("iframes") or []) if not f["is_video"] and not f["is_map"]]
+        if frames and page.get("body_text_len", 0) < MIN_QUOTABLE_TEXT:
+            iframed.append((page, frames[0]))
+
+    if not iframed:
+        result.skip("iframed-main-content",
+                    "no page delegates its main content to an iframe")
+        return
+
+    result.add(
+        id_hint="main-content-in-iframe",
+        title="{} page(s) hold their main content inside an iframe".format(len(iframed)),
+        severity="medium", confidence="medium",
+        evidence="Pages with under {} chars of own text plus a non-video, non-map iframe: {}.".format(
+            MIN_QUOTABLE_TEXT,
+            "; ".join("{} (iframe: {})".format(p["url"], f["src"][:80])
+                      for p, f in sorted(iframed, key=lambda x: x[0]["url"])[:5])),
+        mechanism="C", root_cause="iframe-content",
+        summary="Move the iframed content into the page itself, or duplicate its key facts in HTML.",
+        how_to_fix=[
+            "Where the iframe hosts your own content, render it directly in the page template.",
+            "Where it is a third-party embed (a booking widget, a menu tool), write the same "
+            "core facts as HTML text above or below it.",
+        ],
+        effort="medium", owner="developer",
+        rationale="Mechanism C: an iframe is a separate document. Consumers that read the parent "
+                  "page see the frame element, not the content inside it, so the page reads as empty.",
+        affected_pages=[p["url"] for p, _ in iframed],
+    )
+
+
+def _check_alt_coverage(result, content_pages):
+    result.check("image-alt-coverage")
+    heavy = [p for p in content_pages
+             if (p.get("images") or {}).get("count", 0) >= 5
+             and (p.get("images") or {}).get("missing_alt_count", 0) > 0]
+    if not heavy:
+        result.skip("image-alt-coverage",
+                    "no image-heavy content page has images missing an alt attribute "
+                    "(an explicit alt=\"\" on a decorative image is correct and was not counted)")
+        return
+
+    total_missing = sum((p.get("images") or {}).get("missing_alt_count", 0) for p in heavy)
+    result.add(
+        id_hint="images-missing-alt-text",
+        title="{} image(s) on content pages have no alt attribute".format(total_missing),
+        severity="low", confidence="high",
+        evidence="{} image-heavy page(s) contain images with no alt attribute at all. "
+                 "Examples: {}.".format(
+                     len(heavy), ", ".join(sample([p["url"] for p in heavy], 5))),
+        mechanism="C", root_cause="alt-missing",
+        summary="Add descriptive alt text to content images and alt=\"\" to purely decorative ones.",
+        how_to_fix=[
+            "Write alt text that states what the image shows, not what the file is called.",
+            "Use alt=\"\" for decorative images so assistive technology and crawlers skip them.",
+            "Prioritise product photos, diagrams and any image containing words.",
+        ],
+        effort="low", owner="content owner",
+        rationale="Mechanism C: alt text is the only readable description of an image. It also "
+                  "matters for accessibility, so this fix pays twice.",
+        affected_pages=[p["url"] for p in heavy],
+    )
+
+
+def _check_pagination(result, snapshot, content_pages):
+    result.check("crawlable-pagination")
+    listings = [p for p in content_pages if p.get("page_type") == "category"]
+    if not listings:
+        result.skip("crawlable-pagination", "no category or listing pages were crawled")
+        return
+
+    offenders = []
+    for page in listings:
+        text = page.get("body_text", "")
+        if not LOAD_MORE_RE.search(text):
+            continue
+        internal = [l["url"] for l in (page.get("links", {}).get("internal") or [])]
+        if any(PAGINATION_RE.search(url) for url in internal):
+            continue
+        offenders.append(page)
+
+    if not offenders:
+        result.skip("crawlable-pagination",
+                    "listing pages either paginate with real links or do not use a load-more control")
+        return
+
+    result.add(
+        id_hint="load-more-without-crawlable-pagination",
+        title="{} listing page(s) hide their catalogue behind a load-more button".format(len(offenders)),
+        severity="medium", confidence="medium",
+        evidence="Listing pages containing a load-more control with no numbered pagination "
+                 "links in the HTML: {}.".format(
+                     ", ".join(sample([p["url"] for p in offenders], 5))),
+        mechanism="A", root_cause="uncrawlable-pagination",
+        summary="Add real paginated links alongside the load-more button.",
+        how_to_fix=[
+            "Render numbered page links (/category?page=2 and so on) in the HTML, even if the "
+            "button is what most visitors use.",
+            "Add <link rel=\"next\"> and <link rel=\"prev\"> to the page head.",
+            "Make sure every item is reachable through those links without JavaScript.",
+        ],
+        effort="medium", owner="developer",
+        rationale="Mechanism A: a crawler does not press buttons. Items past the first batch have "
+                  "no URL a crawler can follow, so most of the catalogue is never fetched.",
+        affected_pages=[p["url"] for p in offenders],
+    )
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--snapshot", required=True)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--no-network", action="store_true", help="accepted for interface parity")
+    args = parser.parse_args(argv)
+
+    result = run(load_snapshot(args.snapshot))
+    result.write(args.out)
+    print("{}: {} finding(s)".format(SKILL, len(result.findings)), file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

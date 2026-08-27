@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /cart
+Disallow: /checkout
+
+Sitemap: {{BASE}}/sitemap.xml

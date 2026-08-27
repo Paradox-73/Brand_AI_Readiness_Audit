@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>{{BASE}}/index.html</loc><lastmod>2026-07-30</lastmod></url>
+  <url><loc>{{BASE}}/work/index.html</loc><lastmod>2026-07-30</lastmod></url>
+  <url><loc>{{BASE}}/about.html</loc><lastmod>2026-06-12</lastmod></url>
+  <url><loc>{{BASE}}/pricing.html</loc><lastmod>2026-06-12</lastmod></url>
+  <url><loc>{{BASE}}/contact.html</loc><lastmod>2026-06-12</lastmod></url>
+</urlset>

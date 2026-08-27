@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>{{BASE}}/index.html</loc><lastmod>2021-03-02</lastmod></url>
+  <url><loc>{{BASE}}/about.html</loc><lastmod>2021-03-02</lastmod></url>
+  <url><loc>{{BASE}}/catalogue.html</loc><lastmod>2021-05-19</lastmod></url>
+  <url><loc>{{BASE}}/contact.html</loc><lastmod>2020-11-14</lastmod></url>
+  <url><loc>{{BASE}}/blog/index.html</loc><lastmod>2021-02-09</lastmod></url>
+  <url><loc>{{BASE}}/blog/lead-mining-2019.html</loc><lastmod>2019-08-21</lastmod></url>
+  <url><loc>{{BASE}}/blog/upland-farming-2020.html</loc><lastmod>2020-04-18</lastmod></url>
+  <url><loc>{{BASE}}/blog/walking-literature-2021.html</loc><lastmod>2021-02-09</lastmod></url>
+</urlset>

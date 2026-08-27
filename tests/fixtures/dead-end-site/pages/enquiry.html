@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Enquiry</title>
+<meta name="description" content="Enquiry form.">
+<link rel="canonical" href="{{BASE}}/pages/enquiry.html">
+</head>
+<body>
+<main>
+  <h1>Enquiry</h1>
+  <p>Please complete every field below so that we can respond appropriately to your enquiry.</p>
+  <form action="{{BASE}}/pages/thanks.html" method="post">
+    <label for="fn">First name</label><input id="fn" name="fn" required>
+    <label for="ln">Last name</label><input id="ln" name="ln" required>
+    <label for="co">Company</label><input id="co" name="co" required>
+    <label for="jt">Job title</label><input id="jt" name="jt" required>
+    <label for="em">Email</label><input id="em" name="em" type="email" required>
+    <label for="ph">Telephone</label><input id="ph" name="ph" required>
+    <label for="pc">Site postcode</label><input id="pc" name="pc" required>
+    <label for="sz">Site area in hectares</label><input id="sz" name="sz" required>
+    <label for="la">Local authority</label><input id="la" name="la" required>
+    <label for="rf">Planning reference</label><input id="rf" name="rf" required>
+    <label for="hr">How did you hear about us</label><input id="hr" name="hr" required>
+    <label for="ms">Message</label><textarea id="ms" name="ms" required></textarea>
+    <button type="submit">Submit</button>
+  </form>
+</main>
+</body>
+</html>

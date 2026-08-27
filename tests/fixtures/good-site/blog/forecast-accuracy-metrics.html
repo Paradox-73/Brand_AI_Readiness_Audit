@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Which forecast accuracy metric to report to a CFO | Brightpath Analytics</title>
+<meta name="description" content="MAPE breaks on intermittent demand. Brightpath reports weighted MAPE and forecast bias to finance, and this note explains why with worked numbers.">
+<link rel="canonical" href="{{BASE}}/blog/forecast-accuracy-metrics.html">
+<meta property="og:title" content="Which forecast accuracy metric to report to a CFO">
+<meta property="og:description" content="Why Brightpath reports weighted MAPE and forecast bias rather than plain MAPE.">
+<meta property="og:image" content="{{BASE}}/assets/og-metrics.png">
+<meta property="og:site_name" content="Brightpath Analytics">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Article",
+  "headline": "Which forecast accuracy metric to report to a CFO",
+  "description": "Why Brightpath reports weighted MAPE and forecast bias rather than plain MAPE.",
+  "datePublished": "2026-05-14",
+  "dateModified": "2026-06-30",
+  "author": { "@type": "Person", "name": "Dana Okonkwo", "url": "{{BASE}}/about.html" },
+  "publisher": {
+    "@type": "Organization",
+    "name": "Brightpath Analytics",
+    "logo": { "@type": "ImageObject", "url": "{{BASE}}/assets/logo.png" }
+  },
+  "mainEntityOfPage": "{{BASE}}/blog/forecast-accuracy-metrics.html"
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    { "@type": "ListItem", "position": 1, "name": "Home", "item": "{{BASE}}/index.html" },
+    { "@type": "ListItem", "position": 2, "name": "Research notes", "item": "{{BASE}}/blog/index.html" },
+    { "@type": "ListItem", "position": 3, "name": "Forecast accuracy metrics", "item": "{{BASE}}/blog/forecast-accuracy-metrics.html" }
+  ]
+}
+</script>
+</head>
+<body>
+<header>
+  <a href="{{BASE}}/index.html">Brightpath Analytics</a>
+  <nav aria-label="Main">
+    <a href="{{BASE}}/services.html">Forecasting platform</a>
+    <a href="{{BASE}}/pricing.html">Pricing</a>
+    <a href="{{BASE}}/about.html">About us</a>
+    <a href="{{BASE}}/blog/index.html">Research notes</a>
+    <a href="{{BASE}}/faq.html">FAQ</a>
+    <a href="{{BASE}}/contact.html">Contact</a>
+  </nav>
+</header>
+<main>
+  <nav aria-label="Breadcrumb" class="breadcrumb">
+    <a href="{{BASE}}/index.html">Home</a> &rsaquo;
+    <a href="{{BASE}}/blog/index.html">Research notes</a> &rsaquo;
+    <span>Forecast accuracy metrics</span>
+  </nav>
+  <article>
+    <h1>Which forecast accuracy metric to report to a CFO</h1>
+    <p>By Dana Okonkwo. Published <time datetime="2026-05-14">14 May 2026</time>.
+    Last updated <time datetime="2026-06-30">30 June 2026</time>.</p>
+
+    <p>Report weighted MAPE and forecast bias, not plain MAPE. Plain MAPE divides by actual demand,
+    so a single unit sold against a forecast of three produces a 200% error that swamps the report.</p>
+
+    <h2>Why plain MAPE misleads on slow movers</h2>
+    <p>On a SKU selling 1 unit a week, a one-unit miss is a 100% error. In a catalogue where 60% of
+    SKUs sell fewer than 5 units a week, plain MAPE reports the tail, not the business.</p>
+
+    <h2>What weighted MAPE fixes</h2>
+    <p>Weighting each SKU error by its revenue share makes the metric track the money. On a typical
+    Brightpath customer catalogue, weighted MAPE lands 18 to 24 points below plain MAPE.</p>
+
+    <h2>Why bias belongs next to it</h2>
+    <p>Accuracy without direction hides a systematic over-forecast. Report bias as signed percentage
+    of forecast, and treat anything outside plus or minus 4% as a model problem, not noise.</p>
+
+    <h2>Read next</h2>
+    <ul>
+      <li><a href="{{BASE}}/blog/safety-stock-2026.html">Recalculating safety stock after a demand shock</a></li>
+      <li><a href="{{BASE}}/pricing.html">Pricing and plan limits</a></li>
+    </ul>
+  </article>
+</main>
+<footer>
+  <p>&copy; 2026 Brightpath Analytics. 418 Harbour Street, Portland, OR 97204. +1-555-0142.</p>
+  <nav aria-label="Footer">
+    <a href="{{BASE}}/about.html">About us</a>
+    <a href="{{BASE}}/pricing.html">Pricing</a>
+    <a href="{{BASE}}/contact.html">Contact</a>
+    <a href="{{BASE}}/faq.html">FAQ</a>
+    <a href="{{BASE}}/press.html">Press</a>
+    <a href="{{BASE}}/privacy.html">Privacy</a>
+  </nav>
+</footer>
+</body>
+</html>

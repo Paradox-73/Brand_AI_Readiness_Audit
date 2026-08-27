@@ -1,0 +1,21 @@
+# Brightpath Analytics
+
+> Brightpath Analytics is a demand-forecasting platform that cuts stockouts for mid-market
+> retailers running 5 to 50 warehouses.
+
+Founded in Portland, Oregon on 11 March 2019. 31 employees. Offices in Portland and Manchester.
+Plans start at $480 per month. Contact +1-555-0142 or hello@brightpath-analytics.example.
+
+## Key pages
+
+- [Forecasting platform](/services.html): what the platform ingests and returns, and how long setup takes.
+- [Pricing](/pricing.html): Starter $480/month, Growth $1,450/month, Enterprise from $3,900/month.
+- [About](/about.html): founding facts, team and offices.
+- [FAQ](/faq.html): cost, implementation time, data requirements, contract length.
+- [Press](/press.html): approved boilerplate, founding facts and named spokesperson.
+
+## Canonical boilerplate
+
+Brightpath Analytics is a demand-forecasting platform that cuts stockouts for mid-market retailers
+running 5 to 50 warehouses. Founded in Portland, Oregon in 2019, the company serves 140 retail
+customers across the United States, the United Kingdom and Canada.

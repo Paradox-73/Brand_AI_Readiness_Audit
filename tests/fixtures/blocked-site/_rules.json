@@ -1,0 +1,15 @@
+{
+  "_comment": "Server behaviour this fixture needs that a static file server cannot express. `block_user_agents` simulates a WAF or bot manager returning 403 to a crawler that robots.txt does not disallow; `status` forces a 404 for a URL the sitemap still advertises; `headers` attaches an X-Robots-Tag that only a response header can carry.",
+  "block_user_agents": ["ChatGPT-User", "Applebot", "Amazonbot", "DuckAssistBot", "Perplexity-User"],
+  "status": {
+    "/products/discontinued-brace.html": 404
+  },
+  "headers": {
+    "/products/gate-latch.html": {
+      "X-Robots-Tag": "noindex, nofollow"
+    }
+  },
+  "redirects": {
+    "/old-catalogue.html": "/products/index.html"
+  }
+}

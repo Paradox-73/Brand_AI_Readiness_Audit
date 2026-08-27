@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>{{BASE}}/index.html</loc><lastmod>2026-07-14</lastmod></url>
+  <url><loc>{{BASE}}/about.html</loc><lastmod>2026-06-02</lastmod></url>
+  <url><loc>{{BASE}}/services.html</loc><lastmod>2026-06-19</lastmod></url>
+  <url><loc>{{BASE}}/pricing.html</loc><lastmod>2026-07-01</lastmod></url>
+  <url><loc>{{BASE}}/contact.html</loc><lastmod>2026-06-11</lastmod></url>
+  <url><loc>{{BASE}}/faq.html</loc><lastmod>2026-07-08</lastmod></url>
+  <url><loc>{{BASE}}/press.html</loc><lastmod>2026-06-25</lastmod></url>
+  <url><loc>{{BASE}}/privacy.html</loc><lastmod>2026-06-02</lastmod></url>
+  <url><loc>{{BASE}}/blog/index.html</loc><lastmod>2026-07-22</lastmod></url>
+  <url><loc>{{BASE}}/blog/safety-stock-2026.html</loc><lastmod>2026-07-22</lastmod></url>
+  <url><loc>{{BASE}}/blog/forecast-accuracy-metrics.html</loc><lastmod>2026-06-30</lastmod></url>
+</urlset>
