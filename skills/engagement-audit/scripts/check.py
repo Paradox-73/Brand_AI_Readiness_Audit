@@ -49,6 +49,13 @@ GENERIC_H1 = frozenset({
     "welcome to our site", "landing page",
 })
 
+NAV_CONTROL_LABELS = frozenset({
+    "menu", "search", "close", "open menu", "close menu", "toggle menu",
+    "skip to content", "skip to main content", "skip navigation", "back",
+    "home", "cart", "basket", "account", "sign in", "log in", "login",
+    "language", "accessibility", "share", "subscribe",
+})
+
 GENERIC_NAV_LABELS = frozenset({
     "products", "services", "solutions", "more", "menu", "other", "misc",
     "resources", "company", "info", "information", "stuff", "items", "pages",
@@ -162,6 +169,10 @@ def _check_navigation(result, home, pages):
     source = home or pages[0]
     nav = source.get("links", {}).get("nav") or []
     labels = [link["text"].strip() for link in nav if link["text"].strip()]
+    # Drop interface controls. "Menu", "Search" and "Skip to content" are
+    # affordances, not destinations, and counting them made a real site's
+    # navigation look both larger and vaguer than it is.
+    labels = [label for label in labels if label.lower() not in NAV_CONTROL_LABELS]
     unique_labels = list(dict.fromkeys(labels))
     result.signal("nav_item_count", len(unique_labels))
 
@@ -265,6 +276,17 @@ def _check_orphans(result, snapshot, pages):
     if len(sitemap_urls) < 5:
         result.skip("orphan-pages",
                     "the sitemap lists fewer than 5 URLs, too few to identify orphans reliably")
+        return
+
+    # On a large site a 30-page crawl sees a tiny slice, so "no crawled page
+    # links here" says more about the budget than about the site. Only judge
+    # orphans when the crawl covered a meaningful share of the sitemap.
+    crawled_count = len(pages_of(snapshot))
+    if snapshot.get("crawl", {}).get("budget_exhausted") or len(sitemap_urls) > crawled_count * 3:
+        result.skip("orphan-pages",
+                    "the sitemap lists {} URLs but only {} pages were crawled, so an absent "
+                    "internal link is more likely to reflect the crawl budget than a genuine "
+                    "orphan".format(len(sitemap_urls), crawled_count))
         return
 
     linked = set()
@@ -418,7 +440,9 @@ def _check_title_body_drift(result, pages):
         # Drop the brand suffix: it appears in every title and would mask drift.
         title = re.split(r"\s[|\-–—:·•]\s", page["title"])[0]
         tokens = {w for w in re.findall(r"[a-z]{4,}", title.lower()) if w not in STOPWORDS}
-        if not tokens:
+        # A title like "Welcome to GOV.UK" reduces to one content word, and a
+        # single miss then reads as 100% drift. Two tokens minimum.
+        if len(tokens) < 2:
             continue
         body = page.get("body_text", "").lower()
         matched = sum(1 for t in tokens if t[:6] in body)
@@ -475,6 +499,14 @@ def _check_chrome_consistency(result, pages):
                     "covers rather than this one")
         return
     common, common_count = counts.most_common(1)[0]
+    # One page with a big menu among nineteen without one does not establish a
+    # site norm, and treating it as one flagged every page including itself.
+    if common_count < 2 or common_count < len(pages) * 0.2:
+        result.skip("consistent-site-chrome",
+                    "no header or footer navigation appears on enough pages to establish what "
+                    "this site's normal chrome looks like ({} of {} pages share the most "
+                    "common one)".format(common_count, len(pages)))
+        return
 
     stranded = []
     for page, signature in zip(pages, signatures):

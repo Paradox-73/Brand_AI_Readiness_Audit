@@ -213,21 +213,50 @@ def sentences(text):
 # Page-type detection
 # --------------------------------------------------------------------------
 
-_URL_TYPE_PATTERNS = (
-    ("legal", r"/(privacy|terms|tos|legal|cookie|gdpr|imprint|disclaimer|accessibility)"),
-    ("careers", r"/(careers?|jobs?|work-with-us|join-us)"),
-    ("press", r"/(press|newsroom|media-kit|media-centre|media-center|brand-assets)"),
-    ("comparison", r"/(compare|comparison|alternatives?|-vs-|/vs/)"),
-    ("faq", r"/(faqs?|frequently-asked|help-cent(er|re)|support/faq)"),
-    ("pricing", r"/(pricing|plans?|price[sy]?|packages?|rates?|subscribe)"),
-    ("contact", r"/(contact|get-in-touch|reach-us|enquir|inquir)"),
-    ("about", r"/(about|company|who-we-are|our-story|our-team|team|mission|history)"),
-    ("location", r"/(locations?|stores?|branch|showroom|find-us|visit-us|our-offices?)"),
-    ("article", r"/(blog|news|articles?|posts?|insights?|stories|resources?/|guides?/|/20\d\d/)"),
-    ("product", r"/(products?|item|/p/|/sku/|shop/[^/]+/[^/]+)"),
-    ("category", r"/(collections?|categor(y|ies)|catalog(ue)?|shop/?$|store/?$|browse)"),
-    ("service", r"/(services?|solutions?|what-we-do|capabilities|offerings?|expertise)"),
+# Type slugs, matched against whole path *segments*. Substring matching was
+# classifying `/2004/Jun/29/job/` as a careers page and
+# `/2002/Jul/3/alternativeValidatorIcons/` as a comparison page, because "job"
+# and "alternative" appeared somewhere in the path. A slug only counts when it
+# is a segment, or the start of a hyphenated segment ("about" matches
+# "about-us" but not "roundabout").
+_URL_TYPE_SLUGS = (
+    ("legal", ("privacy", "privacy-policy", "terms", "tos", "legal", "cookie", "cookies",
+               "gdpr", "imprint", "disclaimer", "accessibility", "eula")),
+    ("careers", ("career", "careers", "job", "jobs", "vacancies", "work-with-us", "join-us")),
+    ("press", ("press", "newsroom", "media-kit", "media-centre", "media-center",
+               "brand-assets", "press-kit")),
+    ("comparison", ("compare", "comparison", "alternative", "alternatives", "vs", "versus")),
+    ("faq", ("faq", "faqs", "frequently-asked-questions", "help-center", "help-centre")),
+    ("pricing", ("pricing", "price", "prices", "plan", "plans", "packages", "rates",
+                 "subscribe", "membership")),
+    ("contact", ("contact", "contact-us", "get-in-touch", "reach-us", "enquiries",
+                 "inquiries", "enquiry")),
+    ("about", ("about", "about-us", "company", "who-we-are", "our-story", "our-team",
+               "team", "mission", "history")),
+    ("location", ("location", "locations", "store", "stores", "branch", "branches",
+                  "showroom", "find-us", "visit-us", "offices")),
+    ("article", ("blog", "news", "article", "articles", "post", "posts", "insight",
+                 "insights", "stories", "story", "guides", "resources", "journal")),
+    ("product", ("product", "products", "item", "p", "sku")),
+    ("category", ("collection", "collections", "category", "categories", "catalog",
+                  "catalogue", "shop", "browse")),
+    ("service", ("service", "services", "solution", "solutions", "what-we-do",
+                 "capabilities", "offerings", "expertise")),
 )
+
+_URL_TYPE_PATTERNS = tuple(
+    # Boundary includes `.` so `/about.html` counts, and `-` so `/about-us`
+    # counts, while `/roundabout` and `/2004/Jun/29/job/`-style slugs inside
+    # dated permalinks do not.
+    (page_type, r"(?:^|/)(?:{})(?:$|/|-|\.)".format(
+        "|".join(re.escape(slug) for slug in slugs)))
+    for page_type, slugs in _URL_TYPE_SLUGS
+)
+
+# A dated permalink is an article whatever its slug says, and a bare year is
+# that year's archive index.
+_DATED_PERMALINK_RE = re.compile(r"/(?:19|20)\d{2}(?:/[^/]+){1,}/?$")
+_YEAR_ARCHIVE_RE = re.compile(r"^/(?:19|20)\d{2}(?:/[a-z]{3,9})?/?$", re.I)
 
 # Buying affordances that only appear on a real product detail page. Generic
 # commerce words ("quantity", "sku") are deliberately excluded: they show up in
@@ -273,6 +302,14 @@ def detect_page_type(url, html_meta):
     if path == "/" and not parsed.query:
         return "home"
 
+    # Date-shaped paths are decided before anything else. A blog permalink such
+    # as /2004/Jun/29/job/ ends in a slug that would otherwise be read as a
+    # careers page, and its date is far stronger evidence than its slug.
+    if _YEAR_ARCHIVE_RE.match(path):
+        return "category"
+    if _DATED_PERMALINK_RE.search(path):
+        return "article"
+
     # Unambiguous URL slugs win outright. A pricing page that also carries
     # Product schema is still a pricing page, and classifying it as a product
     # would make every downstream expectation wrong.
@@ -293,9 +330,14 @@ def detect_page_type(url, html_meta):
 
     for page_type, pattern in _URL_TYPE_PATTERNS:
         if re.search(pattern, path):
-            # A `/products` listing is a category page, not a product page.
+            # The product/category distinction is decided by the page, not the
+            # slug, and it runs both ways: `/products` with no buying
+            # affordances is a listing, and `/shop/<item>` with a price and an
+            # add-to-cart control is a product detail page.
             if page_type == "product" and not _looks_like_product_detail(lower_text, html_meta):
                 return "category"
+            if page_type == "category" and _looks_like_product_detail(lower_text, html_meta):
+                return "product"
             # `/blog` is the index of a section; `/blog/a-post` is the article.
             # Treating the index as an article would demand `datePublished` and
             # an author on a page that is a list of links.

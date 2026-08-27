@@ -65,7 +65,8 @@ def parse_date(value):
             return dt.date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
         except ValueError:
             return None
-    match = re.search(r"\b(\d{1,2})\s+([A-Za-z]{3,})\.?\s+((?:19|20)\d{2})\b", text)
+    match = re.search(r"\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,})\.?\s+((?:19|20)\d{2})\b",
+                      text, re.I)
     if match and match.group(2)[:3].lower() in _MONTHS:
         try:
             return dt.date(int(match.group(3)), _MONTHS[match.group(2)[:3].lower()], int(match.group(1)))
@@ -167,7 +168,9 @@ def _check_article_freshness(result, pages, now):
 
     result.add(
         id_hint="published-content-has-gone-stale",
-        title="The site's published content has not been updated in over a year",
+        # Scoped to what was crawled. On a large site the audit sees a sample,
+        # and claiming the whole site has stalled would overstate the evidence.
+        title="The articles reached by this crawl have not been updated in over a year",
         severity="medium", confidence="high",
         evidence="{} of {} dated article(s) ({}%) are older than {} months, and the newest is "
                  "{} ({} months old). Examples: {}.".format(
@@ -434,7 +437,16 @@ def _check_entity_ambiguity(result, snapshot, pages, brand, profiles, fetcher, a
         result.skip("entity-ambiguity", "the Wikidata search API returned an unreadable response")
         return
 
-    matches = payload.get("search") or []
+    # Wikidata search matches by prefix, so "GOV.UK" returns "GOV.UK One Login"
+    # and "GOV.UK Verify" - the same organisation's own services, not a name
+    # collision. Only entities whose label is essentially the brand name count.
+    def _key(value):
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+    brand_key = _key(brand_name)
+    matches = [m for m in (payload.get("search") or [])
+               if _key(m.get("label")) == brand_key
+               or brand_key in {_key(a) for a in (m.get("aliases") or [])}]
     result.signal("wikidata_match_count", len(matches))
     result.signal("wikidata_matches",
                   [{"id": m.get("id"), "label": m.get("label"),

@@ -316,8 +316,12 @@ def build_recommendations(snapshot, signals, findings):
         "those third parties copy.",
         "low", "marketing")
 
+    # Fires for any site with a dating problem, not only one with no dates at
+    # all: a site whose content has gone stale, or which dates some pages and
+    # not others, is exactly the site that needs a review cadence.
     add("R-DATE-SIGNALS", "Show a visible last-updated date and review cadence",
-        signals.get("no_date_signals"),
+        signals.get("no_date_signals")
+        or bool({"no-date-signal", "stale-content"} & root_causes),
         "Add a visible updated date plus dateModified to evergreen pages, and review them on a schedule.",
         ["Add \"Last updated <date>\" to key pages, wrapped in <time datetime=\"YYYY-MM-DD\">.",
          "Mirror it in dateModified in structured data.",
@@ -387,6 +391,27 @@ def build_recommendations(snapshot, signals, findings):
         "difference between one page and a session.",
         "medium", "developer")
 
+    add("R-BRAND-TERMINOLOGY", "Name your own components so machines must use your words",
+        bool({"product", "service", "pricing"} & page_types),
+        "Give the things that make the product distinctive proper names, and define those "
+        "names in both the page text and the structured data.",
+        ['Replace generic descriptions with a coined, capitalised term plus its definition: '
+         '"a recycled sole" becomes "the Aero-Flyte sole, a recycled EVA midsole rated to '
+         '800km".',
+         "Define the term once, in a sentence, the first time it appears on the page.",
+         "Carry the same term into structured data: Product `additionalProperty`, "
+         "`material`, or a named `PropertyValue`, so it is an assertion rather than adjective.",
+         "Use the identical term everywhere: site, spec sheets, packaging, retail partner "
+         "feeds and press releases.",
+         "Coin sparingly. Three defended terms beat twenty; a page of invented words with no "
+         "definitions reads as noise and gets discarded.",],
+        "B",
+        "Assistants extract explicit factual entities and discard the marketing copy around "
+        "them, which is why brands come back flattened into generic specifications. A named, "
+        "defined component is a fact rather than an adjective, so it survives extraction and "
+        "the brand's own vocabulary has to be used to describe the product accurately.",
+        "medium", "marketing")
+
     add("R-AUTHOR-PAGES", "Give articles named authors with credentials",
         bool(signals.get("articles_without_author")) and "article" in page_types,
         "Attribute every article to a real, described person.",
@@ -448,7 +473,7 @@ def compose(snapshot, skill_results, audited_at=None):
             "medium": counts["medium"],
             "low": counts["low"],
             "info": counts["info"],
-            "verdict": _verdict(counts, findings),
+            "verdict": _verdict(counts, findings, crawl),
         },
         "findings": [_public_finding(f) for f in findings],
         "start_here": start_here,
@@ -508,7 +533,13 @@ def _public_finding(finding):
     return out
 
 
-def _verdict(counts, findings):
+def _verdict(counts, findings, crawl=None):
+    # A robots-blocked run reports almost nothing, and without saying why that
+    # looks like a broken audit rather than a respected instruction.
+    if (crawl or {}).get("audit_blocked_by_robots"):
+        return ("This site's robots.txt disallows this auditor, so no pages were fetched and "
+                "the findings below come from robots.txt alone. That is the file working as "
+                "intended; it also means any crawler that respects it sees exactly as little.")
     if counts["critical"]:
         return ("Machines are being shut out before they read anything. {} critical problem(s) "
                 "block access or delivery, and nothing else on the site can compensate until "

@@ -32,6 +32,10 @@ SKILL = "structured-data-audit"
 ORG_TYPES = {"organization", "localbusiness", "corporation", "store", "restaurant",
              "ngo", "educationalorganization", "governmentorganization", "onlinestore",
              "professionalservice", "medicalbusiness", "financialservice", "brand"}
+# A personal site's identity is a Person, not an Organization. Demanding
+# Organization markup from an individual's blog is a false positive, so Person
+# satisfies the identity check even though it is not an organisation type.
+IDENTITY_TYPES = ORG_TYPES | {"person"}
 PRODUCT_TYPES = {"product", "productgroup", "productmodel", "vehicle", "individualproduct"}
 ARTICLE_TYPES = {"article", "blogposting", "newsarticle", "techarticle", "report",
                  "scholarlyarticle", "liveblogposting"}
@@ -210,6 +214,14 @@ def _check_organization(result, snapshot, pages, by_type, brand):
         return
 
     org_nodes = [(p, n) for p in pages for n in _nodes_of(p, ORG_TYPES)]
+    person_nodes = [(p, n) for p in pages for n in _nodes_of(p, {"person"})]
+
+    if not org_nodes and person_nodes:
+        result.skip("organization-markup",
+                    "the site declares a Person rather than an Organization on {}, which is "
+                    "the correct identity type for a personal site".format(person_nodes[0][0]["url"]))
+        return
+
     if not org_nodes:
         result.add(
             id_hint="no-organization-schema",

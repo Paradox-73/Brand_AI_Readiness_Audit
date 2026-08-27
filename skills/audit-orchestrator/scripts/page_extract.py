@@ -76,9 +76,14 @@ SOCIAL_PLATFORMS = {
     "bsky.app": "Bluesky",
 }
 
+# Ordinal suffixes are allowed on the day: "3rd November 2025" is how a great
+# many real sites write a date, and requiring a bare digit reported those pages
+# as carrying no date at all.
 DATE_TEXT_RE = re.compile(
-    r"\b(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+(?:19|20)\d{2}"
-    r"|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(?:19|20)\d{2}"
+    r"\b(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+"
+    r"\d{1,2}(?:st|nd|rd|th)?,?\s+(?:19|20)\d{2}"
+    r"|\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?"
+    r"\s+(?:19|20)\d{2}"
     r"|(?:19|20)\d{2}-\d{2}-\d{2}"
     r"|\d{1,2}/\d{1,2}/(?:19|20)\d{2})\b",
     re.I,
@@ -666,7 +671,16 @@ def _dates(soup, text, jsonld):
             if isinstance(value, str) and value:
                 machine.append(value.strip())
     visible = [m.group(0) for m in DATE_TEXT_RE.finditer(text)][:10]
-    copyright_years = [int(m.group(1)) for m in COPYRIGHT_YEAR_RE.finditer(text)]
+    copyright_years = []
+    for match in COPYRIGHT_YEAR_RE.finditer(text):
+        copyright_years.append(int(match.group(1)))
+        # Some footers list every year rather than a range ("© 2002 2003 2004
+        # … 2026"). Reading only the anchored year reported the site as 24
+        # years stale, so take the whole run that follows.
+        tail = text[match.end():match.end() + 160]
+        run = re.match(r"(?:\s*[-–—,]?\s*(?:19|20)\d{2})+", tail)
+        if run:
+            copyright_years.extend(int(y) for y in re.findall(r"(?:19|20)\d{2}", run.group(0)))
     as_of_years = [int(m.group(1)) for m in AS_OF_YEAR_RE.finditer(text)]
     return {
         "machine_readable": sorted(set(machine))[:10],
@@ -712,8 +726,27 @@ def _contact_facts(text, soup):
     }
 
 
+# A share button points at a social platform but is not a profile on it.
+# Counting `facebook.com/sharer/sharer.php?u=...` as the brand's Facebook page
+# inflated corroboration on every site with share widgets.
+_SHARE_URL_RE = re.compile(
+    r"/(?:sharer|share|shareArticle|intent|share_url|submit)\b"
+    r"|share\.php|/intent/(?:tweet|post)|[?&](?:u|url|text|via|mini)=", re.I)
+
+# LinkedIn personal profiles (`/in/<person>`) are people, not the organisation.
+# One was being counted as a company's own LinkedIn because a customer story
+# linked to an individual.
+_PROFILE_PATH_RULES = {
+    "LinkedIn": re.compile(r"linkedin\.com/(?:company|school|showcase)/", re.I),
+}
+
+
 def _social_profiles(external_links, jsonld):
-    """Authoritative off-site profiles this page points at."""
+    """Authoritative off-site profiles this page points at.
+
+    Only genuine profile URLs count. Share widgets and personal profiles are
+    excluded, because both would overstate how well corroborated a brand is.
+    """
     found = {}
     candidates = [link["url"] for link in external_links]
     for node in jsonld:
@@ -722,11 +755,18 @@ def _social_profiles(external_links, jsonld):
             candidates.append(same_as)
         elif isinstance(same_as, list):
             candidates.extend(str(v) for v in same_as)
+
     for url in candidates:
         low = url.lower()
+        if _SHARE_URL_RE.search(low):
+            continue
         for domain, platform in SOCIAL_PLATFORMS.items():
-            if domain in low:
-                found.setdefault(platform, url)
+            if domain not in low:
+                continue
+            rule = _PROFILE_PATH_RULES.get(platform)
+            if rule and not rule.search(low):
+                continue
+            found.setdefault(platform, url)
     return dict(sorted(found.items()))
 
 
@@ -734,10 +774,18 @@ def _interstitial(soup):
     markup = str(soup)[:200000].lower()
     cookie = [hint for hint in COOKIE_BANNER_HINTS if hint in markup]
     modal = [hint for hint in MODAL_HINTS if hint in markup]
+    # Substring class matching flagged 18 of 20 pages on a real retail site,
+    # because `class="modal-opener"` contains both "modal" and "open". Match
+    # whole class tokens, and require the element to be genuinely displayed.
     blocking = bool(soup.select(
-        '[class*="modal"][class*="open"], [aria-modal="true"], '
-        '[class*="overlay"][class*="active"], dialog[open]'
+        'dialog[open], [aria-modal="true"][role="dialog"], '
+        '[class~="modal"][class~="open"], [class~="modal"][class~="is-open"], '
+        '[class~="overlay"][class~="active"], [class~="modal"][class~="show"]'
     ))
+    for node in soup.select('[aria-modal="true"][role="dialog"]'):
+        # A dialog explicitly hidden on first paint covers nothing.
+        if node.get("hidden") is not None or "display:none" in (node.get("style") or "").replace(" ", ""):
+            blocking = False
     return {
         "cookie_banner_hints": cookie[:5],
         "modal_hints": modal[:5],

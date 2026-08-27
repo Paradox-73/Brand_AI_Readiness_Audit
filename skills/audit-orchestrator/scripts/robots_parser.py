@@ -143,12 +143,26 @@ _BENIGN_DISALLOW = re.compile(
 )
 
 
+# Tokens that make a rule plumbing wherever they appear, not only at the start.
+# Real robots.txt files are full of rules like `/*/print$`, `/*?*add-to-cart=`
+# and `/collections/*+*`, which an anchored match treated as real content.
+_BENIGN_ANYWHERE = re.compile(
+    r"(?:^|[/*?&=_-])(?:print|preview|draft|cart|checkout|basket|login|signin|"
+    r"logout|register|signup|account|admin|search|filter|sort|sortby|orderby|"
+    r"session|sessionid|utm_|replytocom|add-to-cart|wishlist|compare|currency|"
+    r"variant|cgi-bin|feed|rss|atom|json|xml|api|graphql|amp)\b", re.I)
+
+
 def benign_disallow(rule):
-    """True for the admin/cart/search paths every site blocks on purpose."""
+    """True for the admin/cart/search/parameter paths every site blocks on purpose."""
     rule = (rule or "").strip()
     if not rule or rule in ("/", "/*"):
         return False
-    return bool(_BENIGN_DISALLOW.match(rule))
+    # A rule that is only a parameter or wildcard filter blocks duplicates,
+    # not content.
+    if rule.startswith(("/*?", "/?", "*?")) or rule.count("*") >= 2:
+        return True
+    return bool(_BENIGN_DISALLOW.match(rule) or _BENIGN_ANYWHERE.search(rule))
 
 
 def substantive_disallows(parsed, agent):

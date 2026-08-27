@@ -544,17 +544,34 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages):
     home_url = snapshot["origin"].rstrip("/") + "/"
     home = next((p for p in pages if p["url"] == home_url), None)
     if home is not None and home.get("status") != 200:
+        status = home.get("status")
+        # A 403 or 429 to an identified, rate-limited, robots-respecting crawler
+        # is a bot rule, not an outage, and the fix is completely different.
+        looks_like_bot_block = status in (401, 403, 405, 406, 429)
         result.add(
             id_hint="homepage-not-reachable",
-            title="The homepage does not return HTTP 200",
+            title="The homepage refuses this crawler" if looks_like_bot_block
+                  else "The homepage does not return HTTP 200",
             severity="critical", confidence="high",
-            evidence="{} returned {}.".format(
-                home_url, home.get("status") or "no response ({})".format(home.get("error"))),
+            evidence="{} returned {}.{}".format(
+                home_url, status or "no response ({})".format(home.get("error")),
+                " The request identified itself as an audit crawler, respected robots.txt and "
+                "was rate limited, so this is a bot-management rule rather than an outage."
+                if looks_like_bot_block else ""),
             mechanism="A", root_cause="non-200",
-            summary="Restore a 200 response on the homepage.",
+            summary="Allow identified crawlers to fetch the homepage."
+                    if looks_like_bot_block else "Restore a 200 response on the homepage.",
             how_to_fix=[
-                "Request the homepage and read the server or CDN log for the failing request.",
-                "If the homepage has moved, return a 301 to the new location rather than an error.",
+                "Check your CDN or WAF bot rules: a blanket block on unrecognised user agents "
+                "also blocks every AI answer crawler." if looks_like_bot_block
+                else "Request the homepage and read the server or CDN log for the failing request.",
+                "Allow-list the AI answer crawlers by user agent, keeping rate limits in place."
+                if looks_like_bot_block
+                else "If the homepage has moved, return a 301 to the new location rather than an error.",
+                "Verify by requesting the homepage with each crawler's user-agent string and "
+                "confirming a 200 with real HTML rather than a challenge page."
+                if looks_like_bot_block
+                else "Check whether a CDN rule or origin health check is failing.",
             ],
             effort="high", owner="developer",
             rationale="Mechanism A: the homepage is the entry point almost every crawler and "
