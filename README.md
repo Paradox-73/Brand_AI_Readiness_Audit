@@ -1,115 +1,121 @@
 # brand-ai-readiness-audit
 
-An Agent Skill Marketplace that audits any website for two things at once:
+This marketplace audits a website for two problems at the same time:
 
-- **Off-site discoverability** — why AI assistants cannot find, read, trust or correctly
+- **Off-site discoverability.** AI assistants cannot find, read, trust or correctly
   describe the brand.
-- **On-site engagement** — why visitors who *do* arrive from an AI answer leave again.
+- **On-site engagement.** Visitors who arrive from an AI answer leave again.
 
-It crawls a site once, runs six specialist skills over that single snapshot, and emits one
-prioritised report of evidence-backed findings with concrete fixes, plus proactive
-recommendations that apply even where nothing is broken.
+The audit crawls the site one time. Six specialist skills read that one crawl. The
+entrypoint then writes one report. The report lists the problems, gives the evidence, and
+gives the fix for each one. It also recommends improvements where the audit found no fault.
 
-**Recommend-only.** Nothing here writes to, logs into, or hammers a website. GET and HEAD
-only, robots.txt respected, forms never submitted.
+**The audit only reads.** It does not write to a site, sign in to a site, or send many
+requests to a site. It uses the GET and HEAD methods only. It obeys robots.txt. It does not
+send forms.
 
 ```bash
 pip install -r requirements.txt
 python run_audit.py https://example.com
-# -> out/report.json  and  out/report.md
+# The audit writes out/report.json and out/report.md
 ```
+
+Documentation in this repository follows Simplified Technical English (ASD-STE100). Read
+`PROGRESS.md` for the current status, and `DECISIONS.md` for the decisions we made.
 
 ---
 
-## The idea in one paragraph
+## The idea
 
-A page is only visible to a machine if three gates open in order: the crawler is **let in**,
-it can **read** what is delivered, and it can **extract** the specific fact it needs. Most
-audits check the first gate and stop. This marketplace checks all three, then asks the
-question almost nobody encodes — *if an assistant fetched this page to answer "what is X" or
-"how much does X cost", is there a sentence it could lift verbatim?* — and finally checks
-what happens to the human who clicks through. Every check traces back to a numbered
-mechanism, and every finding cites the one it repairs.
+A machine can see a page only if three gates open, in this order:
 
-## The six skills, and why they are six
+1. The crawler **gets in**.
+2. The crawler **reads** what the server sends.
+3. The crawler **finds the fact** that it needs.
 
-The entrypoint owns the crawl, composition, scoring and recommendations. Each sub-skill owns
-exactly one mechanism gate, and no skill duplicates another's checks.
+Most audits examine the first gate only. This marketplace examines all three. It then asks
+a question that few audits ask. If an assistant reads this page to answer "what is X" or
+"how much does X cost", is there a sentence that it can quote? Last, it examines the person
+who opens the page. Each check refers to a numbered mechanism. Each finding names the
+mechanism that its fix repairs.
 
-| Skill | Gate | Answers |
+## The six skills
+
+The entrypoint controls the crawl, the scoring and the recommendations. Each sub-skill
+examines one gate. No sub-skill repeats the checks of another sub-skill.
+
+| Skill | Gate | What it examines |
 |---|---|---|
-| **`crawl-access-audit`** | A — let in | robots.txt, which *named* AI crawlers are blocked and whether that costs citations or only training data, WAF/bot-manager blocks robots.txt cannot show, sitemaps, status codes, `noindex`, canonicals |
-| **`render-readability-audit`** | A/C — can read | JavaScript shells, facts locked in images, PDFs, video or iframes, uncrawlable "load more" pagination |
-| **`structured-data-audit`** | C — machine-readable facts | JSON-LD presence, validity and completeness **keyed to detected page type**, and whether the markup agrees with the visible page |
-| **`fact-extractability-audit`** | C — quotable facts | Is there a `<Brand> is a <category> that...` sentence? Do sections answer first or warm up? Are price, location, contact and founding facts stated in plain text at all? |
-| **`freshness-corroboration-audit`** | D — trusted | Staleness, missing date signals, how many authoritative profiles corroborate the brand, whether other entities share its name, and whether the site contradicts itself |
-| **`engagement-audit`** | G — visitor stays | Orientation above the fold, dead ends, orphan pages, broken links, breadcrumbs, title–body drift, interstitials, form friction |
+| **`crawl-access-audit`** | A: gets in | robots.txt, blocked AI crawlers, bot managers, sitemaps, status codes, `noindex`, canonical tags |
+| **`render-readability-audit`** | A/C: reads | JavaScript shells, facts inside images, PDFs, video or iframes, catalogues behind a button |
+| **`structured-data-audit`** | C: machine-readable facts | JSON-LD presence, validity and completeness for each page type, and agreement with the page |
+| **`fact-extractability-audit`** | C: quotable facts | The one-sentence definition of the brand, answer-first sections, price, address, contact and founding facts |
+| **`freshness-corroboration-audit`** | D: trusted | Old content, missing dates, off-site profiles, name conflicts, and pages that disagree with each other |
+| **`engagement-audit`** | G: visitor stays | Orientation, dead ends, orphan pages, broken links, breadcrumbs, interstitials, form length |
 
-Gate A is split across two skills on purpose: "the crawler was refused" and "the crawler was
-served an empty div" are different failures with different owners and different fixes.
+Two skills examine gate A. This is deliberate. "The server refused the crawler" and "the
+server sent an empty page" are different faults. They have different fixes, and different
+people correct them.
 
-## How the entrypoint composes them
+## How the entrypoint joins the skills
 
 ```
 run_audit.py
-  │
-  ├─ 1. crawl.py  ──────────────►  snapshot.json      one crawl, shared by everything
-  │      robots.txt · sitemaps · /llms.txt · homepage
-  │      · 8 sitemap URLs sampled seed-42 across page types · BFS to depth 2
-  │      caps: 30 pages · 240 s wall clock · 10 s/request · 0.5 s delay · single thread
-  │
-  ├─ 2. six × check.py --snapshot snapshot.json --out <skill>.findings.json
-  │      run in gate order; earlier skills own overlapping observations
-  │
-  └─ 3. compose_report.py  ─────►  report.json + report.md
-         dedup · stable IDs · priority · citation simulation · recommendations
+  |
+  |- 1. crawl.py  ------------->  snapshot.json     one crawl for all six skills
+  |      robots.txt, sitemaps, /llms.txt, the homepage,
+  |      8 sitemap pages, then links to depth 2
+  |      Limits: 30 pages, 240 s, 10 s per request, 0.5 s between requests
+  |
+  |- 2. six x check.py --snapshot snapshot.json --out <skill>.findings.json
+  |      They run in gate order. An earlier skill owns a shared observation.
+  |
+  |- 3. compose_report.py  ---->  report.json and report.md
+         It merges duplicates, sets IDs, scores priority, and adds recommendations.
 ```
 
-Three things make this a composition rather than six scripts in a trench coat:
+Three things make this one system, and not six separate scripts:
 
-1. **One crawl.** Sub-skills read fields off the snapshot instead of re-fetching. A few make
-   small, declared extra requests (bot-UA probe: 2; sitemap probes: 8; Wikidata: 4; internal
-   link checks: 20) and each reports its own count.
-2. **A shared vocabulary.** One finding schema, one severity scale, one fixed set of ~45
-   `root_cause` tags, defined once in `skills/audit-orchestrator/scripts/audit_common.py`.
-   A skill that invents a tag fails immediately rather than silently failing to deduplicate.
-3. **Ordered dedup.** When two skills observe the same root cause on the same pages, the
-   earlier one keeps the finding and the later one's evidence is merged in. Merges are listed
-   in the report so nothing disappears quietly.
+1. **One crawl.** Each sub-skill reads fields from the snapshot. It does not read the site
+   again. A few skills make a small number of extra requests. Each one declares that number
+   and reports it.
+2. **One vocabulary.** One finding format, one severity scale, and one fixed set of about
+   45 `root_cause` tags. `audit_common.py` defines them one time. A skill that invents a tag
+   fails immediately.
+3. **Ordered merge.** Two skills can see the same fault. The earlier skill keeps the
+   finding. The report lists each merge, so nothing disappears.
 
-## Prioritisation
+## How the report sets priority
 
-`priority = severity_weight × reach ÷ effort`
+```
+priority = severity weight x reach / effort
+```
 
-Severity alone would put a critical problem on one page above a cheap fix affecting every
-page. Reach is the share of crawled pages a finding touches (floored at 0.25; findings with
-no attributed pages are site-wide and get full reach); effort divides by 1, 1.5 or 2. The top
-three become the report's **Start here** section. Details in
-`skills/audit-orchestrator/references/severity-and-priority.md`.
+Severity alone is not sufficient. A serious fault on one page can matter less than a small
+fix that improves every page. Reach is the share of crawled pages that the finding affects.
+Effort divides the score. The three highest scores become the **Start here** section.
 
-## Low false positives is the design goal
+`skills/audit-orchestrator/references/severity-and-priority.md` explains the numbers.
 
-A report of six correct findings beats a report of thirty maybes. So:
+## We designed the audit to report few false alarms
 
-- **Every check declares when it does not apply**, and says so in the report's appendix.
-  "No product pages were detected on this site, so Product markup is not expected" is an
-  output, not a silence.
-- **Expectations are keyed to detected page type.** Never Product schema on a site with no
-  products; never an author byline on a pricing page.
-- **Thresholds are numbers with reasons.** 300 characters of visible text, because below
-  that a page carries no quotable fact. 18 months, because that is where "recent" stops being
-  defensible.
-- **Deliberate choices are not defects.** Blocking training crawlers is reported as `info`,
-  not as a problem. A cookie banner alone is not an intrusive interstitial. `alt=""` on a
-  decorative image is correct and is not counted as missing.
-- **`tests/fixtures/good-site` is the guard.** A well-built site must produce **zero**
-  findings. It currently does. Reaching zero is what surfaced seven real bugs — including a
-  price comparison that read `480.00` as different from `$480`, and "founded **in 2019**"
-  being scored as a staleness claim.
+Six correct findings are worth more than 30 uncertain ones. Therefore:
 
-## Sample report excerpt
+- **Each check states when it does not apply.** The report appendix gives the reason. "This
+  site has no product pages, so Product markup is not expected" is a result, not silence.
+- **Expectations follow the page type.** The audit never asks for Product markup from a site
+  that sells nothing. It never asks for an author on a pricing page.
+- **Each limit is a number with a reason.** 300 characters, because a shorter page holds no
+  quotable fact. 18 months, because "recent" is not correct after that time.
+- **A deliberate choice is not a fault.** A site can block AI training crawlers. The report
+  records this as information. A cookie banner alone is not an interruption. An empty `alt`
+  on a decorative image is correct.
+- **`tests/fixtures/good-site` proves this.** That site has no faults, and it must produce
+  zero findings. It does. This test found seven real bugs.
 
-Real output, from `tests/fixtures/js-shell-site`:
+## Example from a report
+
+This text comes from a real run against `tests/fixtures/js-shell-site`:
 
 > ### F-001 — The homepage is delivered as an empty JavaScript shell
 >
@@ -117,8 +123,7 @@ Real output, from `tests/fixtures/js-shell-site`:
 >
 > **What we found.** `https://example.com/`: framework root `#__next` contains 0 chars;
 > content held in `__NEXT_DATA__`, `__INITIAL_STATE__` rather than in HTML; `<noscript>`
-> tells the visitor to enable JavaScript. No rendered pass was available on this machine, so
-> it could not be confirmed whether JavaScript recovers the text.
+> tells the visitor to enable JavaScript.
 >
 > **Why it matters.** Mechanism C: a page that looks complete to a human can be empty to a
 > machine. Many crawlers and assistant fetchers read only the first HTML response, so an
@@ -126,73 +131,73 @@ Real output, from `tests/fixtures/js-shell-site`:
 >
 > **What to do.** Server-render the homepage, or pre-render it to static HTML at build time.
 > Who does it: developer. Roughly: several days of development time.
->
-> - Turn on server-side rendering or static generation for the homepage in your framework
->   (Next.js, Nuxt, Remix, Angular Universal and SvelteKit all support this).
-> - Verify with `curl -s <url> | grep -c '<h1'` or View Source, **not** DevTools: DevTools
->   shows the page after JavaScript has run.
-> - At minimum, put the H1, the one-sentence brand description and the primary facts into the
->   server response even if the rest hydrates client-side.
 
-The report also includes a **citation simulation** — for each key page, the sentence an
-assistant would most likely quote, or `Nothing quotable`. On the same fixture, every page
-returns *"no sentence on this page both stands alone and states a fact"*, which makes the
-abstract failure immediate.
+The report also simulates citations. For each important page, it gives the sentence that an
+assistant will most probably quote. If no sentence is suitable, it says `Nothing quotable`.
+On this test site, every page gives that answer. This makes the problem clear.
 
-## Output
+## What the audit writes
 
-`report.json` keeps the required schema exactly (`site`, `audited_at`,
-`summary{total_findings, critical, high, medium}`, `findings[]{id, title, severity, evidence,
-suggested_action{summary, priority}}`) and extends it with `confidence`, `mechanism`,
-`root_cause`, `affected_pages`, `reach`, `detected_by`, `suggested_action.effort`, `.owner`,
-`.how_to_fix[]`, `.snippet`, `.rationale`, plus top-level `recommendations[]`,
-`citation_simulation[]`, `start_here[]`, `crawl{}`, `checks_run[]` and `not_applicable[]`.
+`report.json` contains the required fields: `site`, `audited_at`, `summary` and `findings`.
+It adds these fields: `confidence`, `mechanism`, `root_cause`, `affected_pages`, `reach`,
+`detected_by`, and the fix details. It also adds `recommendations`, `citation_simulation`,
+`start_here`, `crawl`, `checks_run` and `not_applicable`.
 
-`report.md` is written for a marketing manager, not an engineer: every fix names who
-typically does it and roughly how long it takes.
+`report.md` is for a marketing manager, not an engineer. Each fix names the person who
+usually does the work. It also gives the approximate time.
 
-## Running it
+## How to run the audit
 
 ```bash
-python run_audit.py example.com                  # md + json into ./out
-python run_audit.py example.com --format html    # add a shareable HTML report
-python run_audit.py example.com --render         # add a Playwright rendered-DOM pass
-python run_audit.py example.com --no-network     # snapshot only, zero extra requests
-python run_audit.py example.com --now 2026-01-31 # fix the freshness reference date
+python run_audit.py example.com                  # Write report.md and report.json to ./out
+python run_audit.py example.com --format html    # Also write a report to send to a colleague
+python run_audit.py example.com --render         # Add a Playwright pass
+python run_audit.py example.com --no-network     # Make no extra requests
+python run_audit.py example.com --now 2026-01-31 # Set the date for the freshness checks
 ```
 
-Or drive the steps individually — `crawl.py`, then each `check.py`, then
-`compose_report.py`. Every sub-skill's `SKILL.md` also states its checks in prose, so an
-agent with no Python can work through them by hand and reach the same findings.
+You can also run each step: `crawl.py`, then each `check.py`, then `compose_report.py`.
 
-Validate the marketplace itself:
+Each SKILL.md also gives its checks in words. An agent without Python can do the same checks
+by hand. It will find the same problems.
+
+To check the marketplace and the tests:
 
 ```bash
 python skills/audit-orchestrator/scripts/validate_marketplace.py
 python -m pytest tests/ -q
 ```
 
-## Requirements
+To build the submission zip:
 
-Python 3.10+, `requests`, `beautifulsoup4`, `lxml`. Optional: `playwright` (auto-detected;
-its absence is reported as an audit-environment limitation, never as a site defect).
+```bash
+python package.py
+```
 
-## Limitations, stated plainly
+## What you need
 
-- **Bounded crawl.** 30 pages. On a large site this is a sample, and the report says how many
-  pages it saw. Findings describe what was crawled, not what exists.
-- **Static-first.** Without Playwright, JavaScript-rendered content is judged as a crawler
-  that does not execute JavaScript would see it — which is the point, but it means the render
-  gap is inferred rather than measured.
-- **No authentication.** Anything behind a login is invisible to this audit.
-- **Entity ambiguity uses Wikidata only.** It counts entities sharing a name; it cannot tell
-  you which one an assistant currently prefers. Where the runtime offers web search, the
-  suggested query is recorded in the report rather than guessed at.
-- **Engagement is inferred from markup**, not from analytics. It finds the structural reasons
-  a visitor would leave; it cannot tell you that they did.
-- **Heuristics are heuristics.** Every finding carries a `confidence` field, and the
-  low-confidence ones are marked as such rather than dressed up.
+Python 3.10 or later, `requests`, `beautifulsoup4` and `lxml`. Playwright is optional. The
+audit detects Playwright. If Playwright is absent, the report says so. The report never
+presents this as a fault of the site.
+
+**Note for Windows.** Do not unzip this marketplace into a directory with a long path.
+`pip` cannot install `lxml` if the total path is longer than 260 characters. Use a short
+path such as `C:\audit`, or turn on long path support in Windows.
+
+## Limits
+
+- **The crawler reads 30 pages.** On a large site this is a sample. The report gives the
+  number of pages. The findings describe those pages.
+- **The audit reads the HTML that the server sends.** Without Playwright it calculates the
+  JavaScript gap. It does not measure the gap.
+- **The audit does not sign in.** It cannot see pages behind a login.
+- **The audit checks name conflicts with Wikidata only.** It counts the entities that share
+  a name. It cannot tell you which entity an assistant prefers.
+- **The audit reads markup, not analytics.** It finds the reasons that a visitor leaves. It
+  cannot tell you that a visitor left.
+- **The checks use rules of thumb.** Each finding gives a confidence level. The report marks
+  the uncertain findings.
 
 ## Licence
 
-MIT. See `LICENSE`.
+MIT. Read `LICENSE`.
