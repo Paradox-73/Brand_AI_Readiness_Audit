@@ -1,126 +1,172 @@
-# Progress
+# Build Status
+### Brand AI-Readiness Audit · Round 3
 
-This document gives the status of the Round 3 submission. We update it as work lands.
+![Status](https://img.shields.io/badge/Status-Submission%20ready-2EA043?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-169%20passing-2EA043?style=flat-square)
+![Validators](https://img.shields.io/badge/Validators-2%20passing-0F9D58?style=flat-square)
+![Package](https://img.shields.io/badge/Zip-0.26%20MB%20of%2050%20MB-4169E1?style=flat-square)
 
-It follows Simplified Technical English (ASD-STE100): short sentences, active voice, and
-one idea per sentence.
+---
 
-## What we built
+## Table of Contents
 
-A marketplace of seven skills. It audits a website for two problems:
+1. [Where We Are](#1-where-we-are)
+2. [What Is Built](#2-what-is-built)
+3. [How We Tested It](#3-how-we-tested-it)
+4. [Real-Site Results](#4-real-site-results)
+5. [False Positives We Found and Fixed](#5-false-positives-we-found-and-fixed)
+6. [Open Items](#6-open-items)
+7. [Where to Read More](#7-where-to-read-more)
 
-- AI assistants cannot find the brand, or they describe it incorrectly.
-- Visitors arrive from an AI answer, and then they leave.
+---
 
-One skill is the entrypoint. It crawls the site one time. Six other skills read that one
-crawl. The entrypoint then merges their findings into one report.
+## 1. Where We Are
 
-## Status
+The marketplace is complete and ready to submit. Seven skills, 169 tests, two validators
+passing, and a 0.26 MB zip against a 50 MB limit.
 
-The work is complete. All 169 tests pass in about one minute. Two validators pass on all
-seven skills: the official `skills-ref` tool, and our own `validate_marketplace.py`.
-
-| Part | Status |
+| Gate | Result |
 |---|---|
-| 7 skills, each with a SKILL.md | Done |
-| 12 reference documents | Done |
-| Crawler, 6 checks, report composer | Done |
-| 6 local test sites | Done |
-| Test suite | Done. 169 tests pass |
-| README, DECISIONS, evals | Done |
-| Real-site check | Done. 7 sites |
-| Package check | Done. The zip is 262 KB |
+| Test suite | 169 pass in 62 s |
+| `skills-ref` (official validator) | 7 of 7 skills pass |
+| `validate_marketplace.py` (ours) | Manifest and all `SKILL.md` files consistent |
+| Zero-findings guard on a clean site | 0 findings |
+| Real-site sanity run | 7 public sites, 11 false positives found and fixed |
+| Install and run from the zip | Works in a fresh virtual environment |
 
-## How the audit runs
+---
 
-The crawl budget is fixed. The crawler reads a maximum of 30 pages. It waits 0.5 seconds
-between requests. It stops after 240 seconds. It uses only the GET and HEAD methods.
+## 2. What Is Built
 
-The crawler obeys these safety rules:
+| Component | Detail | State |
+|---|---|---|
+| Skills | 7 (`audit-orchestrator` plus 6 sub-skills) | Done |
+| Checks | 51 named checks across the six gates | Done |
+| Reference documents | 12, one per `## References` section | Done |
+| Shared library | Finding schema, root-cause vocabulary, page-type detection, HTTP client | Done |
+| Crawler | Fixed budget, seeded sampling, robots-aware | Done |
+| Report composer | Merge, priority, citation simulation, recommendations | Done |
+| Output formats | `report.json`, `report.md`, optional `report.html` | Done |
+| Test sites | 6 local sites, one per failure mode | Done |
+| Test suite | 169 tests over behaviour, schema, determinism, safety, format | Done |
+| Packaging | `package.py` builds and verifies the zip | Done |
+| Documentation | README, DECISIONS, VERIFICATION, evals | Done |
 
-- It does not read `/cart`, `/checkout`, `/login` or `/admin`.
-- It obeys robots.txt. If robots.txt refuses the crawler, the crawler stops.
-- It does not send forms. It does not change the site.
+The design decision that shapes everything else: **one crawl, six readers**. The
+orchestrator fetches the site once and writes `snapshot.json`. Each sub-skill reads fields
+off that snapshot rather than fetching anything itself. That is what keeps six skills from
+becoming six crawlers, and it is why a full audit of a small site finishes in about ten
+seconds.
 
-Each of the six sub-skills examines one gate:
+---
 
-| Skill | Question it answers |
+## 3. How We Tested It
+
+We built six websites, each carrying a different fault, and a small server that can do what
+`python -m http.server` cannot: rewrite URLs into an ephemeral port, return 403 to a named
+bot, and set response headers such as `X-Robots-Tag`. Without those three things the
+bot-manager and `noindex` checks are untestable.
+
+| Site | What it isolates |
 |---|---|
-| `crawl-access-audit` | Can the crawler get in? |
-| `render-readability-audit` | Can the crawler read the page? |
-| `structured-data-audit` | Can a machine read the facts? |
-| `fact-extractability-audit` | Is there a sentence to quote? |
-| `freshness-corroboration-audit` | Is the brand current, and do other sources agree? |
-| `engagement-audit` | Does the visitor stay? |
+| `good-site` | Nothing. It is built correctly and must produce zero findings |
+| `js-shell-site` | Empty framework shells, facts in images, a pricing PDF, an iframed form |
+| `blocked-site` | robots.txt blocks, a WAF returning 403, `noindex`, a dead sitemap URL |
+| `no-schema-site` | Good prose, no structured data, one unparseable JSON-LD block |
+| `stale-site` | 2019 copyright, old articles, a site that contradicts its own contact details |
+| `dead-end-site` | "Welcome" H1, one nav item, orphan pages, broken links, a 12-field form |
 
-The report sorts the fixes by priority. Priority is severity, multiplied by reach, divided
-by effort. Severity alone is not sufficient. A robots.txt fix takes one minute and it
-unblocks the whole site. That fix comes before a rewrite that corrects one page.
+`good-site` is the one that matters most. It is built to do everything this marketplace
+recommends, so any finding it produces is a bug in a check rather than a fault on the site.
+Driving it to zero is what exposed seven real defects, including a price comparison that
+read `480.00` in the markup and `$480` on the page as a contradiction because it compared
+the two as strings.
 
-## How we test the work
+Golden files record which **root causes** should fire, not exact text. The test server binds
+a random port, so exact text would encode a port number and fail on the next run. Each
+golden file also lists the root causes that must **not** fire — a check that fires
+everywhere detects nothing.
 
-We built six local websites. Each one contains a different fault. A small test server
-sends these sites over HTTP. The server can also refuse a named crawler, and it can set
-response headers.
+---
 
-One site is the most important. `good-site` has no faults. It must produce zero findings.
-We found seven bugs when we made this site produce zero findings. Each bug would also
-occur on a normal, well-built site. The worst bug compared prices as text. The audit
-therefore reported `480.00` in the markup and `$480` on the page as a contradiction.
+## 4. Real-Site Results
 
-The golden files record the root causes that must occur. They do not record exact text.
-The test server uses a random port number, and exact text would contain that number.
+Six local sites are ones we wrote ourselves, so they cannot tell us how the audit behaves on
+sites nobody designed for it. We ran it against seven public sites covering the types in the
+brief: a payments platform, a government portal, a JavaScript-heavy startup, a retailer, a
+personal blog, a restaurant chain and a news site. We read every finding and asked one
+question of each — would a judge agree this is real?
 
-## What we found on real sites
+Two results came out right without any change, and both are worth pointing at:
 
-We audited seven public websites. They cover the types in the brief: a payments platform,
-a government portal, a JavaScript startup, a retailer, a personal blog, a restaurant chain
-and a news site. We read every finding, and we asked one question. Would a judge agree
-that this finding is correct?
+**The news site refuses our crawler in robots.txt.** The audit reads nothing, and the
+verdict says so: *"This site's robots.txt disallows this auditor, so no pages were fetched.
+That is the file working as intended; it also means any crawler that respects it sees
+exactly as little."* An empty report is not presented as a result.
 
-We found and corrected 11 incorrect findings. These are the important ones:
+**The restaurant chain returns 403 to unrecognised user agents.** The finding reads "The
+homepage refuses this crawler" and gives bot-manager fix steps, rather than claiming the
+site is down. Those are different problems with different owners.
 
-- The audit matched URL types on part of a word. A blog post at `/2004/Jun/29/job/`
-  therefore became a careers page. The audit now matches complete parts of the path. Any
-  page with a date in its address is an article.
-- The audit counted share buttons as social profiles. A `facebook.com/sharer/` link is not
-  a Facebook page. This error made every site look better connected than it is.
-- The audit counted a personal LinkedIn profile as the company profile. A customer story
-  linked to that person.
-- Wikidata search matches the start of a name. A search for "GOV.UK" therefore returned
-  "GOV.UK One Login" and "GOV.UK Verify". The audit reported a name conflict with the
-  organisation's own services.
-- A footer listed each year from 2002. The audit read the copyright year as 2002.
-- The audit could not read the date "3rd November 2025". It therefore reported pages with
-  clear dates as pages with no date.
-- The audit reported orphan pages on large sites. The crawler reads 20 pages of 3,000, so
-  it cannot know that the other pages do not link to them. The audit now omits this check
-  when the sample is too small.
+Site names are deliberately absent from this repository, as the brief requires.
 
-Two results were correct, and we did not change them:
+---
 
-- The news site refuses our crawler in robots.txt. The audit stops, and the report explains
-  why. It does not present an empty audit as a result.
-- The restaurant site answers 403. The report says "The homepage refuses this crawler". It
-  gives fix steps for a bot manager. It does not say that the site is down.
+## 5. False Positives We Found and Fixed
 
-## Limits of the audit
+Eleven, all from the real-site run. These are the ones with the widest blast radius:
 
-Tell a customer these limits. They are decisions, and they are not faults:
+| Problem | Effect before the fix | Fix |
+|---|---|---|
+| URL types matched part of a word | A blog post at `/2004/Jun/29/job/` was classified as a careers page, and `/2002/Jul/3/alternativeValidatorIcons/` as a comparison page | Match whole path segments. Any dated permalink is an article regardless of its slug |
+| Share buttons counted as social profiles | A `facebook.com/sharer/` link counted as the brand's Facebook page, so every site with share widgets looked well corroborated | Exclude share and intent URLs |
+| Personal profiles counted as company profiles | A customer story linked to an individual's LinkedIn, which was then counted as the company's | LinkedIn must be `/company/` or `/school/` |
+| Wikidata search matches by prefix | "GOV.UK" returned "GOV.UK One Login" and "GOV.UK Verify", so the audit reported an organisation colliding with its own services | Require a close label match |
+| Footers listing every year | A footer reading "© 2002 2003 2004 … 2026" was read as a copyright year of 2002 | Read the whole run of years, not just the anchored one |
+| Ordinal dates did not parse | "3rd November 2025" was not recognised, so pages showing clear dates were reported as undated | Accept `st`, `nd`, `rd`, `th` |
+| Orphan detection on large sites | The crawler sees 20 pages of 3,000 and cannot know the other 2,980 do not link to a page | Skip the check when the sample is too small to support the conclusion |
 
-- The crawler reads 30 pages. On a large site this is a sample. The report gives the number
-  of pages that it read.
-- Playwright is optional. Without it, the audit calculates the JavaScript gap. It does not
-  measure the gap. The finding then has medium confidence.
-- The audit does not sign in. It cannot see pages behind a login.
-- The audit reads only the brand's own site. It cannot see what directories say about the
-  brand. That is the other half of the staleness problem.
-- The audit reads the markup. It does not read analytics. It finds the reasons that a
-  visitor leaves. It cannot tell you that a visitor left.
+The remaining four were narrower: modal class-name matching flagged 18 of 20 pages on a
+retail site because `class="modal-opener"` contains both "modal" and "open"; interface
+controls such as "Menu" were counted as navigation destinations; a one-word title produced
+a 100% title-body drift score; and a single page with a menu among nineteen without one was
+treated as the site's navigation standard.
 
-## More information
+Every fix is covered by the test suite, and `good-site` still reports zero.
 
-`DECISIONS.md` records the decisions that we made. It includes four differences between
-the live agentskills.io specification and the brief. It also explains mechanism G. We added
-mechanism G because the brief describes only machine behaviour. It does not describe what
-happens after a person opens the page.
+---
+
+## 6. Open Items
+
+Nothing blocks submission. Three things are worth a decision:
+
+**The Playwright branch has never executed.** No Playwright is installed on our machines,
+so `--render` falls back to static analysis every time. The fallback path is tested and the
+report states honestly when the pass did not run. The rendered branch itself is unverified.
+Installing Playwright and auditing one site would close this.
+
+**Whether `tests/` and `evals/` ship in the zip.** They add roughly 150 KB. We include them:
+the rubric scores engineering hygiene, and `good-site` is the clearest evidence the audit
+does not invent findings. Excluding them is a one-line change in `package.py`.
+
+**Verification of our own work.** `VERIFICATION.md` splits this into four independent
+workstreams that four people can run in parallel with no dependencies between them.
+
+---
+
+## 7. Where to Read More
+
+| Document | Contents |
+|---|---|
+| `README.md` | What the marketplace does, how it is built, how to run it |
+| `DECISIONS.md` | Every judgement call, including four differences between the live agentskills.io specification and the brief |
+| `VERIFICATION.md` | The four-person parallel review plan |
+| `evals/README.md` | Three prompts a judge is likely to type, and what a correct response looks like |
+| `skills/audit-orchestrator/references/mechanism-model.md` | The seven mechanisms every check traces back to |
+| `skills/audit-orchestrator/references/round2-failure-modes.md` | Each Round 2 failure mode, and the check that now detects it |
+
+---
+
+<div align="center">
+  <sub>Adobe University Hackathon 2026 · Round 3 · Brand AI-Readiness Audit</sub>
+</div>

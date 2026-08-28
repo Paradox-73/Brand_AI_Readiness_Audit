@@ -195,27 +195,7 @@ one skill into one.
 
 ---
 
-## 9. Documentation follows Simplified Technical English
-
-`README.md` and `PROGRESS.md` follow ASD-STE100, the controlled-English standard used for
-aerospace and defence maintenance documentation. The rules applied are: short sentences,
-active voice, simple tenses, one meaning per word, one instruction per sentence, no noun
-clusters longer than three words, and articles kept in place.
-
-The reason is the audience. Those two documents are read by teammates and judges who are not
-inside the code, and `report.md` is read by a marketing manager. Controlled English is
-measurably faster to read and harder to misread, and it removes the padding that makes
-generated prose recognisable.
-
-Two documents deliberately do **not** follow it. `DECISIONS.md` and the twelve files under
-`references/` are written for an engineer who needs the reasoning, and the standard's
-restricted vocabulary makes conditional argument awkward to express. The `SKILL.md` bodies
-sit between the two: imperative, short-stepped and mostly compliant, because an agent reads
-them as instructions.
-
----
-
-## 10. Known limitations
+## 9. Known limitations
 
 Stated in `README.md` too, repeated here because they are decisions, not oversights:
 
