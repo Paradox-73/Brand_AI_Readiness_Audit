@@ -53,7 +53,9 @@ SKILL = "engagement-audit"
 
 # Thresholds and their reasons.
 CTA_BYTE_WINDOW = 1500        # roughly the first screen of text; a next step below this is not orientation
-NAV_MIN, NAV_MAX = 3, 9       # under 3 gives nowhere to go; over 9 stops being a menu and becomes a list
+NAV_MIN = 3                   # under 3 top-level items leaves a visitor nowhere to go.
+                              # There is deliberately no upper bound: a 29-item megamenu is
+                              # normal on real retail sites and costs a machine nothing
 MIN_MAIN_LINKS = 3            # a content page with under 3 onward links is a cul-de-sac
 BROKEN_LINK_SAMPLE = 20       # enough to establish a rate without hammering the site
 BROKEN_LINK_HIGH = 0.2        # a fifth of links broken is a maintenance failure, not an accident
@@ -147,8 +149,6 @@ def _check_homepage_orientation(result, home):
         problems.append("the homepage has no H1")
     elif h1s[0].strip().lower() in GENERIC_H1:
         problems.append('the H1 is "{}", which says nothing about what the business does'.format(h1s[0]))
-    elif word_count(h1s[0]) < 3:
-        problems.append('the H1 "{}" is too short to identify the business'.format(h1s[0]))
 
     if not cta.get("found"):
         problems.append("no call-to-action link was found anywhere in the page")
@@ -186,7 +186,12 @@ def _check_homepage_orientation(result, home):
 
 def _check_navigation(result, home, pages):
     result.check("primary-navigation")
-    source = home or pages[0]
+    if home is None:
+        result.skip("primary-navigation",
+                    "the homepage was not reached by this crawl, and navigation is judged on the "
+                    "homepage rather than on whichever page happened to be crawled first")
+        return
+    source = home
     nav = source.get("links", {}).get("nav") or []
     labels = [link["text"].strip() for link in nav if link["text"].strip()]
     # Drop interface controls. "Menu", "Search" and "Skip to content" are
@@ -196,7 +201,20 @@ def _check_navigation(result, home, pages):
     unique_labels = list(dict.fromkeys(labels))
     result.signal("nav_item_count", len(unique_labels))
 
-    if len(unique_labels) >= NAV_MIN and len(unique_labels) <= NAV_MAX:
+    # Guard against our own selector failing. `chrome_signature` sweeps a wider
+    # net (nav, header, footer, role=navigation). If that found a real menu but
+    # `links.nav` did not, we cannot isolate the primary navigation on this
+    # site, and saying so beats reporting a site as having one menu item.
+    chrome_paths = (source.get("chrome_signature") or {}).get("nav_path_count", 0)
+    if len(unique_labels) < NAV_MIN and chrome_paths >= 5:
+        result.skip("primary-navigation",
+                    "the primary navigation could not be isolated on this site: {} link(s) were "
+                    "found inside <nav>, but the header and footer together contain {} distinct "
+                    "internal destinations, so the menu is built in a way this check cannot "
+                    "read".format(len(unique_labels), chrome_paths))
+        return
+
+    if len(unique_labels) >= NAV_MIN:
         vague = [label for label in unique_labels if label.lower() in GENERIC_NAV_LABELS]
         if not vague:
             result.skip("primary-navigation",
@@ -209,8 +227,6 @@ def _check_navigation(result, home, pages):
     if len(unique_labels) < NAV_MIN:
         problems.append("the primary navigation has {} item(s)".format(len(unique_labels)))
         severity = "high"
-    elif len(unique_labels) > NAV_MAX:
-        problems.append("the primary navigation has {} top-level items".format(len(unique_labels)))
     vague = [label for label in unique_labels if label.lower() in GENERIC_NAV_LABELS]
     if vague:
         problems.append("labels that name no specific destination: {}".format(
@@ -224,13 +240,12 @@ def _check_navigation(result, home, pages):
             source["url"], "; ".join(problems),
             ", ".join('"{}"'.format(x) for x in unique_labels[:9]) or "none"),
         mechanism="G", root_cause="no-orientation",
-        summary="Give the site {}-{} top-level navigation items, each naming a real destination.".format(
-            NAV_MIN, NAV_MAX),
+        summary="Give the site at least {} top-level navigation items, each naming a real "
+                "destination.".format(NAV_MIN),
         how_to_fix=[
             'Replace catch-all labels with the categories they contain: "Products" becomes '
             '"Kitchen", "Bathroom", "Outdoor" if those are the ranges.',
-            "Keep the top level between {} and {} items and push the rest into second-level "
-            "menus.".format(NAV_MIN, NAV_MAX),
+            "Make sure at least {} destinations are reachable from the top level.".format(NAV_MIN),
             "Make sure the navigation is real HTML links, so it works before JavaScript runs.",
         ],
         effort="medium", owner="marketing",

@@ -22,6 +22,15 @@ Fail any one and the page does not exist for that system, however good the rest 
 ordering is why the sub-skills run in the order they do, and why a critical finding at gate 1
 makes conclusions about gate 3 unreliable.
 
+**Discovery is a funnel, not a switch.** The Round 2 appendix makes this point separately,
+and it is worth stating here rather than as its own letter, because it is a property of the
+gates rather than a new mechanism. A brand is rarely either "discoverable" or "invisible".
+It passes some gates for some pages and fails others, so it gets cited for one question and
+not for a neighbouring one. Two consequences the audit acts on: findings are always scoped
+to the pages they were observed on, never generalised to the whole site; and coverage
+breadth is treated as a real lever, because passing every gate on one page still leaves you
+absent from every question that page does not answer (mechanism E).
+
 **Owned by:** `crawl-access-audit` (gate 1), `render-readability-audit` (gates 1–2).
 
 ---

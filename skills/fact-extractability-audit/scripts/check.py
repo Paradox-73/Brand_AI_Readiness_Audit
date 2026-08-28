@@ -53,10 +53,13 @@ SKILL = "fact-extractability-audit"
 DEFINITION_WINDOW_WORDS = 150   # an assistant reads the top of a page first; a definition below this is rarely used
 MIN_DEFINITION_PREDICATE = 20   # "Acme is a company." is technically a definition and tells nobody anything
 ANSWER_FIRST_MIN_SECTIONS = 3   # below 3 sections the share is noise
-FLUFF_FIRST_SHARE = 0.5         # more than half the sections opening with warm-up prose is a pattern
+FLUFF_FIRST_SHARE = 0.7         # 50% fired on 69% of real sites; a section opening with context
+                                # is normal writing, so only a page that almost never leads with
+                                # a fact is worth reporting
 SLOGAN_HEADING_SHARE = 0.8      # nearly every heading using words the page never uses again
 SLOGAN_MIN_SECTIONS = 5         # below 5 headings the share is one bad heading, not a pattern
-LONG_SENTENCE_SHARE = 0.25      # a quarter of sentences over 30 words makes a page hard to excerpt
+LONG_SENTENCE_SHARE = 0.4       # 25% fired on 76% of real sites; technical prose runs long,
+                                # and only a page where most sentences are unliftable is a defect
 
 # Page types where a visitor arrives with a specific question, so the first
 # paragraph of each section is expected to answer it.
@@ -210,7 +213,12 @@ def _check_entity_definition(result, snapshot, pages, brand_name):
     result.add(
         id_hint="no-quotable-entity-definition",
         title="No page states in one sentence what the brand is",
-        severity="high", confidence="high",
+        # `high` only when the brand is never named at the top of its own
+        # homepage, which is genuinely broken. Being named but not defined is
+        # the common case - it holds for most sites, including ones assistants
+        # name readily - so it is a strong recommendation, not a severe defect.
+        severity="high" if (not named and pronouns >= 3) else "medium",
+        confidence="high",
         evidence=evidence,
         mechanism="B", root_cause=root,
         summary='Add one sentence near the top of the homepage: "{} is a <category> that '
@@ -241,14 +249,12 @@ def _check_entity_definition(result, snapshot, pages, brand_name):
 def _check_heading_hierarchy(result, pages):
     result.check("heading-hierarchy")
     no_h1 = [p for p in pages if len(p.get("headings", {}).get("h1") or []) == 0]
-    many_h1 = [p for p in pages if len(p.get("headings", {}).get("h1") or []) > 1]
-    skipped = []
-    for page in pages:
-        levels = [level for level, _ in (page.get("heading_sequence") or [])]
-        for previous, current in zip(levels, levels[1:]):
-            if current - previous > 1:
-                skipped.append(page)
-                break
+    # Multiple H1s are valid HTML5 sectioning, and skipped heading levels are
+    # near-universal on real sites. Neither stops a machine reading the page.
+    # Reporting them fired this check on 27 of 29 real sites and drowned the
+    # findings that matter, so only a page with no top-level heading at all
+    # counts now. See references/cited-vs-uncited-study.md.
+    many_h1, skipped = [], []
 
     if not (no_h1 or many_h1 or skipped):
         result.skip("heading-hierarchy",
@@ -364,7 +370,8 @@ def _content_sections(page):
     Judging a "Read next" block for whether it opens with a number would
     penalise exactly the wayfinding this marketplace recommends elsewhere.
     """
-    return [s for s in (page.get("sections") or []) if not s.get("navigational")]
+    return [s for s in (page.get("sections") or [])
+            if not s.get("navigational") and len(s.get("first_paragraph") or "") >= 40]
 
 
 def _check_answer_first(result, pages, brand_name):

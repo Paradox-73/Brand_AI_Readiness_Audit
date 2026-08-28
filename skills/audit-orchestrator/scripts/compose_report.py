@@ -44,6 +44,11 @@ SKILL_ORDER = [
 
 PRIORITY_BANDS = ((2.0, "critical"), (1.0, "high"), (0.45, "medium"), (0.0, "low"))
 
+# Measured in the within-category study: brands assistants name carry a date on
+# 34% of crawled pages, comparable brands they ignore on 17%. The floor sits
+# between the two. See references/cited-vs-uncited-study.md.
+DATE_COVERAGE_FLOOR = 0.25
+
 EFFORT_TIME = {
     "low": "under an hour",
     "medium": "half a day to a day",
@@ -276,7 +281,7 @@ def build_recommendations(snapshot, signals, findings):
         "medium", "content owner")
 
     add("R-SAMEAS-WIKIDATA", "Corroborate the brand across independent sources",
-        signals.get("authoritative_profile_count", 0) < 3
+        signals.get("profile_breadth", 0) < 6
         or not signals.get("has_wikidata_or_wikipedia"),
         "Claim the authoritative profiles, create a Wikidata item, and list them all in sameAs.",
         ["Claim or update: LinkedIn company page, Google Business Profile, Crunchbase, and one "
@@ -320,11 +325,15 @@ def build_recommendations(snapshot, signals, findings):
     # backed by a measured difference between sites assistants cite and sites
     # they ignore. Fires on a dating problem of any kind: no dates at all,
     # stale dates, or simply low coverage across the site.
+    # 25%, not 50%. An earlier threshold came from comparing brand sites against
+    # encyclopedias, where dated coverage runs at 85%. Compared within category,
+    # brands assistants name date 34% of pages and brands they ignore date 17%.
+    # A 50% bar would have fired on most of the brands that *are* named.
     date_coverage = signals.get("date_coverage")
     add("R-DATE-SIGNALS", "Date your content, and keep the dates honest",
         signals.get("no_date_signals")
         or bool({"no-date-signal", "stale-content"} & root_causes)
-        or (date_coverage is not None and date_coverage < 0.5),
+        or (date_coverage is not None and date_coverage < DATE_COVERAGE_FLOOR),
         "Put a visible published-or-updated date on every substantive page, mirror it in "
         "structured data, and review the top pages on a schedule."
         + ("" if date_coverage is None else

@@ -26,14 +26,30 @@ from audit_common import (  # noqa: E402
     MAX_DEPTH, MAX_PAGES, MAX_SITEMAP_SAMPLE, REQUEST_DELAY, REQUEST_TIMEOUT,
     SEED, USER_AGENT, WALL_CLOCK_BUDGET, FetchError, Fetcher, detect_page_type,
     eprint, is_forbidden_path, normalise_url, origin_of, same_site, site_label,
-    truncate, write_json,
+    strip_www, truncate, write_json,
 )
+
 from page_extract import extract_page  # noqa: E402
 from robots_parser import (  # noqa: E402
     blocks_entire_site, is_disallowed, parse_robots, path_of,
 )
 
 SNAPSHOT_SCHEMA_VERSION = 1
+
+def dedup_key(url):
+    """Identity of a page for crawl purposes, ignoring the `www.` prefix.
+
+    Without this the crawler fetches example.com/ and www.example.com/ as two
+    pages and then reports them as duplicate titles. A genuine split between
+    the two hostnames is still reported separately as host-inconsistency.
+    """
+    normalised = normalise_url(url)
+    if not normalised:
+        return None
+    scheme, _, rest = normalised.partition("://")
+    host, slash, path = rest.partition("/")
+    return "{}://{}{}{}".format(scheme, strip_www(host.lower()), slash, path)
+
 
 # Non-HTML endings we never queue: they cost a request and carry no prose.
 SKIP_EXTENSIONS = re.compile(
@@ -387,9 +403,9 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
     else:
         for url in (home_url, seed_url):
             url = normalise_url(url)
-            if url and url not in queued:
+            if url and dedup_key(url) not in queued:
                 queue.append((url, 0, "homepage" if url == home_url else "seed"))
-                queued.add(url)
+                queued.add(dedup_key(url))
 
         sitemap_sample = sample_sitemap_urls(sitemaps, origin)
         for url in sitemap_sample:
@@ -397,9 +413,9 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
             if not ok:
                 skipped.append({"url": url, "reason": reason})
                 continue
-            if url not in queued:
+            if dedup_key(url) not in queued:
                 queue.append((url, 1, "sitemap"))
-                queued.add(url)
+                queued.add(dedup_key(url))
 
         budget_exhausted = False
         while queue and len(pages) < max_pages:
@@ -426,14 +442,14 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
             ):
                 if len(queued) >= max_pages * 3:
                     break
-                if link in queued:
+                if dedup_key(link) in queued:
                     continue
                 ok, reason = crawlable(link, origin, robots, respect_robots)
                 if not ok:
                     if reason == "disallowed by robots.txt":
                         skipped.append({"url": link, "reason": reason})
                     continue
-                queued.add(link)
+                queued.add(dedup_key(link))
                 queue.append((link, depth + 1, "bfs"))
 
     home_record = next((p for p in pages if p["url"] == home_url), None)

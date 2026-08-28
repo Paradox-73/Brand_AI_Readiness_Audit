@@ -286,7 +286,13 @@ def _check_robots_blocks(result, robots, origin):
 
     content_blocks = [rule for rule in substantive_disallows(robots, "*")
                       if rule not in ("/", "/*")]
-    if content_blocks:
+    # Real robots.txt files disallow dozens of paths for good reasons, and
+    # listing them all fired this on 86% of real sites. Only report when a
+    # whole top-level section is closed - a single-segment path with no
+    # wildcard, which is what blocking real content actually looks like.
+    content_blocks = [r for r in content_blocks
+                      if "*" not in r and r.strip("/").count("/") == 0 and len(r.strip("/")) > 2]
+    if len(content_blocks) >= 2:
         result.add(
             id_hint="robots-blocks-content-paths",
             title="robots.txt disallows {} path(s) that look like real content".format(len(content_blocks)),

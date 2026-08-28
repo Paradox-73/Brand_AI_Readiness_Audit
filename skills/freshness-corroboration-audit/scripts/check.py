@@ -58,8 +58,18 @@ STALE_MONTHS = 18            # 18 months is the point at which "recent" claims s
 STALE_SHARE = 0.7            # most of the library being old is a programme problem, not one old post
 COPYRIGHT_LAG_YEARS = 1      # a footer two calendar years behind reads as an abandoned site
 AS_OF_LAG_YEARS = 2          # "as of 2023" written in 2026 actively misinforms
-MIN_AUTHORITATIVE_PROFILES = 3  # below three corroborating profiles a brand is a single unlinked claim
+MIN_AUTHORITATIVE_PROFILES = 3  # still used to judge whether a brand has disambiguated itself
 WIKIDATA_AMBIGUITY_THRESHOLD = 2
+
+# Off-site profile breadth. These numbers are measured, not chosen: in a
+# within-category study of 29 crawlable sites across 6 categories, brands
+# assistants name linked a mean of 7.2 distinct off-site profiles and
+# comparable brands they do not name linked 4.6. It was the only signal that
+# moved the same way in every category. See references/cited-vs-uncited-study.md.
+PROFILE_BREADTH_NAMED_MEAN = 7.2
+PROFILE_BREADTH_UNNAMED_MEAN = 4.6
+PROFILE_BREADTH_GOOD = 6   # at or above this, the footprint is not the problem
+PROFILE_BREADTH_THIN = 3   # below this a brand is close to a single unlinked claim
 
 AUTHORITATIVE = ("LinkedIn", "Wikipedia", "Wikidata", "Crunchbase", "GitHub",
                  "Google Business", "Trustpilot", "Yelp", "Glassdoor")
@@ -437,46 +447,70 @@ def _check_sitemap_lastmod(result, snapshot, now):
 # --------------------------------------------------------------------------
 
 def _check_authoritative_profiles(result, snapshot, pages):
-    result.check("authoritative-profiles")
+    """Off-site profile breadth: the strongest measured signal in this marketplace.
+
+    In our within-category study this was the only measure that moved the same
+    way in all six categories. Brands an assistant names linked a median of
+    about 7 distinct off-site profiles; comparable competitors it does not name
+    linked about 4.6. It held for running shoes, CRMs, coffee, mattresses,
+    password managers and standing desks alike.
+
+    An earlier version counted only nine hand-picked "authoritative" platforms
+    and fired on 94% of named brands and 100% of unnamed ones - it separated
+    nothing, so it carried no information. Breadth across every recognised
+    platform is what actually tracks the divide, so that is what is measured.
+    See references/cited-vs-uncited-study.md.
+    """
+    result.check("off-site-profile-breadth")
     profiles = {}
     for page in pages:
         profiles.update(page.get("social_profiles") or {})
 
     authoritative = {k: v for k, v in profiles.items() if k in AUTHORITATIVE}
     result.signal("profile_platforms", sorted(profiles.keys()))
+    result.signal("profile_breadth", len(profiles))
     result.signal("authoritative_profile_count", len(authoritative))
     result.signal("has_wikidata_or_wikipedia",
                   any(k in ("Wikidata", "Wikipedia") for k in profiles))
 
-    if len(authoritative) >= MIN_AUTHORITATIVE_PROFILES:
-        result.skip("authoritative-profiles",
-                    "the site links to {} authoritative profiles: {}".format(
-                        len(authoritative), ", ".join(sorted(authoritative))))
+    if len(profiles) >= PROFILE_BREADTH_GOOD:
+        result.skip("off-site-profile-breadth",
+                    "the site links to {} distinct off-site profiles ({}), at or above the "
+                    "level typical of brands assistants name in our study".format(
+                        len(profiles), ", ".join(sorted(profiles))))
         return profiles
 
     result.add(
-        id_hint="few-authoritative-profiles-linked",
-        title="The site links to {} authoritative off-site profile(s)".format(len(authoritative)),
-        severity="medium" if not authoritative else "low", confidence="high",
-        evidence="Profiles found across the crawled pages and in sameAs: {}. Authoritative "
-                 "platforms recognised: {}.".format(
-                     ", ".join("{} ({})".format(k, v) for k, v in sorted(profiles.items())[:6])
-                     or "none",
-                     ", ".join(sorted(authoritative)) or "none"),
+        id_hint="thin-off-site-profile-footprint",
+        title="The site links to only {} off-site profile{}".format(
+            len(profiles), "" if len(profiles) == 1 else "s"),
+        severity="medium" if len(profiles) < PROFILE_BREADTH_THIN else "low",
+        confidence="high",
+        evidence="Distinct off-site profiles linked from the crawled pages or listed in "
+                 "`sameAs`: {}. In our within-category study, brands assistants name linked "
+                 "a mean of {} and comparable brands they do not name linked {} - the only "
+                 "measure that pointed the same way in all six categories tested.".format(
+                     ", ".join(sorted(profiles)) or "none",
+                     PROFILE_BREADTH_NAMED_MEAN, PROFILE_BREADTH_UNNAMED_MEAN),
         mechanism="D", root_cause="weak-corroboration",
-        summary="Claim and link the profiles that independently confirm the brand exists, and "
-                "list them all in Organization sameAs.",
+        summary="Claim more of the places that independently confirm the brand exists, and list "
+                "every one of them in Organization `sameAs`.",
         how_to_fix=[
-            "Claim or update the profiles that apply: LinkedIn company page, Google Business "
-            "Profile, Crunchbase, and an industry directory or two.",
-            "Use the identical name and the identical one-sentence description on each.",
-            "List every one of them in the Organization `sameAs` array on your site.",
-            "Link back from each profile to the site, so the connection is stated from both ends.",
+            "Claim the profiles that apply to your category. Breadth is what matters here, not "
+            "prestige: the brands assistants name are on more platforms, not better ones.",
+            "Cover the obvious ones first: LinkedIn, Instagram, YouTube, X, Facebook, and your "
+            "industry's directories.",
+            "Use the identical name and the identical one-sentence description on every profile. "
+            "Wording that matches exactly is what makes them corroborate rather than merely "
+            "coexist.",
+            "List every profile URL in the Organization `sameAs` array on your site.",
+            "Link back to the site from each profile, so the connection is stated from both ends.",
         ],
         effort="medium", owner="marketing",
-        rationale="Mechanism D: a fact stated only on the brand's own site is one source's word. "
-                  "The same fact repeated on several independent, verifiable profiles is what "
-                  "makes it safe for an assistant to state as true.",
+        rationale="Mechanism D: a fact stated only on the brand's own site is one source's word "
+                  "for it. Each additional profile that repeats the same name and description is "
+                  "another independent source agreeing. This is the strongest signal we measured, "
+                  "and it is almost entirely within a brand's control.",
     )
     return profiles
 

@@ -73,7 +73,7 @@ HIGH_VALUE_PROPS = {
 
 # Title and description lengths. These are the ranges that survive truncation
 # in search results and in assistant citations.
-TITLE_MIN, TITLE_MAX = 15, 75
+TITLE_MIN, TITLE_MAX = 15, 90   # 75 flagged ordinary retail titles; real ones run long
 DESC_MIN, DESC_MAX = 50, 165
 
 PRICE_NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d{1,2})?")
@@ -246,7 +246,13 @@ def _check_organization(result, snapshot, pages, by_type, brand):
         result.add(
             id_hint="no-organization-schema",
             title="No Organization or LocalBusiness markup anywhere on the site",
-            severity="high", confidence="high",
+            # Measured, not assumed: 62% of the brands assistants name in our
+            # within-category study also had no Organization markup, and
+            # JSON-LD coverage was actually *higher* among the brands they
+            # ignore. Absence is worth fixing - it is the one place identity is
+            # stated as data - but calling it `high` overstates what the
+            # evidence supports. See references/cited-vs-uncited-study.md.
+            severity="medium", confidence="high",
             evidence="Checked {} content page(s) including {}. None declares an "
                      "Organization-level JSON-LD type.".format(
                          len(pages), ", ".join(sample([p["url"] for p in identity_pages], 3))),
@@ -333,7 +339,9 @@ def _check_product(result, by_type):
             id_hint="no-product-schema",
             title="{} of {} product page(s) have no Product markup".format(
                 len(without), len(products)),
-            severity="high", confidence="high",
+            # Leans the right way in the study (23% of unnamed brands versus 6%
+            # of named ones) but on too few sites to justify `high`.
+            severity="medium", confidence="high",
             evidence="Product pages with no Product JSON-LD: {}.".format(
                 ", ".join(sample([p["url"] for p in without], 5))),
             mechanism="C", root_cause="no-product-schema",
@@ -740,8 +748,10 @@ def _check_titles_and_descriptions(result, pages):
     problems = []
     if missing_title:
         problems.append("{} page(s) have no <title>".format(len(missing_title)))
-    if missing_desc:
-        problems.append("{} page(s) have no meta description".format(len(missing_desc)))
+    # One page without a description is an oversight, not a template fault.
+    if len(missing_desc) >= max(2, len(pages) * 0.25):
+        problems.append("{} of {} page(s) have no meta description".format(
+            len(missing_desc), len(pages)))
     if duplicate_titles:
         problems.append("{} title(s) are reused across pages".format(len(duplicate_titles)))
     if duplicate_descriptions:
@@ -753,7 +763,7 @@ def _check_titles_and_descriptions(result, pages):
     long_titles = [p for p in pages if p.get("title") and len(p["title"]) > TITLE_MAX]
     short_titles = [p for p in pages if p.get("title") and len(p["title"]) < TITLE_MIN]
     off_length = long_titles + short_titles
-    if len(off_length) >= max(3, len(pages) * 0.4):
+    if len(off_length) >= max(4, len(pages) * 0.6):
         problems.append("{} of {} title(s) fall outside {}-{} chars".format(
             len(off_length), len(pages), TITLE_MIN, TITLE_MAX))
 

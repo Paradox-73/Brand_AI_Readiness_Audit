@@ -1,145 +1,214 @@
-# Field study: what separates cited sites from ignored ones
+# Field study: what separates brands assistants name from brands they ignore
 
 The brief says to go and find real websites that assistants cite well versus ones they
-ignore, and work out what makes the difference. This file is that work, including the
-result we did not want.
+ignore, and work out what makes the difference. This is that work, including the results
+that went against us.
 
-**Headline: most of what this marketplace checks does not separate the two cohorts.** One
-signal does. That finding shaped how the report is framed, and it is why the proactive
-recommendations are not an afterthought.
+Three checks in this marketplace were changed because of what follows, and two thresholds
+are now measured numbers rather than reasoned ones.
 
 ---
 
 ## Method
 
-Two cohorts, nine sites, audited with the marketplace at 15 pages each.
+**Within category, matched pairs.** Six categories. In each, three brands an assistant
+readily names for a buying-intent question, against three real competitors in the same
+category, selling comparable products at comparable prices, that it does not name.
 
-**Cohort A — reference-grade sites that assistants cite constantly.** Sites that appear as
-sources across many topics and many assistants: a developer documentation set, an
-encyclopedia, a national health service, a finance reference.
+| Category | Named | Not named |
+|---|---|---|
+| Trail running shoes | 3 | 3 |
+| Standing desks | 3 | 3 |
+| CRM for small business | 3 | 3 |
+| Coffee subscriptions | 3 | 3 |
+| Password managers | 3 | 3 |
+| Mattresses | 3 | 3 |
 
-**Cohort B — ordinary brand sites.** The kind that go unnamed in answers about their own
-category: two design agencies, a consultancy, a DTC retailer, a manufacturer, an SMB SaaS
-product, a high-street services chain.
+36 sites, 15 pages each, audited with this marketplace. Prominence labels come from model
+knowledge of each category, corroborated against live search results for buying-intent
+queries in several categories.
 
-Cohort membership was assigned by role and reputation, not measured. We did not query an
-assistant to confirm citation rates — see *Limits* below. Site names are deliberately
-absent from this repository.
+**Why matched pairs.** An earlier version of this study compared an encyclopedia and a
+national health service against design agencies. Everything separated, and none of it was
+useful, because it was measuring fame. Running shoes against running shoes controls for
+category, buyer intent and page structure, so what is left is closer to something a brand
+can act on.
 
-Two of the cohort B sites returned zero crawlable pages (one 403 to any unrecognised agent,
-one redirect loop) and are excluded from the averages. That is itself a finding: two of
-seven ordinary brand sites were not readable by a polite, identified crawler at all.
-
----
-
-## Result
-
-| Signal | Cohort A (n=4) | Cohort B (n=5) | Separates? |
-|---|---|---|---|
-| **Date coverage** | **85%** | **35%** | **Yes** |
-| **Median body text** | **12,899 chars** | **5,167 chars** | **Yes (2.5x)** |
-| JSON-LD coverage | 73% | 80% | No — B is better |
-| Meta description coverage | 75% | 99% | No — B is better |
-| Quotable-sentence share | 69% | 86% | No — B is better |
-| Breadcrumb coverage | 68% | 67% | No |
-| H2 sections per page | 7.6 | 8.0 | No |
-| Critical + high findings | 2.5 | 2.6 | **No — identical** |
-
-Root-cause frequency told the same story. Not one of our ~45 root causes fired more often
-in cohort B than cohort A by a margin worth reporting. Several ran backwards: the
-heavily-cited sites carried *more* `stale-content`, `jargon-density`, `no-breadcrumbs` and
-`alt-missing` findings than the brand sites. Three of four cohort A sites declared no
-Organization markup at all; three of five cohort B sites did.
+**The bar for changing a check.** A signal counts only if it moves the same direction in at
+least five of the six categories. Pooled averages are reported but never acted on alone.
 
 ---
 
-## What this means
+## Result 1 — Seven of 36 sites could not be crawled at all
 
-### 1. Our checks measure a floor, not a ceiling
+19% returned nothing to a polite, identified, robots-respecting crawler. Both cohorts:
+a major running-shoe brand, a well-known CRM, a password manager, a mattress brand.
 
-They detect what **prevents** citation: a blocked crawler, an empty JavaScript shell, a page
-with no quotable sentence, markup that contradicts the page. They cannot manufacture what
-**causes** citation: being the canonical source for a fact, breadth of topic coverage, and
-corroboration from sources you do not control.
-
-A brand that fixes everything this audit flags becomes *eligible* to be cited. It does not
-thereby become an encyclopedia. Any tool claiming otherwise is selling something.
-
-This is why `report.md` leads with a verdict rather than a score. A score would imply a
-ranking the evidence does not support.
-
-### 2. Ordinary brand sites already pass the hygiene bar
-
-Cohort B beat cohort A on structured-data coverage, meta descriptions and quotable-sentence
-share. The average count of critical and high findings was 2.5 versus 2.6 — statistically
-indistinguishable.
-
-The uncomfortable implication: run this marketplace on a typical competent brand site and
-the defect list will be short and unremarkable. That is an accurate reading of the site, not
-a failure of the audit — but it means **the recommendations, not the findings, are where the
-upside is** for most sites. The catalogue is conditioned on observed signals precisely so
-that it stays useful when the defect list is empty.
-
-It is also the reason `tests/fixtures/good-site` produces zero findings and still receives
-recommendations. That is the common case, not an edge case.
-
-### 3. Dates are the exception, and they are cheap
-
-Date coverage was the one hygiene signal that tracked the divide, and it is not close: 85%
-against 35%. It is mechanism D observable in the wild — recency is one of the few quality
-signals a machine can evaluate cheaply, and it decides which of two sources making the same
-claim survives into an answer.
-
-It is also the cheapest thing on the list to fix. A brand cannot become the canonical source
-for its category this quarter. It can date its pages this week.
-
-**Change made:** `R-DATE-SIGNALS` now fires when site-wide date coverage falls below 50%, not
-only when dates are absent entirely, and the recommendation carries this evidence.
-`freshness-corroboration-audit` emits `date_coverage` as a signal for that purpose.
-
-### 4. Depth separates, but it is not a defect
-
-Cohort A pages carried 2.5 times the body text. That is content strategy rather than a fault
-we can flag, and a thin page is not broken. It appears in the catalogue as
-`R-COMPARISON-PAGES` and `R-USE-CASE-PAGES` — coverage breadth rather than page length,
-because the mechanism is that assistants answer the question as it was asked, and a brand
-with one page for one framing is absent from every other framing.
-
-We deliberately did **not** add a "your pages are too short" check. Length is a proxy for
-substance, and a check that fires on short pages would penalise a well-written pricing page.
+Blocking crawlers does not stop a big brand being named — reputation carries it. It does
+stop everyone else. This is gate A, and it is the cheapest catastrophic failure on the list.
 
 ---
 
-## What we did not change, and why
+## Result 2 — Off-site profile breadth separates, in every category
 
-Two temptations were rejected.
+**The strongest signal in the study, and the only one that moved the same way in all six.**
 
-**We did not reweight severities to make cohort B look worse.** The cohorts genuinely do
-score alike on hygiene. Tuning thresholds until the "right" answer appeared would be fitting
-to nine sites, which is the opposite of the generalisation the brief asks for.
+| Category | Named | Not named |
+|---|---|---|
+| CRM | 12.5 | 7.0 |
+| Trail shoes | 8.0 | 5.0 |
+| Mattress | 7.7 | 5.0 |
+| Password manager | 6.0 | 3.5 |
+| Standing desk | 6.0 | 5.5 |
+| Coffee | 5.0 | 2.7 |
+| **Mean** | **7.2** | **4.6** |
 
-**We did not add an authority or backlink check.** It would separate the cohorts perfectly
-and be useless: no site owner can act on "be more famous", and the brief explicitly rules
-out commercial levers. A check that a reader cannot act on is noise with extra steps.
+Breadth, not prestige. The gap is spread across ordinary platforms — Instagram, YouTube, X,
+Facebook, LinkedIn, Pinterest — not concentrated in Wikipedia or Crunchbase. Named brands
+were on more places, not better ones.
+
+**Change made.** The old check counted nine hand-picked "authoritative" platforms and
+required three. It fired on 94% of named brands and 100% of unnamed ones, so it separated
+nothing and carried no information. It now measures breadth across every recognised
+platform, passes at 6 or more, and reports the observed benchmark in its evidence.
+`R-SAMEAS-WIKIDATA` is keyed to the same number.
+
+This is the most actionable finding in the study. A brand cannot become famous this quarter.
+It can claim six profiles this week and put the same sentence on all of them.
+
+---
+
+## Result 3 — Date coverage separates, but the earlier threshold was wrong
+
+| Category | Named | Not named |
+|---|---|---|
+| Trail shoes | 0.83 | 0.10 |
+| Standing desk | 0.43 | 0.13 |
+| Mattress | 0.20 | 0.03 |
+| Coffee | 0.11 | 0.04 |
+| Password manager | 0.39 | 0.37 |
+| CRM | 0.20 | 0.40 |
+| **Mean** | **0.34** | **0.17** |
+
+Five of six categories, and roughly double overall. But note the absolute numbers: named
+brands date only about a third of their pages.
+
+**Change made.** The earlier flawed study put the trigger at 50% coverage, taken from
+encyclopedias that date 85% of pages. Against real brands that bar would have fired on most
+of the ones assistants *do* name. `R-DATE-SIGNALS` now triggers below **25%**, which sits
+between the two observed means.
+
+---
+
+## Result 4 — Structured data coverage runs backwards
+
+| Category | Named | Not named |
+|---|---|---|
+| Coffee | 0.07 | 0.67 |
+| CRM | 0.33 | 0.73 |
+| Password manager | 0.05 | 0.23 |
+| Standing desk | 0.52 | 1.00 |
+| Trail shoes | 0.73 | 1.00 |
+| Mattress | 1.00 | 0.03 |
+| **Mean** | **0.44** | **0.62** |
+
+Brands assistants ignore carry **more** JSON-LD than brands they name, in five of six
+categories. 62% of the named brands had no Organization markup anywhere.
+
+The likely reading: structured data is what a brand adds when it is trying to be found.
+Brands that are already found have less need of it and often skip it.
+
+**Change made.** `no-org-schema` and `no-product-schema` drop from `high` to `medium`.
+Absence is still worth fixing — markup is the one place identity is stated as data rather
+than inferred from prose — but calling it `high` asserts more than the evidence supports.
+
+**Deliberately not changed.** `invalid-jsonld` and `schema-text-mismatch` stay at `high`.
+Mismatch was one of the few root causes that leaned the right way (23% of unnamed brands
+against 12% of named). Correctness of markup matters even where quantity does not, which is
+a sharper claim than "add more schema" and a better one.
+
+---
+
+## Result 5 — Noise, and what removing it did
+
+The first run flagged an average of 15.4 findings on brands assistants name and 13.5 on
+brands they ignore. Our audit found *more* problems on the brands that were working.
+
+That was not an awkward truth about the world. It was our own noise. Fourteen checks fired
+on more than 40% of every site audited, and several fired *more often on the named brands* —
+the reliable signature of a check measuring "is a website" rather than "is broken".
+
+Nine were corrected. The bugs were more instructive than the thresholds:
+
+| Problem | What it did | Fix |
+|---|---|---|
+| Navigation selector | Read a promotional banner as a whole site's menu, then reported "the primary navigation has 1 item" | Skip when the menu cannot be isolated, and say so |
+| Navigation upper bound | Flagged a 29-item megamenu. Every retailer has one | Bound removed; only "fewer than 3" survives |
+| Homepage fallback | Judged a blog post's navigation when no homepage was crawled | Requires an actual homepage |
+| `www` duplication | Crawled a site with and without the `www.` prefix as two pages, then reported duplicate titles | One page, one crawl |
+| Section detection | Counted 57 product tiles as prose sections and complained none opened with a fact | A section needs real paragraph text |
+| Heading structure | Flagged multiple H1s and skipped levels — valid HTML that machines read fine | Only a page with no heading at all |
+| Jargon density | 25% of sentences over 30 words is ordinary technical prose | Raised to 40% |
+| Meta hygiene | Flagged one missing description on a 7-page crawl; called 75-char titles long | Needs 25% of pages; range widened to 90 |
+| Entity definition severity | `high` on 61% of sites, including ones assistants name constantly | `high` only when the brand is never named at all |
+
+Result across four full re-runs of all 36 sites:
+
+| Measure | Before | After |
+|---|---|---|
+| Critical + high, named brands | 2.31 | **1.25** |
+| Critical + high, unnamed brands | 2.46 | **1.15** |
+| `weak-corroboration` fires on | 97% of sites | 55%, and now correctly more often on unnamed (10) than named (6) |
+| `no-orientation` fires on | 93% | 41% |
+| `heading-structure` fires on | 93% | 48% |
+| `robots-block` fires on | 86% | 55% |
+
+Two things to take from this. A check that fires on almost every site carries no information
+however sound its reasoning, and the fastest way to find one is to look for checks that fire
+*more* on the sites that are working. And the finding count in a report is a work list, not
+a grade — `report.md` opens with a plain-language verdict and never a score.
+
+## What we did not do
+
+**We did not reweight severities until cohort B looked worse.** On hygiene the two cohorts
+genuinely score alike. Tuning until the desired answer appeared would be fitting to 29 sites,
+which is the opposite of the generalisation the brief asks for.
+
+**We did not add an authority or backlink check.** It would separate the cohorts almost
+perfectly and be useless: nobody can act on "be more famous", and the brief rules out
+commercial levers.
+
+**We did not delete the structured-data skill** on the strength of one inverse result. The
+mechanism argument — explicit beats implied — still holds, the correctness checks within it
+lean the right way, and 29 sites is not enough to justify removing a gate.
+
+---
+
+## What this means for the product
+
+These checks measure a **floor, not a ceiling**. They detect what *prevents* citation: a
+blocked crawler, an empty shell, a page with no quotable sentence, markup that contradicts
+the page. They cannot manufacture what *causes* it — being the canonical source, breadth of
+coverage, corroboration you do not control.
+
+A brand that fixes everything flagged here becomes eligible to be cited. It does not thereby
+become the source everyone quotes. Two of the levers that *did* separate the cohorts — profile
+breadth and dating discipline — are now the two best-evidenced recommendations in the
+catalogue, and both are cheap.
 
 ---
 
 ## Limits
 
-Say these out loud rather than letting a reader assume otherwise.
-
-- **n = 9, of which two returned no pages.** This indicates a direction; it does not
-  establish a threshold. The 50% date-coverage trigger is a judgement informed by the data,
-  not derived from it.
-- **Cohort membership was assigned, not measured.** We did not query ChatGPT, Gemini,
-  Claude or Perplexity to confirm citation rates. Doing so properly needs a query set, an
-  attribution method, and repeated sampling over time. That is a monitoring programme, and
-  it is out of scope for a point-in-time audit.
-- **Cohort A is authority-dominated.** Reference sites are cited partly for reasons no
-  amount of markup will reproduce. A better cohort A would be mid-sized commercial sites
-  that are demonstrably cited in their category — harder to identify without the
-  measurement above.
-- **15 pages per site.** On sites with millions of pages this is a keyhole.
-
-The honest summary: this study is strong enough to have changed one recommendation and
-reframed the report, and not strong enough to justify a scoring model.
+- **29 crawlable sites, 6 categories.** Enough to establish direction and move two
+  thresholds. Not enough to fit a model.
+- **Labels are a prominence judgement, not a measurement.** Corroborated against live search
+  for several categories, but no assistant was queried systematically. Doing that properly
+  needs a query set, an attribution method and repeated sampling over time — a monitoring
+  programme, not a point-in-time audit.
+- **15 pages per site.** On a large retailer this is a keyhole, and date coverage in
+  particular will be sensitive to which pages the crawl reached.
+- **Prominence is not causation.** Named brands may link more profiles because they are
+  larger, not be larger because they link more profiles. The recommendation stands on the
+  mechanism as well as the correlation — independent sources repeating the same description
+  is what corroboration means — but the study alone cannot separate the two.
