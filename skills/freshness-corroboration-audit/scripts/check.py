@@ -149,6 +149,15 @@ def run(snapshot, now=None, allow_network=True):
 
     result.signal("press_page_present", any(p["page_type"] == "press" for p in pages))
     result.signal("reference_date", now.isoformat())
+
+    # Site-wide date coverage, recorded as a signal rather than a finding.
+    # In our cited-versus-uncited study this was the one hygiene measure that
+    # separated the two cohorts: reference sites that assistants quote
+    # constantly dated 85% of crawled pages, ordinary brand sites 35%.
+    # See references/cited-vs-uncited-study.md.
+    dated = sum(1 for p in pages if (p.get("dates") or {}).get("has_any"))
+    result.signal("date_coverage", round(dated / float(len(pages)), 2))
+    result.signal("dated_page_count", dated)
     return result
 
 
@@ -335,13 +344,57 @@ def _check_stale_year_references(result, pages, now):
 
 
 def _check_sitemap_lastmod(result, snapshot, now):
+    """Both halves of sitemap dating: how many entries carry a date, and how old they are.
+
+    crawl-access-audit owns whether a sitemap exists and resolves. Whether its
+    dates mean anything is mechanism D, so it belongs here. Splitting the two
+    across skills left one root cause with two owners.
+    """
+    result.check("sitemap-lastmod-coverage")
     result.check("sitemap-lastmod-recency")
+
     entries = []
+    total_urls = 0
     for record in snapshot.get("sitemaps") or []:
         for entry in record.get("urls") or []:
+            total_urls += 1
             parsed = parse_date(entry.get("lastmod"))
             if parsed:
                 entries.append(parsed)
+
+    if not total_urls:
+        for name in ("sitemap-lastmod-coverage", "sitemap-lastmod-recency"):
+            result.skip(name, "no sitemap URLs were found, so there are no dates to assess")
+        return
+
+    coverage = len(entries) / float(total_urls)
+    result.signal("sitemap_lastmod_coverage", round(coverage, 2))
+
+    if coverage < 0.5:
+        result.add(
+            id_hint="sitemap-lastmod-sparse",
+            title="Most sitemap entries carry no <lastmod> date",
+            severity="low", confidence="high",
+            evidence="{} of {} sitemap entries ({}%) have a <lastmod> value.".format(
+                len(entries), total_urls, pct(len(entries), total_urls)),
+            mechanism="D", root_cause="no-date-signal",
+            summary="Emit an accurate <lastmod> for every sitemap entry.",
+            how_to_fix=[
+                "Configure the sitemap generator to write <lastmod> from the page's real "
+                "modification date.",
+                "Do not set <lastmod> to today's date on every build. A date that always "
+                "changes carries no information, and crawlers learn to ignore it.",
+            ],
+            effort="low", owner="developer",
+            rationale="Mechanism D: <lastmod> is how a crawler decides which pages are worth "
+                      "re-fetching. Without it, updated pages are re-read on a slow default "
+                      "cycle, so your changes take longer to be noticed.",
+        )
+    else:
+        result.skip("sitemap-lastmod-coverage",
+                    "{}% of sitemap entries carry a <lastmod> value".format(
+                        pct(len(entries), total_urls)))
+
     if len(entries) < 5:
         result.skip("sitemap-lastmod-recency",
                     "fewer than 5 sitemap entries carry a parsable <lastmod>, so the "

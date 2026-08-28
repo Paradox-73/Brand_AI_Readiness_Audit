@@ -76,6 +76,10 @@ ROOT_CAUSES = frozenset({
     # Gate C - structured data
     "no-org-schema", "no-product-schema", "no-article-schema", "invalid-jsonld",
     "schema-text-mismatch", "missing-schema-props", "meta-hygiene",
+    # Distinct from `no-breadcrumbs`: that is the visible trail a person
+    # follows, this is the machine-readable hierarchy. Different owners,
+    # different fixes, so they get different tags.
+    "no-breadcrumb-markup",
     # Gate C - extractability
     "no-entity-definition", "heading-structure", "fluff-first",
     "missing-core-fact", "name-inconsistency", "jargon-density",

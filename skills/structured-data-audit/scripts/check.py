@@ -592,7 +592,7 @@ def _check_breadcrumbs(result, pages, by_type):
         severity="low", confidence="high",
         evidence="{} of {} crawled deep pages declare no BreadcrumbList. Examples: {}.".format(
             len(without), len(deep), ", ".join(sample([p["url"] for p in without], 5))),
-        mechanism="C", root_cause="no-breadcrumbs",
+        mechanism="C", root_cause="no-breadcrumb-markup",
         summary="Add BreadcrumbList JSON-LD to deep page templates.",
         how_to_fix=[
             "Add BreadcrumbList markup mirroring the visible breadcrumb trail.",

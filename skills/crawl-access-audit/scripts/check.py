@@ -389,25 +389,12 @@ def _check_sitemaps(result, snapshot, fetcher):
                       "line is the cheapest way to hand it the full page list.",
         )
 
-    if total_urls and total_lastmod / total_urls < 0.5:
-        result.add(
-            id_hint="sitemap-lastmod-sparse",
-            title="Most sitemap entries carry no <lastmod> date",
-            severity="low", confidence="high",
-            evidence="{} of {} sitemap entries ({}%) have a <lastmod> value.".format(
-                total_lastmod, total_urls, pct(total_lastmod, total_urls)),
-            mechanism="D", root_cause="no-date-signal",
-            summary="Emit an accurate <lastmod> for every sitemap entry.",
-            how_to_fix=[
-                "Configure the sitemap generator to write <lastmod> from the page's real "
-                "modification date.",
-                "Do not set <lastmod> to today's date on every build; a date that always "
-                "changes carries no information and crawlers learn to ignore it.",
-            ],
-            effort="low", owner="developer",
-            rationale="Mechanism D: <lastmod> is how a crawler decides which pages are worth "
-                      "re-fetching. Without it, updated pages are re-read on a slow default cycle.",
-        )
+    # Whether the sitemap's dates are meaningful is mechanism D, and
+    # freshness-corroboration-audit owns it. This skill owns only whether the
+    # sitemap exists, parses, and resolves.
+    result.skip("sitemap-lastmod-coverage",
+                "<lastmod> coverage and recency are assessed by "
+                "freshness-corroboration-audit, which owns date signals")
 
     _check_sitemap_urls_resolve(result, snapshot, reachable, fetcher)
 

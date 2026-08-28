@@ -208,6 +208,27 @@ def test_root_cause_vocabulary_is_shared_and_closed():
     assert not unknown, "root causes used but not declared in audit_common: {}".format(unknown)
 
 
+def test_no_root_cause_has_two_owners():
+    """Separation of concerns, enforced rather than asserted.
+
+    Two skills emitting the same root cause means the decomposition is leaking:
+    either they duplicate work, or one is reaching into the other's territory.
+    Both happened during the build - sitemap `<lastmod>` was split between the
+    access and freshness skills, and breadcrumb markup shared a tag with the
+    visible breadcrumb trail.
+    """
+    owners = {}
+    for name in SUB_SKILLS:
+        path = os.path.join(SKILLS_DIR, name, "scripts", "check.py")
+        with open(path, encoding="utf-8") as handle:
+            for root_cause in set(re.findall(r'root_cause="([a-z-]+)"', handle.read())):
+                owners.setdefault(root_cause, []).append(name)
+
+    shared = {rc: skills for rc, skills in owners.items() if len(skills) > 1}
+    assert not shared, "root causes claimed by more than one skill: {}".format(
+        {rc: sorted(s) for rc, s in shared.items()})
+
+
 def test_mechanism_letters_are_declared():
     used = set()
     for name in SUB_SKILLS:

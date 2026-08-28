@@ -119,6 +119,9 @@ search API.
 ## References
 
 - `references/mechanism-model.md` — the seven mechanisms every check traces back to.
+- `references/cited-vs-uncited-study.md` — what actually separates sites assistants cite
+  from sites they ignore, measured across nine real sites, including the finding that most
+  of these checks do not separate them.
 - `references/round2-failure-modes.md` — the failure modes this marketplace was built from.
 - `references/severity-and-priority.md` — how severity, reach, effort and priority are set.
 - `references/proactive-recommendations.md` — the catalogue and each entry's trigger condition.
