@@ -19,8 +19,28 @@ from collections import Counter
 from urllib.parse import urlparse
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(_HERE)),
-                                "audit-orchestrator", "scripts"))
+_SHARED = os.path.join(os.path.dirname(os.path.dirname(_HERE)),
+                       "audit-orchestrator", "scripts")
+sys.path.insert(0, _SHARED)
+
+# This skill reads the marketplace's shared library. One definition of the
+# finding schema, the root-cause vocabulary and the page-type detector keeps six
+# skills from drifting apart. The trade-off is that a skill folder lifted out of
+# the marketplace on its own cannot run, so say that plainly instead of failing
+# with an import traceback.
+if not os.path.isfile(os.path.join(_SHARED, "audit_common.py")):
+    raise SystemExit(os.linesep.join([
+        "Cannot find the shared library that this skill depends on.",
+        "  Looked in: " + _SHARED,
+        "",
+        "This skill belongs to the brand-ai-readiness-audit marketplace and reads",
+        "skills/audit-orchestrator/scripts/audit_common.py. Copy or run the whole",
+        "marketplace rather than a single skill directory.",
+        "",
+        "To perform these checks without the marketplace, follow the Procedure",
+        "section of this skill's SKILL.md by hand. It states every check in prose",
+        "and produces the same findings.",
+    ]))
 
 from audit_common import (  # noqa: E402
     CONTENT_TYPES, USER_AGENT, FetchError, Fetcher, SkillResult, load_snapshot,
