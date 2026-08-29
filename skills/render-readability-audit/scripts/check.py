@@ -53,6 +53,8 @@ EMPTY_ROOT_TEXT = 200        # a framework root with under 200 chars has not ren
 SHELL_SHARE_HIGH = 0.5       # more than half of content pages being shells is a site-wide failure
 RENDER_GAP_SIGNIFICANT = 0.6 # JavaScript adding 60%+ of the text means the static HTML is a stub
 IMAGE_DOMINANT_TEXT = 400    # a page with a hero image and under 400 chars is carrying facts in pixels
+EXTERNAL_BUNDLE_COUNT = 3    # modern builds ship code-split external chunks and no inline script at all
+THIN_SHARE = 0.3             # a third of content pages too short to quote is a site-wide problem
 
 # Link text that promises the numbers a buyer needs.
 FACT_BEARING_PDF_RE = re.compile(
@@ -105,8 +107,12 @@ def run(snapshot):
 def _shell_reasons(page):
     """Why this page looks like a container rather than content.
 
-    Two independent signals are required before calling a page a shell, so a
-    genuinely short page (a thin contact page, say) is not misread as broken.
+    Normally two independent signals are required, so a genuinely short page (a
+    thin contact page, say) is not misread as broken. The exception is an empty
+    framework mount point on a page with almost no text: nothing but a shell
+    produces that combination, and requiring a second signal missed the single
+    most common shape on the web - a React or Vue build whose scripts are all
+    external, so the "heavy inline script" signal never fires.
     """
     spa = page.get("spa_shell") or {}
     scripts = page.get("scripts") or {}
@@ -114,12 +120,16 @@ def _shell_reasons(page):
 
     text_len = page.get("body_text_len", 0)
     script_bytes = scripts.get("inline_bytes", 0) + spa.get("state_blob_bytes", 0)
-
-    if text_len < MIN_QUOTABLE_TEXT and script_bytes > HEAVY_SCRIPT_BYTES:
-        reasons.append("{} chars of visible text against {:,} bytes of script".format(
-            text_len, script_bytes))
     root_len = spa.get("root_text_len")
-    if spa.get("root_selector") and root_len is not None and root_len < EMPTY_ROOT_TEXT:
+    empty_root = bool(spa.get("root_selector")) and root_len is not None         and root_len < EMPTY_ROOT_TEXT
+
+    if text_len < MIN_QUOTABLE_TEXT and (
+            script_bytes > HEAVY_SCRIPT_BYTES
+            or scripts.get("external_count", 0) >= EXTERNAL_BUNDLE_COUNT):
+        reasons.append("{} chars of visible text against {:,} bytes of inline script "
+                       "and {} external script(s)".format(
+                           text_len, script_bytes, scripts.get("external_count", 0)))
+    if empty_root:
         reasons.append("framework root `{}` contains {} chars".format(
             spa["root_selector"], root_len))
     if spa.get("state_blobs") and text_len < MIN_QUOTABLE_TEXT * 2:
@@ -127,6 +137,9 @@ def _shell_reasons(page):
             ", ".join(spa["state_blobs"][:2])))
     if spa.get("noscript_demands_js"):
         reasons.append("<noscript> tells the visitor to enable JavaScript")
+
+    if empty_root and text_len < MIN_QUOTABLE_TEXT:
+        return reasons
     return reasons if len(reasons) >= 2 else []
 
 
@@ -213,7 +226,59 @@ def _check_shells(result, snapshot, content_pages, render_mode):
         result.skip("spa-shell-detection",
                     "every crawled content page delivered readable text in the initial HTML "
                     "response")
+
+    _check_thin_pages(result, content_pages, shells)
     return shells
+
+
+def _check_thin_pages(result, content_pages, shells):
+    """Pages that are simply too short to quote, with no shell to explain it.
+
+    Distinct from `js-shell`, where the text exists but arrives after
+    JavaScript, and from `image-locked-facts`, where it exists but as pixels.
+    This is the plain case: the page really does say almost nothing, so there
+    is no sentence for an assistant to lift and nothing for a visitor to read.
+    """
+    shell_urls = {p["url"] for p in shells}
+    thin = [p for p in content_pages
+            if p["url"] not in shell_urls
+            and p.get("body_text_len", 0) < MIN_QUOTABLE_TEXT]
+
+    if not thin:
+        result.skip("thin-html",
+                    "every crawled content page carries at least {} characters of body text, "
+                    "which is enough to hold a quotable fact".format(MIN_QUOTABLE_TEXT))
+        return
+
+    rate = len(thin) / float(len(content_pages))
+    result.add(
+        id_hint="pages-too-thin-to-quote",
+        title="{} page(s) carry too little text to be quoted".format(len(thin)),
+        severity="high" if rate >= THIN_SHARE else "medium",
+        confidence="high",
+        evidence="{} of {} content pages ({}%) hold under {} characters of body text. "
+                 "Examples: {}.".format(
+                     len(thin), len(content_pages), pct(len(thin), len(content_pages)),
+                     MIN_QUOTABLE_TEXT,
+                     "; ".join("{} ({} chars)".format(p["url"], p.get("body_text_len", 0))
+                               for p in sorted(thin, key=lambda x: x["url"])[:3])),
+        mechanism="C", root_cause="thin-html",
+        summary="Give each of these pages at least a paragraph of plain text stating what it "
+                "is and one concrete fact.",
+        how_to_fix=[
+            "For each page listed, write two or three sentences of body copy: what this page "
+            "covers, who it is for, and one specific number, name or place.",
+            "If the page is a gallery or a listing, add a short introduction above the grid "
+            "and a one-line description under each item.",
+            "If the page exists only to redirect attention elsewhere, remove it from the "
+            "sitemap rather than leaving an empty URL in the index.",
+        ],
+        effort="medium", owner="content owner",
+        rationale="Mechanism B: assistants quote what is easy to lift. A page with nothing to "
+                  "lift is crawled, indexed and then never cited, and it dilutes the site's "
+                  "average quality in the process.",
+        affected_pages=[p["url"] for p in thin],
+    )
 
 
 def _check_render_gap(result, content_pages, render_mode):

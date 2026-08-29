@@ -385,9 +385,22 @@ def _paragraphs(soup):
     return out
 
 
+MAIN_REGION_SELECTOR = "main, article, [role=main], #main, #content"
+
+
+def main_region(soup):
+    """The page's own content, excluding site-wide chrome.
+
+    One definition, used by both the link count and the CTA scan. When they
+    disagreed, a footer link counted as a page's call to action and the
+    dead-end check could never fire on any site with a footer.
+    """
+    return soup.select_one(MAIN_REGION_SELECTOR) or soup.body or soup
+
+
 def _links(soup, base, origin):
     internal, external, nav, footer = [], [], [], []
-    main_region = soup.select_one("main, article, [role=main], #main, #content") or soup.body or soup
+    main_region_node = main_region(soup)
     nav_nodes = soup.select("nav, header nav, [role=navigation]")
     footer_nodes = soup.select("footer, [role=contentinfo]")
 
@@ -403,7 +416,7 @@ def _links(soup, base, origin):
         collect(node, footer)
 
     main_links = []
-    collect(main_region, main_links)
+    collect(main_region_node, main_links)
 
     seen = set()
     for anchor in soup.find_all("a", href=True):
@@ -606,11 +619,17 @@ def _spa_shell(soup, html, page_text):
 
 
 def _breadcrumb(soup, jsonld_types):
-    if "BreadcrumbList" in jsonld_types:
-        return True
-    if soup.select('[class*="breadcrumb"], [id*="breadcrumb"], nav[aria-label*="readcrumb"]'):
-        return True
-    return bool(soup.select('[itemtype*="BreadcrumbList"]'))
+    """Whether this page shows a trail, marks one up, or both.
+
+    Kept apart deliberately. A visitor who landed mid-journey needs the visible
+    trail; a machine needs the markup. Treating JSON-LD as proof of a visible
+    breadcrumb made the visible-trail check impossible to fail.
+    """
+    visible = bool(soup.select(
+        '[class*="breadcrumb"], [id*="breadcrumb"], nav[aria-label*="readcrumb"]'))
+    markup = "BreadcrumbList" in jsonld_types or bool(
+        soup.select('[itemtype*="BreadcrumbList"]'))
+    return {"visible": visible, "markup": markup, "any": visible or markup}
 
 
 def _has_search(soup):
@@ -628,6 +647,8 @@ def _cta(soup, body_text, origin, base):
     first_offset = None
     first_text = ""
     first_url = ""
+    in_main = False
+    main_anchors = {id(a) for a in main_region(soup).find_all("a", href=True)}
     for anchor in soup.find_all("a", href=True):
         text = _text_or_empty(anchor)
         low = text.lower().strip()
@@ -643,6 +664,8 @@ def _cta(soup, body_text, origin, base):
             offset = lowered.find(low[:40])
             if offset < 0:
                 offset = 10 ** 6
+            if id(anchor) in main_anchors:
+                in_main = True
             if first_offset is None or offset < first_offset:
                 first_offset = offset
                 first_text = text
@@ -654,6 +677,9 @@ def _cta(soup, body_text, origin, base):
         "url": first_url,
         "offset": first_offset if first_offset is not None else -1,
         "within_first_1500": bool(first_offset is not None and first_offset <= 1500),
+        # A "Contact" link in the global footer is not this page's next step.
+        # Without this distinction the dead-end check was unfirable.
+        "in_main": in_main,
         "button_count": buttons,
     }
 
@@ -714,6 +740,10 @@ def _contact_facts(text, soup):
     return {
         "emails": emails,
         "phones": phones,
+        # Numbers the site put in a `tel:` href, so declared rather than
+        # inferred. Comparing these between pages is safe; comparing the
+        # regex-scraped ones above is not.
+        "declared_phones": tel_links,
         "has_email": bool(emails or soup.select('a[href^="mailto:"]')),
         "has_phone": bool(phones),
         "street_hint": truncate(street.group(0), 120) if street else "",

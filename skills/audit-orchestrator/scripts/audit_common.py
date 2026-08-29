@@ -74,7 +74,8 @@ ROOT_CAUSES = frozenset({
     "js-shell", "thin-html", "image-locked-facts", "pdf-locked-facts",
     "no-transcript", "iframe-content", "uncrawlable-pagination", "alt-missing",
     # Gate C - structured data
-    "no-org-schema", "no-product-schema", "no-article-schema", "invalid-jsonld",
+    "no-org-schema", "no-product-schema", "no-article-schema", "no-faq-schema",
+    "invalid-jsonld",
     "schema-text-mismatch", "missing-schema-props", "meta-hygiene",
     # Distinct from `no-breadcrumbs`: that is the visible trail a person
     # follows, this is the machine-readable hierarchy. Different owners,
@@ -82,12 +83,12 @@ ROOT_CAUSES = frozenset({
     "no-breadcrumb-markup",
     # Gate C - extractability
     "no-entity-definition", "heading-structure", "fluff-first",
-    "missing-core-fact", "name-inconsistency", "jargon-density",
+    "missing-core-fact", "name-inconsistency", "long-sentences",
     # D - freshness and corroboration
     "stale-content", "no-date-signal", "weak-corroboration", "entity-ambiguity",
     "nap-inconsistency",
     # Engagement
-    "no-orientation", "dead-end", "broken-links", "orphan-pages",
+    "no-orientation", "dead-end", "inconsistent-chrome", "broken-links", "orphan-pages",
     "no-breadcrumbs", "title-body-drift", "page-weight",
     "intrusive-interstitial", "readability", "form-friction",
 })

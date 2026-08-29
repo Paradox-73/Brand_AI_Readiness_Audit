@@ -88,9 +88,14 @@ class AuditResult:
         return [f for f in self.report["findings"] if f["root_cause"] == root_cause]
 
 
-def _audit(name, out_dir, no_network=False):
-    """Serve, crawl and audit one fixture directory. Returns (server, AuditResult)."""
-    server = FixtureServer(os.path.join(FIXTURES, name)).__enter__()
+def _audit(name, out_dir, no_network=False, site_dir=None):
+    """Serve, crawl and audit one site directory. Returns (server, AuditResult).
+
+    `site_dir` defaults to the named fixture. The mutation suite passes a
+    throwaway copy instead, so it can break one property at a time without
+    touching the fixtures the rest of the suite depends on.
+    """
+    server = FixtureServer(site_dir or os.path.join(FIXTURES, name)).__enter__()
     try:
         snapshot_path = os.path.join(out_dir, "snapshot.json")
         run_script([os.path.join(SCRIPTS, "crawl.py"), server.base_url,

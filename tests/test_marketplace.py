@@ -287,3 +287,45 @@ def test_marketplace_is_small_enough_to_submit():
             total += os.path.getsize(os.path.join(directory, filename))
     megabytes = total / (1024 * 1024)
     assert megabytes < 5, "marketplace is {:.1f} MB before compression".format(megabytes)
+
+
+def test_internal_working_documents_stay_out_of_the_deliverable():
+    """The brief asks for a manifest, the skills and a README.
+
+    Our planning notes, the review plan and the running status log are how the
+    team worked, not what the team is submitting. They live one directory up,
+    alongside the source material. Anyone who moves one back in will fail here
+    before it reaches a zip.
+    """
+    ours = ("DECISIONS.md", "PROGRESS.md", "VERIFICATION.md", "NOTES.md", "TODO.md")
+    present = [name for name in ours if os.path.exists(os.path.join(ROOT, name))]
+    assert not present, (
+        "these are internal working documents and are not part of the "
+        "submission: {}. Keep them outside the packaged directory.".format(present))
+
+
+def test_every_markdown_file_in_the_package_belongs_there():
+    """Every remaining document is one the brief asks for or a skill depends on."""
+    allowed_at_root = {"README.md"}
+    strays = []
+    for directory, subdirectories, files in os.walk(ROOT):
+        subdirectories[:] = [d for d in subdirectories
+                             if d not in ("__pycache__", ".git", ".venv", "out",
+                                          ".pytest_cache", "node_modules")]
+        for filename in files:
+            if not filename.endswith(".md"):
+                continue
+            relative = os.path.relpath(os.path.join(directory, filename), ROOT)
+            parts = relative.replace("\\", "/").split("/")
+            if len(parts) == 1:
+                if filename not in allowed_at_root:
+                    strays.append(relative)
+            elif parts[0] == "skills":
+                # A SKILL.md, or a reference the skill declares it reads.
+                if not (filename == "SKILL.md" or "references" in parts):
+                    strays.append(relative)
+            elif parts[0] == "evals":
+                continue
+            else:
+                strays.append(relative)
+    assert not strays, "unexpected documents in the package: {}".format(sorted(strays))

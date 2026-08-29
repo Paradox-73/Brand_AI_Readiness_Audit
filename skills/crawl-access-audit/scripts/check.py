@@ -71,6 +71,10 @@ TRAINING_CRAWLERS = (
 )
 
 MAX_EXTRA_REQUESTS = 10
+# Canonical targets the crawl never reached. Capped low: this is a
+# diagnostic, not a link checker, and the site did not ask to be crawled
+# harder than the budget already allows.
+CANONICAL_PROBE_LIMIT = 3
 SITEMAP_PROBE_LIMIT = 8
 
 
@@ -93,7 +97,7 @@ def run(snapshot, allow_network=True):
     _check_robots_blocks(result, robots, origin)
     _check_sitemaps(result, snapshot, fetcher)
     _check_bot_manager(result, snapshot, robots, fetcher, allow_network)
-    _check_status_and_indexability(result, snapshot, pages, ok_pages)
+    _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher)
     _check_transport_and_hosts(result, snapshot, ok_pages)
 
     result.check("llms-txt-presence")
@@ -547,7 +551,7 @@ def _ua_string(name):
     return "{} ({}; comparison probe)".format(name, USER_AGENT)
 
 
-def _check_status_and_indexability(result, snapshot, pages, ok_pages):
+def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=None):
     result.check("homepage-reachable")
     result.check("non-200-rate")
     result.check("redirect-chain-length")
@@ -678,10 +682,10 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages):
     else:
         result.skip("noindex-on-content-pages", "no crawled content page carries a noindex directive")
 
-    _check_canonicals(result, snapshot, ok_pages)
+    _check_canonicals(result, snapshot, ok_pages, fetcher)
 
 
-def _check_canonicals(result, snapshot, ok_pages):
+def _check_canonicals(result, snapshot, ok_pages, fetcher=None):
     origin_host = strip_www(urlparse(snapshot["origin"]).netloc.lower())
     known_status = {p["url"]: p.get("status") for p in snapshot.get("pages") or []}
     off_domain, broken = [], []
@@ -690,6 +694,26 @@ def _check_canonicals(result, snapshot, ok_pages):
     if not with_canonical:
         result.skip("canonical-targets", "no crawled page declares a canonical URL")
         return
+
+    # A canonical usually points somewhere the crawl already went, in which case
+    # its status is free. The damaging case is the one it does not: a canonical
+    # aimed at a URL that no longer exists tells every consumer to ignore the
+    # page it is on. That target is invisible to the crawl, so a small number of
+    # HEAD requests are spent resolving the distinct unknown ones.
+    unknown = []
+    for page in with_canonical:
+        canonical = page["canonical"]
+        host = strip_www(urlparse(canonical).netloc.lower())
+        if host and host != origin_host:
+            continue
+        if canonical not in known_status and canonical not in unknown:
+            unknown.append(canonical)
+    for target in unknown[:CANONICAL_PROBE_LIMIT]:
+        if fetcher is None or not fetcher.budget_left:
+            break
+        response = fetcher.try_get(target, method="HEAD")
+        if response is not None:
+            known_status[target] = response.status_code
 
     for page in with_canonical:
         canonical = page["canonical"]

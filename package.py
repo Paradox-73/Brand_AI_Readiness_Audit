@@ -33,8 +33,13 @@ EXCLUDE_DIRS = {
 # File suffixes and names that must never enter the zip.
 EXCLUDE_SUFFIXES = (".pyc", ".pyo", ".zip", ".log")
 EXCLUDE_NAMES = {
-    ".DS_Store", "Thumbs.db", "desktop.ini",
+    ".DS_Store", "Thumbs.db", "desktop.ini", ".gitignore", ".gitattributes",
     "snapshot.json", "report.json", "report.md", "report.html",
+    # Our own working notes. The brief asks for the manifest, the skills and a
+    # README; internal planning documents are not part of the deliverable and
+    # would only pad it. They live outside this directory so they cannot drift
+    # back in, and these names are listed as a second line of defence.
+    "DECISIONS.md", "PROGRESS.md", "VERIFICATION.md", "NOTES.md", "TODO.md",
 }
 
 

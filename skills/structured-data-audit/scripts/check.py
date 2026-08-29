@@ -543,7 +543,7 @@ def _check_faq(result, by_type):
         severity="medium", confidence="high",
         evidence="Pages that read as an FAQ but declare no FAQPage type: {}.".format(
             ", ".join(sample([p["url"] for p in without], 5))),
-        mechanism="C", root_cause="no-org-schema",
+        mechanism="C", root_cause="no-faq-schema",
         summary="Wrap the existing questions and answers in FAQPage JSON-LD.",
         how_to_fix=[
             "Add FAQPage markup listing each question and its answer text verbatim.",

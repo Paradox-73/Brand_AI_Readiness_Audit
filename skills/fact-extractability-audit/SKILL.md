@@ -98,7 +98,7 @@ Standard skill JSON: `findings[]`, `checks_run[]`, `not_applicable[]` (each with
 
 Findings carry mechanism `B` (mostly), `C` (heading structure) or `D` (naming), and a
 `root_cause` of `no-entity-definition`, `heading-structure`, `fluff-first`,
-`missing-core-fact`, `name-inconsistency` or `jargon-density`.
+`missing-core-fact`, `name-inconsistency` or `long-sentences`.
 
 Fixes are rewrite templates, not advice: the exact sentence shape to use with the brand name
 already filled in, an answer-first section pattern, and an FAQ skeleton built from the site's

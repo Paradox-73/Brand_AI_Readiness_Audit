@@ -67,7 +67,7 @@ Nothing found → `likely_citation: null`, with the reason spelled out.
 
 The 40-character floor rejects fragments; the 300-character ceiling rejects sentences too
 long to excerpt without changing their meaning (the same reasoning behind
-`fact-extractability-audit`'s jargon-density check).
+`fact-extractability-audit`'s long-sentences check).
 
 Pages covered: home, about, pricing, faq, product, service, contact, location — capped at 12,
 sorted by URL for determinism.

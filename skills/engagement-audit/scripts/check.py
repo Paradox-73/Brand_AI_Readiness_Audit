@@ -56,7 +56,7 @@ CTA_BYTE_WINDOW = 1500        # roughly the first screen of text; a next step be
 NAV_MIN = 3                   # under 3 top-level items leaves a visitor nowhere to go.
                               # There is deliberately no upper bound: a 29-item megamenu is
                               # normal on real retail sites and costs a machine nothing
-MIN_MAIN_LINKS = 3            # a content page with under 3 onward links is a cul-de-sac
+MIN_MAIN_LINKS = 1            # a cul-de-sac is a page with no way onward at all, not a page with few
 BROKEN_LINK_SAMPLE = 20       # enough to establish a rate without hammering the site
 BROKEN_LINK_HIGH = 0.2        # a fifth of links broken is a maintenance failure, not an accident
 PAGE_WEIGHT_BYTES = 3_000_000 # 3 MB of HTML+inline assets is extreme, not merely heavy
@@ -263,8 +263,13 @@ def _check_dead_ends(result, pages):
             continue
         links = page.get("links") or {}
         main_links = links.get("main_internal_count", 0)
-        has_cta = (page.get("cta") or {}).get("found")
-        if main_links < MIN_MAIN_LINKS and not has_cta:
+        # The CTA has to be in the page's own content. Counting a footer
+        # "Contact" link meant no site with a footer could ever be a dead end.
+        has_cta = (page.get("cta") or {}).get("in_main")
+        # A form is a next step too. An enquiry page whose whole purpose is the
+        # form was being reported as offering nothing to do.
+        has_form = any(not f.get("is_search") for f in page.get("forms") or [])
+        if main_links < MIN_MAIN_LINKS and not has_cta and not has_form:
             dead_ends.append(page)
 
     if not dead_ends:
@@ -278,9 +283,9 @@ def _check_dead_ends(result, pages):
         id_hint="pages-with-no-next-step",
         title="{} page(s) offer no next step".format(len(dead_ends)),
         severity="medium", confidence="medium",
-        evidence="{} of {} content pages ({}%) have fewer than {} internal links in their main "
-                 "content and no call to action. Examples: {}.".format(
-                     len(dead_ends), len(pages), rate, MIN_MAIN_LINKS,
+        evidence="{} of {} content pages ({}%) end without a way onward: no internal link in "
+                 "the main content, no call to action and no form. Examples: {}.".format(
+                     len(dead_ends), len(pages), rate,
                      ", ".join(sample([p["url"] for p in dead_ends], 5))),
         mechanism="G", root_cause="dead-end",
         summary="End every page with a related-content block or a clear next action.",
@@ -432,7 +437,10 @@ def _check_breadcrumbs(result, pages):
                     "fewer than 3 deep pages were crawled, so breadcrumbs would not change "
                     "how the site is navigated")
         return
-    without = [p for p in deep if not p.get("breadcrumb")]
+    # The visible trail only. BreadcrumbList markup is a separate finding
+    # owned by structured-data-audit; markup a visitor cannot see does not
+    # help the visitor who landed mid-journey.
+    without = [p for p in deep if not (p.get("breadcrumb") or {}).get("visible")]
     if len(without) < len(deep) * 0.5:
         result.skip("breadcrumb-navigation",
                     "{} of {} deep pages already show a breadcrumb trail".format(
@@ -564,7 +572,7 @@ def _check_chrome_consistency(result, pages):
                  "share few or none of them: {}.".format(
                      common_count, len(pages),
                      ", ".join(sample([p["url"] for p in stranded], 5))),
-        mechanism="G", root_cause="dead-end",
+        mechanism="G", root_cause="inconsistent-chrome",
         summary="Apply the standard header and footer to every page template.",
         how_to_fix=[
             "Check whether these pages use a different layout, a landing-page template, or a "

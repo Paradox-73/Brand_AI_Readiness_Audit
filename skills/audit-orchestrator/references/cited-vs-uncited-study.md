@@ -24,9 +24,10 @@ category, selling comparable products at comparable prices, that it does not nam
 | Password managers | 3 | 3 |
 | Mattresses | 3 | 3 |
 
-36 sites, 15 pages each, audited with this marketplace. Prominence labels come from model
-knowledge of each category, corroborated against live search results for buying-intent
-queries in several categories.
+36 sites, 15 pages each, audited with this marketplace. The prominence labels are our own
+reading of each category, corroborated against live search results for buying-intent queries
+in several of them. They are a judgement, not a measurement, and the Limits section at the
+end says what that costs us.
 
 **Why matched pairs.** An earlier version of this study compared an encyclopedia and a
 national health service against design agencies. Everything separated, and none of it was
@@ -168,6 +169,57 @@ however sound its reasoning, and the fastest way to find one is to look for chec
 *more* on the sites that are working. And the finding count in a report is a work list, not
 a grade — `report.md` opens with a plain-language verdict and never a score.
 
+## Result 6 — Re-enabling four dead checks, and what it cost
+
+A later pass found that four checks could never fire: shell detection required heavy inline
+script, so a framework build with only external bundles scored nothing; the dead-end check
+required no call to action but scanned the whole document, so a footer link counted as a
+page's next step; the visible-breadcrumb check read the same field as the markup check; and
+cross-page contact details were never compared at all. Fixing those turns four silent checks
+into loud ones at once, which is exactly the change most likely to make reports worse.
+
+So the cohort was re-run twice: once immediately after the fixes, once after correcting what
+the first re-run exposed.
+
+| | Original | Checks re-enabled | After correction |
+|---|---|---|---|
+| Critical + high per site | 1.21 | 1.30 | **1.17** |
+| Total findings per site | 11.8 | 12.1 | **12.0** |
+| Highest-firing check | 66% | 67% | **62%** |
+
+Report length did not move. What moved is what is behind it: four checks that reported
+nothing now report something, and two findings that were filed under the wrong name are filed
+under the right one.
+
+**Three things the middle column hid.**
+
+`dead-end` went from 38% to 67% of sites. The threshold said "fewer than three onward links",
+which is not what a dead end is. A page offering one relevant link is not a cul-de-sac, and a
+contact page whose entire purpose is its form was being reported as offering nothing to do.
+Now it means no internal link in the main content, no call to action and no form — 17%.
+
+`nap-inconsistency` went from 7% to 23%, and the evidence did not survive reading. One site
+"published five telephone numbers": `0235240`, `2003003`, `5055055`, `5250252`. Those are not
+telephone numbers. Any long run of digits looks like one to a regular expression. Narrowing
+to `tel:` links removed the junk and introduced a different error — a site with a sales line,
+a support line and a returns line was reported as contradicting itself. The comparison now
+runs on Organization markup only: a site may publish as many numbers as it has departments,
+but it may not declare two different primary numbers for itself. That fires on 0 of 36, and
+the 6% that remains is the original same-page schema-versus-text check, whose two cases both
+hold up.
+
+"Three pages do not carry the site's normal navigation" was being reported as `dead-end`.
+Missing header and footer is not a dead end — the page has plenty of links, they are the
+wrong ones. Different symptom, different template, so `inconsistent-chrome` now.
+
+**Why this is here rather than in a changelog.** Every fix in this section was found by
+measuring, not by review. Two of the three had already passed a full test suite and a reading
+by the person who wrote them. The lesson is not that we were careless; it is that a check
+firing on two thirds of real sites looks completely reasonable in isolation and is obvious the
+moment you count.
+
+---
+
 ## What we did not do
 
 **We did not reweight severities until cohort B looked worse.** On hygiene the two cohorts
@@ -212,3 +264,55 @@ catalogue, and both are cheap.
   larger, not be larger because they link more profiles. The recommendation stands on the
   mechanism as well as the correlation — independent sources repeating the same description
   is what corroboration means — but the study alone cannot separate the two.
+
+---
+
+## The holdout, and why the sample cannot be reused
+
+Every threshold in this marketplace was moved after looking at these 36 sites. That makes the
+36 a **training set**. Re-running the audit over them and reporting the improvement measures
+how well we fitted the sample, not how the audit behaves on a site nobody has seen — and the
+temptation to keep tuning until the numbers look good is exactly how a tool ends up
+describing its own test data.
+
+So the sample is now closed. No threshold moves on evidence drawn from these sites again.
+
+### Protocol
+
+Anyone can run this and it takes about half an hour of machine time.
+
+1. **Draw 24 sites in six categories nobody has touched.** Not the six here. The point is to
+   change the buyer intent, the page shapes and the platforms at once — a law firm, a hospital
+   trust, a university department, a local restaurant group, a developer-tools company, a
+   charity. Four per category, chosen before anything is audited.
+2. **Write down the prediction first**, in the file, before the first crawl: how many
+   critical-or-high findings per site we expect, and which three root causes we expect to be
+   most common. A prediction made after the run is not a prediction.
+3. **Run the audit once per site.** One pass. No re-runs with adjusted settings.
+4. **Compare against the prediction and stop.** Record the result whatever it is.
+
+### What each outcome means
+
+| Outcome | Reading |
+|---|---|
+| Findings per site within about one of the prediction | The thresholds generalise. Nothing to change. |
+| Substantially more findings than predicted | Either the new categories really are worse, or a check is firing on a page shape we never built. Read the three most common findings and check them by hand before touching any threshold. |
+| A single check firing on more than about 70% of the holdout | Treat as broken until proven otherwise. That was the signature of all nine checks removed in Result 5. |
+| Findings ordered the wrong way inside a category | The check is measuring size or fame rather than the defect. |
+
+### The rule that matters
+
+If the holdout says a threshold is wrong, the honest move is to change it **and then draw a
+fresh holdout**, because the old one has just become training data too. Tuning against the
+same set twice is how the first version of this study produced a tool that found more problems
+on well-cited brands than on ignored ones.
+
+### What a holdout cannot tell you
+
+It measures the audit against sites. It says nothing about whether a check detects the thing
+it claims to detect, because on a real site the cause is never controlled — a page with no
+Organization markup usually has ten other things wrong with it too. That question is answered
+in `tests/mutations.py`, where the cause is introduced one at a time into a site that is
+otherwise clean. The two methods are complements: the mutation suite proves the checks are
+sound, the holdout proves the thresholds are not overfitted, and neither substitutes for the
+other.

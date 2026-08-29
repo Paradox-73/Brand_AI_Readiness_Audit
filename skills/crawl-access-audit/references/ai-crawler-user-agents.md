@@ -50,7 +50,7 @@ the failure mode this audit exists to prevent. Misclassifying it the other way p
 reasonable advice either way.
 
 The finding text never claims GPTBot is purely a search crawler, and this file is cited from
-it. Recorded as an assumption in `DECISIONS.md`.
+it. Treated as an assumption throughout, not as a measured fact.
 
 ---
 

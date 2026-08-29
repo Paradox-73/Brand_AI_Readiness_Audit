@@ -111,7 +111,7 @@ def run(snapshot):
 
     if not pages:
         for name in ("entity-definition", "heading-hierarchy", "answer-first-paragraphs",
-                     "core-facts-present", "brand-naming-consistency", "jargon-density"):
+                     "core-facts-present", "brand-naming-consistency", "long-sentences"):
             result.skip(name, "no content pages returned HTTP 200")
         return result
 
@@ -120,7 +120,7 @@ def run(snapshot):
     _check_answer_first(result, pages, brand_name)
     _check_core_facts(result, snapshot, pages, brand_name)
     _check_naming_consistency(result, snapshot, pages, brand)
-    _check_jargon_density(result, pages)
+    _check_long_sentences(result, pages)
     return result
 
 
@@ -648,19 +648,19 @@ def _check_naming_consistency(result, snapshot, pages, brand):
     )
 
 
-def _check_jargon_density(result, pages):
-    result.check("jargon-density")
+def _check_long_sentences(result, pages):
+    result.check("long-sentences")
     measurable = [p for p in pages
                   if (p.get("readability") or {}).get("sentence_count", 0) >= 8]
     if not measurable:
-        result.skip("jargon-density",
+        result.skip("long-sentences",
                     "no crawled page has enough prose (8+ sentences) to measure sentence length")
         return
 
     offenders = [p for p in measurable
                  if (p.get("readability") or {}).get("long_sentence_share", 0) > LONG_SENTENCE_SHARE]
     if not offenders:
-        result.skip("jargon-density",
+        result.skip("long-sentences",
                     "fewer than {}% of sentences run over 30 words on every measurable "
                     "page".format(int(LONG_SENTENCE_SHARE * 100)))
         return
@@ -676,7 +676,7 @@ def _check_jargon_density(result, pages):
                 int((p.get("readability") or {}).get("long_sentence_share", 0) * 100),
                 (p.get("readability") or {}).get("avg_sentence_words"))
                 for p in sorted(offenders, key=lambda x: x["url"])[:4])),
-        mechanism="B", root_cause="jargon-density",
+        mechanism="B", root_cause="long-sentences",
         summary="Break long sentences into single-claim sentences.",
         how_to_fix=[
             "Split any sentence carrying more than one claim into one sentence per claim.",

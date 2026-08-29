@@ -615,6 +615,52 @@ def _check_entity_ambiguity(result, snapshot, pages, brand, profiles, fetcher, a
     )
 
 
+ORG_IDENTITY_TYPES = frozenset({
+    "organization", "localbusiness", "corporation", "store",
+    "restaurant", "onlinestore", "ngo", "educationalorganization",
+})
+
+
+def _org_identity(page, field):
+    """Values the page declares for the organisation itself, at any nesting depth.
+
+    `telephone` sits on the Organization node; `postalCode` sits inside its
+    PostalAddress. Both are read here so the caller only has to name the field.
+    """
+    found = []
+    for node in page.get("jsonld") or []:
+        types = node.get("@type")
+        types = [types] if isinstance(types, str) else (types or [])
+        if not any(str(t).lower() in ORG_IDENTITY_TYPES for t in types):
+            continue
+        if node.get(field):
+            found.append(node[field])
+        for key in ("address", "location"):
+            value = node.get(key)
+            for entry in (value if isinstance(value, list) else [value]):
+                if isinstance(entry, dict) and entry.get(field):
+                    found.append(entry[field])
+    return found
+
+
+def _check_declared_identity(result, conflicts, pages, label, field, normalise):
+    """Record a conflict when the site declares two different values for itself."""
+    per_page = {}
+    for page in pages:
+        values = {normalise(v) for v in _org_identity(page, field)}
+        values.discard(None)
+        if values:
+            per_page[page["url"]] = values
+    result.signal("pages_declaring_{}".format(field), len(per_page))
+    if len(per_page) < 2 or set.intersection(*per_page.values()):
+        return
+    distinct = sorted({v for values in per_page.values() for v in values})
+    conflicts.append((sorted(per_page)[0],
+                      "the Organization markup declares {} different values for the "
+                      "site's own {} across {} pages, with none shared by all of "
+                      "them".format(len(distinct), label, len(per_page))))
+
+
 def _check_fact_consistency(result, pages):
     """Contact and boilerplate facts that contradict each other across the site.
 
@@ -657,6 +703,34 @@ def _check_fact_consistency(result, pages):
                                       "Organization postal code {} does not match the code shown "
                                       "on the page ({})".format(address["postalCode"], visible_postcode)))
 
+    # The comparison above is schema against the page it sits on. The classic
+    # NAP problem is different and more common: the visible details disagree
+    # from one page to the next, with no schema involved anywhere.
+    #
+    # The test is not "more than one number exists" - a real site legitimately
+    # lists sales, support and regional lines. It is whether *any single value*
+    # appears on every page that states one at all. A site with a footer number
+    # site-wide passes however many extra numbers its contact page carries; a
+    # site whose footer says something different on each template does not.
+    # The comparison above is schema against the page it sits on. This one is
+    # schema against schema: the identity the site declares for itself on one
+    # page against the identity it declares on another.
+    #
+    # Deliberately narrow. Two earlier and looser versions both failed here. The
+    # first scraped digit runs out of page text and reported five telephone
+    # numbers on a site publishing one, because any long run of digits looks
+    # like a phone number. The second read `tel:` links and reported a site with
+    # a sales line, a support line and a returns line as contradicting itself. A
+    # site may publish as many numbers as it has departments; what it may not do
+    # is declare two different primary numbers for the same organisation.
+    _check_declared_identity(
+        result, conflicts, pages, "telephone number", "telephone",
+        lambda value: re.sub(r"\D", "", str(value))[-7:] if len(
+            re.sub(r"\D", "", str(value))) >= 7 else None)
+    _check_declared_identity(
+        result, conflicts, pages, "postal code", "postalCode",
+        lambda value: re.sub(r"\s+", "", str(value)).lower() or None)
+
     if len(descriptions) > 1:
         pairs = sorted(descriptions.items(), key=lambda kv: kv[0])
         conflicts.append((pairs[0][1][0],
@@ -668,7 +742,7 @@ def _check_fact_consistency(result, pages):
     if not conflicts:
         result.skip("fact-consistency-across-pages",
                     "telephone, postal code and the Organization description are consistent "
-                    "wherever they are declared")
+                    "wherever they appear, both between pages and against the markup")
         return
 
     result.add(

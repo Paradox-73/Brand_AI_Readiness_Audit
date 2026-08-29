@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Agent Skills](https://img.shields.io/badge/Agent%20Skills-agentskills.io-6E56CF?style=flat-square)
 ![Skills](https://img.shields.io/badge/Skills-7%20(1%20entrypoint)-0F9D58?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-169%20passing-2EA043?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-211%20passing-2EA043?style=flat-square)
 ![Read Only](https://img.shields.io/badge/Mode-Read--only-FF6F00?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-4169E1?style=flat-square)
 
@@ -21,7 +21,8 @@
 4. [Repository Structure](#4-repository-structure)
 5. [Detection Design](#5-detection-design)
    - [5.1 Low False Alarms](#51-low-false-alarms)
-   - [5.2 Example Finding](#52-example-finding)
+   - [5.2 How We Know the Checks Work](#52-how-we-know-the-checks-work)
+   - [5.3 Example Finding](#53-example-finding)
 6. [Setup & Installation](#6-setup--installation)
 7. [Command Reference](#7-command-reference)
 8. [Running the Audit](#8-running-the-audit)
@@ -42,7 +43,7 @@ One entrypoint skill crawls the site one time. Six specialist sub-skills read th
 crawl. The entrypoint then merges their findings into one report. The report gives the
 evidence for each problem, the fix, the person who does the work, and the approximate time.
 
-> 🔒 **Read-only.** GET and HEAD only, robots.txt respected, 0.5 s between requests. The
+> **Read-only.** GET and HEAD only, robots.txt respected, 0.5 s between requests. The
 > audit never signs in, submits a form, or touches `/cart`, `/checkout`, `/login` or
 > `/admin`. It recommends changes; it never makes them.
 
@@ -64,8 +65,10 @@ repairs. A check that cannot refer to a mechanism does not enter the marketplace
 | **G** | A visitor who arrives mid-journey carries context the site cannot see | `engagement-audit` |
 
 Mechanism **G** is an addition. The brief describes mechanisms A to F. All six describe
-machine behaviour. None describes what happens after a person opens the page.
-`DECISIONS.md` records this decision.
+machine behaviour. None describes what happens after a person opens the page — and half the
+symptoms brands actually report ("traffic arrives and bounces") live there. We added the
+letter rather than stretching one of the six, so it is obvious in every finding which part of
+the model is ours and which came from the brief.
 
 ---
 
@@ -151,11 +154,9 @@ corrects one page.
 brand-ai-readiness-audit/              <- zip this directory to submit
 ├── marketplace.json                   # Manifest. Lists 7 skills, marks 1 entrypoint
 ├── README.md
-├── PROGRESS.md                        # Status for the team
-├── DECISIONS.md                       # Judgement calls and specification differences
-├── VERIFICATION.md                    # Four-person parallel review plan
 ├── LICENSE
 ├── requirements.txt
+├── pytest.ini
 ├── run_audit.py                       # Convenience runner for the whole audit
 ├── package.py                         # Builds and checks the submission zip
 ├── evals/
@@ -172,6 +173,7 @@ brand-ai-readiness-audit/              <- zip this directory to submit
 │   │   │   └── validate_marketplace.py
 │   │   └── references/
 │   │       ├── mechanism-model.md
+│   │       ├── cited-vs-uncited-study.md   # The field study the checks are built on
 │   │       ├── round2-failure-modes.md
 │   │       ├── severity-and-priority.md
 │   │       ├── proactive-recommendations.md
@@ -209,6 +211,9 @@ brand-ai-readiness-audit/              <- zip this directory to submit
     ├── test_checks.py                 # Does each check fire on the correct site?
     ├── test_runtime.py                # Schema, determinism, budget, safety
     ├── test_marketplace.py            # Manifest and SKILL.md format
+    ├── mutations.py                   # 37 ways to break one property of a clean site
+    ├── test_mutations.py              # Does each check catch its own cause, and only it?
+    ├── test_coverage.py               # Every root cause must have a case that produces it
     ├── fixtures/                      # 6 local websites, one per fault type
     │   ├── good-site/                 # No faults. Must produce zero findings
     │   ├── js-shell-site/
@@ -237,11 +242,40 @@ Six correct findings are worth more than 30 uncertain ones. Five rules produce t
 | A deliberate choice is not a fault | A block on AI training crawlers is information, not a problem |
 | One test site has no faults | `good-site` must produce zero findings. It does |
 
-> 💡 **The zero-findings rule found seven real bugs.** Each bug also occurs on a normal,
-> well-built site. The worst one compared prices as text, so the audit reported `480.00` in
-> the markup and `$480` on the page as a contradiction.
+> **The zero-findings rule found seven real bugs.** Each one also fires on a normal,
+> well-built site. The worst compared prices as text, so `480.00` in the markup and `$480`
+> on the page were reported as a contradiction.
 
-### 5.2 Example Finding
+### 5.2 How We Know the Checks Work
+
+Three methods, because each one answers a question the others cannot.
+
+**We built the checks from a field study, not from opinion.** 36 sites, six categories,
+matched in pairs: three brands an assistant names readily against three real competitors
+selling a comparable product at a comparable price that it does not. Pairing within a
+category is the point — comparing an encyclopedia against a design agency measures fame, not
+anything a brand controls. The study is in
+`skills/audit-orchestrator/references/cited-vs-uncited-study.md`, results and failures both.
+It moved two thresholds and got nine checks deleted for firing on everything.
+
+**We break one thing at a time to prove each check is specific.** `tests/mutations.py` takes
+the clean fixture, breaks exactly one named property, and asserts the audit reports that
+property **and nothing else**. Thirty-seven cases. Site samples cannot do this: on a real
+broken site twenty things are wrong at once, so a check can look correct by coincidence.
+Controlling the cause is the only way to tell detection from correlation, and it found eight
+defects the fixture suite had never touched — including one check that was documented,
+listed in every report, and had no implementation behind it.
+
+**We refuse to ship a claim we have not tested.** `tests/test_coverage.py` requires every
+root cause in the vocabulary to have a case that produces it. Two are exempt and the file
+records why: one needs a TLS origin, one needs a real Wikidata name collision.
+
+What none of this settles is how the thresholds behave on page shapes nobody thought to
+build. The study sample is now closed — every threshold was moved after looking at it, which
+makes it training data — and the holdout protocol at the end of that reference says how to
+draw a fresh one.
+
+### 5.3 Example Finding
 
 This text comes from a real run against `tests/fixtures/js-shell-site`:
 
@@ -293,7 +327,7 @@ pip install -r requirements.txt
 python -c "import requests, bs4, lxml; print('Dependencies OK')"
 ```
 
-> ⚠️ **Windows path limit.** Do not unzip this marketplace into a directory with a long
+> **Windows path limit.** Do not unzip this marketplace into a directory with a long
 > path. `pip` cannot install `lxml` if the total path is longer than 260 characters. Use a
 > short path such as `C:\audit`, or turn on long path support in Windows.
 
@@ -313,8 +347,17 @@ pip install pytest
 python -m pytest tests/ -q
 ```
 
-The suite starts a local web server, audits six test sites, and checks the results. It
-takes about one minute.
+211 tests, about six minutes. The suite starts a local web server, audits six test sites, and
+checks the results.
+
+Most of the time is the mutation suite: 37 cases that each take a copy of the clean fixture,
+break exactly one property, and assert the audit reports that property **and nothing else**.
+It is what tells us a check detects its own cause rather than correlating with it. Skip it
+while iterating and it drops to about a minute:
+
+```bash
+python -m pytest tests/ -q -m "not mutation"
+```
 
 ### Step 4 — Optional: install the official validator
 
