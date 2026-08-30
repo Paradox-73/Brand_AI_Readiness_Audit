@@ -25,8 +25,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from audit_common import (  # noqa: E402
     MAX_DEPTH, MAX_PAGES, MAX_SITEMAP_SAMPLE, REQUEST_DELAY, REQUEST_TIMEOUT,
     SEED, USER_AGENT, WALL_CLOCK_BUDGET, FetchError, Fetcher, detect_page_type,
-    eprint, is_forbidden_path, normalise_url, origin_of, same_site, site_label,
-    strip_www, truncate, write_json,
+    eprint, is_forbidden_path, normalise_url, origin_of, response_text, same_site,
+    site_label, strip_www, truncate, write_json,
 )
 
 from page_extract import extract_page  # noqa: E402
@@ -91,7 +91,7 @@ def fetch_robots(fetcher, origin):
     record["status"] = response.status_code
     if response.status_code != 200:
         return record
-    text = response.text or ""
+    text = response_text(response)
     # A robots.txt served as HTML is a soft-404 the site owner probably did not
     # intend; treating it as rules would invent blocks that do not exist.
     if "<html" in text[:600].lower():
@@ -275,7 +275,7 @@ def fetch_page(fetcher, url, depth, source, origin):
             "headers": headers,
         }
 
-    html = response.text or ""
+    html = response_text(response)
     record = extract_page(
         url=url, final_url=response.url, status=response.status_code, headers=headers,
         html=html, redirect_chain=chain, elapsed_ms=getattr(response, "elapsed_ms", 0),
@@ -378,7 +378,7 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
     probe = fetcher.try_get(llms_txt["url"], allow_redirects=False)
     if probe is not None:
         llms_txt["status"] = probe.status_code
-        llms_txt["present"] = probe.status_code == 200 and "<html" not in (probe.text or "")[:400].lower()
+        llms_txt["present"] = probe.status_code == 200 and "<html" not in response_text(probe)[:400].lower()
 
     # If our own polite user agent is shut out of the homepage, stop. Auditing
     # a site that has asked us not to read it would break the read-only,
@@ -502,6 +502,16 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
     return snapshot
 
 
+# The optional rendered pass. Every number here exists to keep `--render` inside
+# the same five-minute budget the static audit promises: a browser that waits
+# for an unreachable idle state will happily spend the whole of it.
+RENDER_PAGES = 5             # a sample, not a second crawl
+RENDER_BUDGET_SECONDS = 60   # hard ceiling for the whole pass
+RENDER_GOTO_MS = 15000       # per page, to first paint
+RENDER_IDLE_MS = 4000        # best-effort wait for the network to settle
+RENDER_SETTLE_MS = 500       # a moment for hydration to write to the DOM
+
+
 def _render_pass(pages, notes):
     """Optional Playwright pass: measure how much text JavaScript adds.
 
@@ -514,17 +524,33 @@ def _render_pass(pages, notes):
         notes.append("Playwright not installed; static-only pass (this is not a site defect)")
         return "static"
 
-    targets = [p for p in pages if p.get("status") == 200][:5]
+    targets = [p for p in pages if p.get("status") == 200][:RENDER_PAGES]
     if not targets:
         return "static"
+    deadline = time.monotonic() + RENDER_BUDGET_SECONDS
     try:
         with sync_playwright() as play:
             browser = play.chromium.launch()
             context = browser.new_context(user_agent=USER_AGENT)
             for page_record in targets:
+                if time.monotonic() > deadline:
+                    notes.append("rendered pass stopped at the {}s budget; {} page(s) measured"
+                                 .format(RENDER_BUDGET_SECONDS, targets.index(page_record)))
+                    break
                 tab = context.new_page()
                 try:
-                    tab.goto(page_record["final_url"], wait_until="networkidle", timeout=15000)
+                    # Not `networkidle`. Playwright discourages it and a page
+                    # with analytics polling or an open socket never reaches it,
+                    # so a five-page pass took over two minutes against a local
+                    # fixture. Wait for the document, give hydration a bounded
+                    # moment, then read whatever is there.
+                    tab.goto(page_record["final_url"],
+                             wait_until="domcontentloaded", timeout=RENDER_GOTO_MS)
+                    try:
+                        tab.wait_for_load_state("networkidle", timeout=RENDER_IDLE_MS)
+                    except Exception:  # noqa: BLE001 - never going idle is normal
+                        pass
+                    tab.wait_for_timeout(RENDER_SETTLE_MS)
                     rendered = tab.evaluate("document.body ? document.body.innerText : ''")
                     page_record["rendered_text_len"] = len(re.sub(r"\s+", " ", rendered).strip())
                 except Exception as exc:  # noqa: BLE001 - a render failure is not a site defect

@@ -153,8 +153,13 @@ def _check_homepage_orientation(result, home):
     if not cta.get("found"):
         problems.append("no call-to-action link was found anywhere in the page")
     elif not cta.get("within_first_1500"):
-        problems.append('the first call to action ("{}") appears {} characters into the body '
-                        "text".format(cta.get("text"), cta.get("offset")))
+        if cta.get("offset_known"):
+            problems.append('the first call to action ("{}") appears {} characters into the '
+                            "body text".format(cta.get("text"), cta.get("offset")))
+        else:
+            problems.append('the first call to action ("{}") is not in the page copy at all - '
+                            "its label sits in markup a text-only reader never sees"
+                            .format(cta.get("text")))
 
     if not problems:
         result.skip("homepage-orientation",

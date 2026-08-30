@@ -152,7 +152,15 @@ def _check_shells(result, snapshot, content_pages, render_mode):
     home_is_shell = home is not None and bool(_shell_reasons(home))
     recovered = None
     if home_is_shell and "rendered_text_len" in (home or {}):
-        recovered = home["rendered_text_len"] >= MIN_QUOTABLE_TEXT * 3
+        # "Recovered" means JavaScript supplied the bulk of the text and there
+        # is now enough of it to quote. The bar used to be a flat 900 chars,
+        # which called a homepage that went from 13 characters to 538 "not
+        # reachable even with JavaScript enabled" - the opposite of what had
+        # just been measured, and a `critical` verdict on a site whose real
+        # problem is `high`.
+        rendered_len = home["rendered_text_len"]
+        recovered = (rendered_len >= MIN_QUOTABLE_TEXT
+                     and rendered_len >= max(home.get("body_text_len", 0), 1) * 3)
 
     if home_is_shell:
         if recovered is True:
@@ -427,7 +435,8 @@ def _check_video_transcripts(result, content_pages):
     thin_video = []
     for page in content_pages:
         video = page.get("video") or {}
-        if not (video.get("native_count") or video.get("embed_count")):
+        if not (video.get("native_count") or video.get("embed_count")
+                or video.get("audio_count")):
             continue
         if video.get("transcript_nearby") or video.get("track_count"):
             continue
@@ -437,12 +446,14 @@ def _check_video_transcripts(result, content_pages):
 
     if not thin_video:
         result.skip("video-transcripts",
-                    "no page relies on video to carry content that is missing from its text")
+                    "no page relies on audio or video to carry content that is missing from "
+                    "its text")
         return
 
     result.add(
         id_hint="video-without-transcript",
-        title="{} page(s) lead with video and carry little readable text".format(len(thin_video)),
+        title="{} page(s) lead with audio or video and carry little readable text".format(
+            len(thin_video)),
         severity="medium", confidence="medium",
         evidence="Pages with an embedded or native video, no caption track, no nearby "
                  "transcript, and under 800 chars of body text: {}.".format(

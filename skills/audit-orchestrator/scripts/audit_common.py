@@ -26,6 +26,24 @@ from urllib.parse import urljoin, urlparse, urlunparse
 VERSION = "1.0.0"
 USER_AGENT = "BrandAIReadinessAudit/1.0 (+read-only audit)"
 
+# Headers any complete HTTP client sends. We tested whether adding these got us
+# into the 15 sites that refuse us: it did not, for any of them. They are here
+# because a request with no `Accept` header is an incomplete request, not
+# because we expect them to open a door. The User-Agent above never changes and
+# never pretends to be a browser - a site that has decided to refuse this
+# crawler is entitled to, and the refusal is reported as a finding rather than
+# worked around.
+DEFAULT_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en;q=0.9",
+}
+
+# A blocked request is a decision; a dropped one is weather. Retry the weather.
+RETRY_ATTEMPTS = 2
+RETRY_BACKOFF_SECONDS = 1.5
+RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
 # Crawl budget. Fixed so two runs against the same site see the same pages.
 SEED = 42
 MAX_PAGES = 30
@@ -77,6 +95,7 @@ ROOT_CAUSES = frozenset({
     "no-org-schema", "no-product-schema", "no-article-schema", "no-faq-schema",
     "invalid-jsonld",
     "schema-text-mismatch", "missing-schema-props", "meta-hygiene",
+    "open-graph-incomplete", "no-website-schema", "missing-lang", "microdata-only",
     # Distinct from `no-breadcrumbs`: that is the visible trail a person
     # follows, this is the machine-readable hierarchy. Different owners,
     # different fixes, so they get different tags.
@@ -116,6 +135,87 @@ DEEP_TYPES = frozenset({"product", "article", "location", "service", "comparison
 # --------------------------------------------------------------------------
 # Small utilities
 # --------------------------------------------------------------------------
+
+LEGAL_SUFFIX_RE = re.compile(
+    r"[,\s]+(?:inc|inc\.|llc|l\.l\.c\.|ltd|ltd\.|limited|plc|gmbh|s\.a\.|sa|bv|b\.v\.|"
+    r"pty|pte|co|co\.|corp|corp\.|corporation|company|group|holdings|"
+    r"llp|lp|ag|nv|n\.v\.|oy|ab|as|srl|spa)\s*$", re.I)
+
+
+_META_CHARSET_RE = re.compile(
+    rb"""<meta[^>]+charset\s*=\s*["']?\s*([A-Za-z0-9_:.+-]+)""", re.I)
+
+
+def response_text(response):
+    """Decode a response the way a browser would, not the way HTTP/1.1 says.
+
+    `requests` follows the specification: a `text/*` response with no `charset`
+    in the header is ISO-8859-1. Almost nothing on the web means that. A page
+    served as UTF-8 that declares its encoding only in a `<meta charset>` tag -
+    which is most of them - comes back through `response.text` as mojibake, and
+    a brand called "El Corte Ingles" with an accent arrives with a replacement
+    character embedded in its name. That then flows into the brand name, the
+    evidence text and the report a judge reads.
+
+    Header first, because a server that states a charset means it. Then the
+    document's own declaration. Then charset detection. Then UTF-8, which is
+    right far more often than Latin-1.
+    """
+    content = response.content or b""
+    if not content:
+        return ""
+
+    header = (response.headers.get("content-type") or "").lower()
+    declared = ""
+    if "charset=" in header:
+        declared = header.split("charset=", 1)[1].split(";")[0].strip()
+        declared = declared.strip(chr(34) + chr(39))
+    if not declared:
+        match = _META_CHARSET_RE.search(content[:4096])
+        if match:
+            declared = match.group(1).decode("ascii", "ignore")
+    for candidate in (declared, getattr(response, "apparent_encoding", None), "utf-8"):
+        if not candidate:
+            continue
+        try:
+            return content.decode(candidate, errors="strict")
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
+def name_forms(declared):
+    """Every way an organisation could reasonably refer to itself in a sentence.
+
+    A declared name is often formal or legal: "Acme Analytics Holdings, Inc.",
+    "Department of Computer Science, University of Oxford". Neither appears
+    verbatim in the sentences the organisation writes about itself, and a site
+    is not wrong to write "Acme is a ..." while declaring the full name in its
+    markup. Two separate checks required the whole string and therefore could
+    not be satisfied by any organisation with a long formal name.
+
+    Longest first, so a caller matching in order reports the most specific form
+    the text actually used.
+    """
+    declared = re.sub(r"\s+", " ", str(declared or "")).strip()
+    if not declared:
+        return []
+    forms = {declared}
+    # Stacked suffixes are common: "Holdings, Inc.", "Group Ltd", "Co. Limited".
+    # One pass leaves "... Holdings", which is still not what anyone writes.
+    trimmed = declared
+    for _ in range(4):
+        stripped = LEGAL_SUFFIX_RE.sub("", trimmed).strip().rstrip(",").strip()
+        if stripped == trimmed or not stripped:
+            break
+        trimmed = stripped
+        forms.add(trimmed)
+    for value in list(forms):
+        head = value.split(",")[0].strip()
+        if head:
+            forms.add(head)
+    return sorted({f for f in forms if len(f) > 2}, key=len, reverse=True)
+
 
 def pct(part, whole):
     """Percentage rounded to one decimal; 0.0 when the denominator is zero."""
@@ -240,8 +340,13 @@ _URL_TYPE_SLUGS = (
                "team", "mission", "history")),
     ("location", ("location", "locations", "store", "stores", "branch", "branches",
                   "showroom", "find-us", "visit-us", "offices")),
+    # Episodes are articles for our purposes: dated published pieces that a
+    # machine should be able to read, quote and date. Without them a podcast
+    # episode page classified as "other" and every content check skipped it.
     ("article", ("blog", "news", "article", "articles", "post", "posts", "insight",
-                 "insights", "stories", "story", "guides", "resources", "journal")),
+                 "insights", "stories", "story", "guides", "resources", "journal",
+                 "episode", "episodes", "podcast", "podcasts", "transcript",
+                 "transcripts")),
     ("product", ("product", "products", "item", "p", "sku")),
     ("category", ("collection", "collections", "category", "categories", "catalog",
                   "catalogue", "shop", "browse")),
@@ -339,8 +444,20 @@ def detect_page_type(url, html_meta):
             # slug, and it runs both ways: `/products` with no buying
             # affordances is a listing, and `/shop/<item>` with a price and an
             # add-to-cart control is a product detail page.
-            if page_type == "product" and not _looks_like_product_detail(lower_text, html_meta):
-                return "category"
+            if page_type == "product":
+                # Path depth carries the listing-versus-item distinction that
+                # retail phrasing does not. `/products` is an index; a deeper
+                # path under it naming one thing is that thing. Requiring "add
+                # to cart" meant every B2B item page, and every storefront that
+                # renders its buy button in JavaScript, was demoted to a
+                # listing - and a listing is never asked for Product markup, so
+                # the sites most in need of the advice were the ones exempted
+                # from it.
+                deep = len([s for s in path.strip("/").split("/") if s]) >= 2
+                if not (deep and (_PRICE_RE.search(lower_text)
+                                  or _product_signal_count(lower_text))):
+                    if not _looks_like_product_detail(lower_text, html_meta):
+                        return "category"
             if page_type == "category" and _looks_like_product_detail(lower_text, html_meta):
                 return "product"
             # `/blog` is the index of a section; `/blog/a-post` is the article.
@@ -362,6 +479,7 @@ def detect_page_type(url, html_meta):
 _SECTION_ROOTS = frozenset({
     "blog", "news", "articles", "article", "posts", "post", "insights",
     "stories", "resources", "guides", "press", "updates", "journal",
+    "episodes", "podcast", "podcasts", "transcripts",
 })
 
 
@@ -371,11 +489,18 @@ def _is_section_root(path):
     return len(parts) == 1 and parts[0] in _SECTION_ROOTS
 
 
+def _product_signal_count(lower_text):
+    return sum(1 for s in _PRODUCT_TEXT_SIGNALS if s in lower_text)
+
+
 def _looks_like_product_detail(lower_text, html_meta):
-    """A single purchasable item: a price plus at least two buying affordances."""
-    signals = sum(1 for s in _PRODUCT_TEXT_SIGNALS if s in lower_text)
+    """A single purchasable item: a price plus at least two buying affordances.
+
+    Used where the URL gives no help. Where the URL does - a deeper path under a
+    products section - that evidence is stronger and is applied first.
+    """
     has_price = bool(_PRICE_RE.search(lower_text))
-    return has_price and signals >= 2
+    return has_price and _product_signal_count(lower_text) >= 2
 
 
 def has_price(text):
@@ -613,20 +738,40 @@ class Fetcher:
         if self._last_request and elapsed < self.delay:
             time.sleep(self.delay - elapsed)
 
-        headers = {"User-Agent": user_agent} if user_agent else None
+        headers = dict(DEFAULT_HEADERS)
+        if user_agent:
+            headers["User-Agent"] = user_agent
         self.count += 1
         started = time.monotonic()
-        try:
-            response = self.session.request(
-                method, url, timeout=self.timeout, allow_redirects=allow_redirects,
-                headers=headers, stream=False,
-            )
-        except self._requests.RequestException as exc:
+
+        # One retry, and only for failures that are about the moment rather than
+        # about us: a dropped connection, a timeout, a 5xx, a 429. A 403 is a
+        # decision and is never retried. Without this a single hiccup marked a
+        # whole site unreadable - three sites recorded as "blocked" across our
+        # samples turned out to answer 200 on the next attempt, which quietly
+        # overstated how many sites refuse a polite crawler.
+        last_error = None
+        for attempt in range(RETRY_ATTEMPTS):
+            if attempt:
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+                self.count += 1
+            try:
+                response = self.session.request(
+                    method, url, timeout=self.timeout, allow_redirects=allow_redirects,
+                    headers=headers, stream=False,
+                )
+            except self._requests.RequestException as exc:
+                last_error = FetchError(str(exc))
+                continue
+            if response.status_code in RETRYABLE_STATUS and attempt + 1 < RETRY_ATTEMPTS:
+                last_error = FetchError("HTTP {}".format(response.status_code))
+                continue
             self._last_request = time.monotonic()
-            raise FetchError(str(exc))
+            response.elapsed_ms = int((self._last_request - started) * 1000)
+            return response
+
         self._last_request = time.monotonic()
-        response.elapsed_ms = int((self._last_request - started) * 1000)
-        return response
+        raise last_error or FetchError("request failed")
 
     def try_get(self, url, **kwargs):
         """Fetch, returning `None` instead of raising. For optional probes."""

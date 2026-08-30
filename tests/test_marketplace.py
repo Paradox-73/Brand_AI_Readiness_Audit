@@ -170,6 +170,14 @@ def test_no_real_domain_names_anywhere():
         "facebook.com", "tiktok.com", "goo.gl", "g.page",
         # Crawler operators named in ai-crawler-user-agents.md.
         "webz.io", "you.com",
+        # Media hosts whose embed URLs the extractor recognises, so it can tell
+        # a page carrying a player from a page carrying text. Same standing as
+        # youtube.com and vimeo.com above: a platform we detect, never an
+        # example site and never keyed to any particular brand on it.
+        "soundcloud.com", "spotify.com", "podbean.com", "buzzsprout.com",
+        "libsyn.com", "megaphone.fm", "simplecast.com", "acast.com",
+        "anchor.fm", "captivate.fm", "transistor.fm", "art19.com",
+        "omnystudio.com", "audioboom.com", "brightcove.com", "wistia.com",
         # Reserved documentation domains.
         "example.com", "example.invalid",
     }

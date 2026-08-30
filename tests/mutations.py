@@ -251,7 +251,8 @@ mutation(
 mutation(
     "all JSON-LD is removed",
     expect={"no-org-schema"},
-    also={"no-article-schema", "no-breadcrumb-markup", "no-faq-schema", "meta-hygiene"},
+    also={"no-article-schema", "no-breadcrumb-markup", "no-faq-schema", "no-website-schema",
+          "no-product-schema"},
     apply=lambda site: edit_all(
         site, drop(r'<script type="application/ld\+json">.*?</script>')),
 )
@@ -259,7 +260,8 @@ mutation(
 mutation(
     "the JSON-LD block is malformed",
     expect={"invalid-jsonld"},
-    also={"no-org-schema", "no-article-schema", "no-breadcrumb-markup", "no-faq-schema", "meta-hygiene"},
+    also={"no-org-schema", "no-article-schema", "no-breadcrumb-markup", "no-faq-schema",
+          "no-website-schema", "no-product-schema"},
     apply=lambda site: edit_all(
         site, swap(r'(<script type="application/ld\+json">\s*\{)',
                    r'\1 "broken": ,')),
@@ -292,9 +294,13 @@ mutation(
 mutation(
     "the homepage never says what the company is",
     expect={"no-entity-definition"},
+    # Every copular sentence about the brand has to go, under any name the site
+    # uses for itself - not just the one on the homepage. The fixture also says
+    # "Brightpath is built for retail operations teams at ...", which is a
+    # perfectly good definition and the check is right to accept it.
     apply=lambda site: edit_all(
         site,
-        swap(r"<p>\s*Brightpath Analytics is a [^<]*</p>",
+        swap(r"<p>\s*(?:Brightpath(?: Analytics)?) (?:is|are|was|were) [^<]*</p>",
              "<p>We believe the future belongs to those who move first. They "
              "know it. It is why they choose us, and why they stay.</p>")),
 )
@@ -571,5 +577,92 @@ mutation(
                                         '"telephone": "+1 503 555 0199"')),
         edit(site, "about.html", swap(r'"telephone": "\+1 503 555 0142"',
                                       '"telephone": "+1 503 555 0177"')),
+    ),
+)
+
+
+mutation(
+    "the brand declares a long formal name and defines itself by the short one",
+    # Nothing is broken here. The site states exactly the identity sentence this
+    # marketplace asks for; it simply writes "Brightpath is a ..." while its
+    # Organization markup carries the full formal name. Requiring the whole
+    # declared string made the check unsatisfiable for any organisation with a
+    # long formal name, which is most institutions.
+    expect=set(),
+    apply=lambda site: (
+        edit_all(site, swap(r'"name": "Brightpath Analytics"',
+                            '"name": "Brightpath Analytics Holdings, Inc."')),
+        edit_all(site, swap(r'"og:site_name" content="Brightpath Analytics"',
+                            '"og:site_name" content="Brightpath Analytics Holdings, Inc."')),
+        edit(site, "index.html",
+             swap(r"<p>Brightpath Analytics is a demand-forecasting",
+                  "<p>Brightpath is a demand-forecasting")),
+    ),
+)
+
+
+# --- The `meta-hygiene` bucket, split into what it was actually reporting ----
+
+mutation(
+    "Open Graph tags are missing",
+    expect={"open-graph-incomplete"},
+    apply=lambda site: edit_all(site, drop(r'<meta property="og:[^>]*>')),
+)
+
+mutation(
+    "the site has a search box but no WebSite markup describing it",
+    expect={"no-website-schema"},
+    apply=lambda site: edit_all(
+        site, swap(r'\{\s*"@type": "WebSite".*?"query-input"[^}]*\}\s*\}', '{"@type": "Thing"}')),
+)
+
+mutation(
+    "pages do not declare a language",
+    expect={"missing-lang"},
+    apply=lambda site: edit_all(site, swap(r'<html lang="en">', "<html>")),
+)
+
+mutation(
+    "the facts are marked up as microdata rather than JSON-LD",
+    expect={"microdata-only"},
+    also={"no-org-schema", "no-article-schema", "no-breadcrumb-markup", "no-faq-schema",
+          "no-website-schema", "no-product-schema"},
+    apply=lambda site: (
+        edit_all(site, drop(r'<script type="application/ld\+json">.*?</script>')),
+        edit_all(site, swap(
+            r"<main>",
+            '<main itemscope itemtype="https://schema.org/Organization">'
+            '<meta itemprop="name" content="Brightpath Analytics">'
+            '<div itemscope itemtype="https://schema.org/PostalAddress">'
+            '<meta itemprop="postalCode" content="97204"></div>'
+            '<div itemscope itemtype="https://schema.org/ContactPoint">'
+            '<meta itemprop="telephone" content="+1 503 555 0142"></div>')),
+    ),
+)
+
+
+mutation(
+    "an episode page carries a player and two lines of summary",
+    expect={"no-transcript"},
+    # The canonical case for this check, and one it could not see: the extractor
+    # counted <video> and video embeds and never looked at audio, so every
+    # podcast episode page on the web was invisible to it.
+    exclusive=False,
+    apply=lambda site: (
+        add_file(site, "episodes/forecasting-after-a-shock.html",
+                 '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+                 '<title>Forecasting after a shock | Brightpath Analytics</title>'
+                 '<meta name="description" content="Episode 12 of the Brightpath podcast, '
+                 'on recalculating safety stock after a demand shock.">'
+                 '<link rel="canonical" href="{{BASE}}/episodes/forecasting-after-a-shock.html">'
+                 '</head><body><main><h1>Forecasting after a shock</h1>'
+                 '<audio controls src="{{BASE}}/assets/episode-12.mp3"></audio>'
+                 '<p>Episode 12. Listen above.</p>'
+                 '<p><a href="{{BASE}}/index.html">Back to the homepage</a></p>'
+                 '</main></body></html>'),
+        edit(site, "index.html",
+             swap(r"</main>",
+                  '<p><a href="{{BASE}}/episodes/forecasting-after-a-shock.html">'
+                  'Podcast episode 12</a></p></main>')),
     ),
 )

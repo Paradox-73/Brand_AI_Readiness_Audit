@@ -90,7 +90,8 @@ Standard skill JSON: `findings[]`, `checks_run[]`, `not_applicable[]` (each with
 Findings carry mechanism `C` (or `D` for date and corroboration properties, `B` for metadata
 that gets quoted) and a `root_cause` of `invalid-jsonld`, `no-org-schema`,
 `no-product-schema`, `no-article-schema`, `no-faq-schema`, `missing-schema-props`,
-`schema-text-mismatch`, `no-breadcrumb-markup` or `meta-hygiene`.
+`schema-text-mismatch`, `no-breadcrumb-markup`, `no-website-schema`,
+`open-graph-incomplete`, `missing-lang`, `microdata-only` or `meta-hygiene`.
 
 ## Not applicable when
 

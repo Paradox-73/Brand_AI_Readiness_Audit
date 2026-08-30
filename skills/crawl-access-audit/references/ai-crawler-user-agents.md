@@ -120,3 +120,34 @@ confirmation, using the first answer crawler robots.txt does *not* disallow, ski
 when they are all disallowed. It is the only place in this marketplace that sends a
 user-agent other than its own, and it is documented as such in the orchestrator's safety
 section.
+
+## Why this crawler does not try harder to get in
+
+Across three samples, 15 sites refused us. We ran the obvious experiment before
+accepting that: fetch each of them with a complete, honest header set — a real
+`Accept`, `Accept-Language`, `Accept-Encoding`, `Connection`, and
+`Upgrade-Insecure-Requests` — and then again on the other host form, with our
+own User-Agent unchanged throughout.
+
+**Nothing changed. Zero of 15.** Every one returned the same status. These are
+not sites refusing a malformed client; they are sites that have decided which
+agents may read them, and the decision holds however politely it is asked.
+
+The headers are in the code anyway, because a request with no `Accept` header is
+an incomplete request and we would rather send a correct one. They are not there
+in the hope of getting past anything.
+
+Getting into these sites would mean presenting a browser's identity — a
+browser's User-Agent, or a browser's TLS fingerprint. That is circumventing an
+access decision the site owner made deliberately, and it is out of scope for an
+audit that exists to *report* access problems. A block is a finding, not an
+obstacle: `bot-manager-block` says which agent was refused, what the response
+was, and what the owner would change if the block was not intended.
+
+What the experiment did find is worth more than a workaround. Three of the 15
+answered `200` on the next attempt: they had never been blocked at all, just
+briefly unreachable, and a single dropped request was marking an entire site
+unreadable. The client now retries twice, with backoff, on a dropped connection,
+a timeout, a 429 or a 5xx — and never on a 403, because a 403 is an answer. That
+correction alone moved the measured block rate meaningfully, and the earlier
+figures in the field study overstated it.

@@ -50,6 +50,15 @@ MODAL_HINTS = (
 
 VIDEO_HOSTS = ("youtube.com", "youtu.be", "vimeo.com", "wistia", "loom.com", "brightcove")
 
+# The extractor recorded video and never looked at audio, so a podcast episode
+# page - the clearest case there is of content a machine cannot read without a
+# transcript - was invisible to the transcript check.
+AUDIO_HOSTS = (
+    "soundcloud.com", "spotify.com/embed", "podbean.com", "buzzsprout.com",
+    "libsyn.com", "megaphone.fm", "simplecast.com", "acast.com", "anchor.fm",
+    "captivate.fm", "transistor.fm", "art19.com", "omnystudio.com", "audioboom.com",
+)
+
 TRANSCRIPT_HINTS = ("transcript", "captions", "subtitle", "read the transcript", "full text")
 
 SOCIAL_PLATFORMS = {
@@ -123,6 +132,10 @@ reserve sign register talk speak ask enquire inquire compare choose select plan
 build create send email message visit check claim take open configure estimate
 quote hire arrange play listen search play tour
 """.split())
+
+# Not a position. Sorts a call to action whose label is not in the body copy
+# (an aria-label, or text inside an image) behind every located one.
+UNLOCATED_CTA_OFFSET = 10 ** 6
 
 CTA_MARKUP_RE = re.compile(r"\b(btn|button|cta|call-to-action|primary-action)\b", re.I)
 
@@ -561,6 +574,7 @@ def _iframes(soup, base):
             "src": truncate(src, 200),
             "title": truncate(tag.get("title") or "", 120),
             "is_video": any(host in src.lower() for host in VIDEO_HOSTS),
+            "is_audio": any(host in src.lower() for host in AUDIO_HOSTS),
             "is_map": "map" in src.lower(),
         })
         if len(out) >= 12:
@@ -569,14 +583,26 @@ def _iframes(soup, base):
 
 
 def _video(soup, text, base):
+    """Audio and video on the page, and whether a transcript sits beside it.
+
+    Kept under one key because the transcript question is identical for both: a
+    machine reading this page can quote the words only if the words are written
+    down somewhere. `audio_count` exists because an episode page carrying a
+    player and a two-line summary is the canonical instance of that problem and
+    counting only `<video>` missed every one of them.
+    """
     videos = soup.find_all("video")
-    embeds = [f for f in _iframes(soup, base) if f["is_video"]]
+    audios = soup.find_all("audio")
+    frames = _iframes(soup, base)
+    video_embeds = [f for f in frames if f["is_video"]]
+    audio_embeds = [f for f in frames if f.get("is_audio")]
     lower = text.lower()
     return {
         "native_count": len(videos),
-        "embed_count": len(embeds),
+        "embed_count": len(video_embeds),
+        "audio_count": len(audios) + len(audio_embeds),
         "autoplay_count": len([v for v in videos if v.has_attr("autoplay")]),
-        "track_count": len(soup.select("video track")),
+        "track_count": len(soup.select("video track, audio track")),
         "transcript_nearby": any(hint in lower for hint in TRANSCRIPT_HINTS),
     }
 
@@ -648,6 +674,7 @@ def _cta(soup, body_text, origin, base):
     first_text = ""
     first_url = ""
     in_main = False
+    first_located = False
     main_anchors = {id(a) for a in main_region(soup).find_all("a", href=True)}
     for anchor in soup.find_all("a", href=True):
         text = _text_or_empty(anchor)
@@ -662,12 +689,16 @@ def _cta(soup, body_text, origin, base):
         is_cta = first_word in CTA_VERBS or bool(CTA_MARKUP_RE.search(marker))
         if is_cta:
             offset = lowered.find(low[:40])
-            if offset < 0:
-                offset = 10 ** 6
+            located = offset >= 0
+            if not located:
+                # Sorts last without pretending to be a position. Anything
+                # printing this number must check `offset_known` first.
+                offset = UNLOCATED_CTA_OFFSET
             if id(anchor) in main_anchors:
                 in_main = True
             if first_offset is None or offset < first_offset:
                 first_offset = offset
+                first_located = located
                 first_text = text
                 first_url = normalise_url(anchor["href"], base) or ""
     buttons = len(soup.select('button, [role="button"], input[type="submit"], .btn, .button'))
@@ -676,6 +707,9 @@ def _cta(soup, body_text, origin, base):
         "text": truncate(first_text, 80),
         "url": first_url,
         "offset": first_offset if first_offset is not None else -1,
+        # False when the link exists but its label could not be found in the
+        # body copy, so `offset` is a sort key and not a character position.
+        "offset_known": bool(first_offset is not None and first_located),
         "within_first_1500": bool(first_offset is not None and first_offset <= 1500),
         # A "Contact" link in the global footer is not this page's next step.
         # Without this distinction the dead-end check was unfirable.

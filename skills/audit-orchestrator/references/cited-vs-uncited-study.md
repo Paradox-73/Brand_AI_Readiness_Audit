@@ -291,6 +291,335 @@ Anyone can run this and it takes about half an hour of machine time.
 3. **Run the audit once per site.** One pass. No re-runs with adjusted settings.
 4. **Compare against the prediction and stop.** Record the result whatever it is.
 
+### Prediction, written 30 August 2026, before the first holdout page was fetched
+
+Recorded here rather than in a working note, because a prediction that can be edited after
+the run is not a prediction. The holdout is 24 sites across six categories none of the
+thresholds were fitted on: law firms, hospitals, university departments, restaurant groups,
+developer tools and charities. Institutional and content-led rather than direct-to-consumer,
+which is the point — every threshold in this marketplace was set by looking at retail and
+SaaS.
+
+**The numbers.** Against a current training-set baseline of 1.17 critical-or-high findings
+per site and 12.0 findings in total:
+
+| | Training set | Predicted on the holdout |
+|---|---|---|
+| Critical + high per site | 1.17 | 0.8 – 2.2 |
+| Total findings per site | 12.0 | 10 – 15 |
+| Sites that cannot be crawled | 19% | 20 – 30% |
+| Any single check above 70% | none | none |
+
+The crawlability range is higher than the training set on evidence gathered before the run:
+6 of the 24 refused a plain `HEAD` request outright. Whether they also refuse a declared,
+robots-respecting crawler is the open question.
+
+**The three most common findings, predicted:** `no-org-schema`, `no-entity-definition`,
+`long-sentences`.
+
+**Directional calls, each with the reason.** These matter more than the totals, because a
+threshold that generalises should move for a reason we can state in advance.
+
+| Finding | Call | Why |
+|---|---|---|
+| `long-sentences` | **up** from 34% | Legal and academic prose is the longest-sentence writing there is |
+| `no-org-schema` | **up** from 41% | Universities and hospitals rarely mark themselves up; retailers do it for rich results |
+| `alt-missing` | **down** from 48% | Public-sector and healthcare sites carry accessibility obligations retail does not |
+| `robots-block` | **down** from 55% | Blocking AI crawlers is a commercial reflex; institutions have less reason to |
+| `no-product-schema` | **near 0%** | Nothing here sells a product. This is the applicability guard on trial, not the check |
+| `no-date-signal` | **down** from 48% | These are publishing organisations; news and research carry dates |
+
+If `no-product-schema` fires anywhere above a couple of percent, the page-type guard is
+broken and that matters more than any threshold in the table.
+
+### Result — the holdout, run 30 August 2026
+
+24 sites, one pass each, scored against the prediction above without editing it.
+
+| | Predicted | Actual | |
+|---|---|---|---|
+| Critical + high per site | 0.8 – 2.2 | **1.86** | pass |
+| Total findings per site | 10 – 15 | **12.6** | pass |
+| Sites that cannot be crawled | 20 – 30% | **12%** | miss |
+| Any single check above 70% | none | **three** | miss |
+| `no-product-schema` | near 0% | **0%** | pass |
+
+Directional calls: **five of six**. Long sentences up, missing alt text down, robots blocks
+down, missing date signals down — each for the reason given in advance. The sixth was wrong:
+we expected institutions to mark themselves up less than retailers, and `no-org-schema` went
+slightly *down*, 41% to 38%.
+
+Predicted top three: one of three. We said `no-org-schema`, `no-entity-definition`,
+`long-sentences`; it was `no-entity-definition`, `meta-hygiene`, `weak-corroboration`.
+
+**The crawlability miss is in our favour and worth stating.** Six of the 24 refused a plain
+`HEAD` request before the run. Only three refused a declared, robots-respecting crawler.
+Identifying yourself properly gets you in where a generic request does not, which is the
+behaviour this marketplace argues for and had not previously measured.
+
+**`no-product-schema` at zero across 21 sites that sell nothing** is the result that matters
+most here. It is not a threshold passing; it is the page-type guard working. The audit never
+asked a hospital for Product markup.
+
+Findings by severity across the whole sample: 5 critical, 39 high, 168 medium, 59 low. Three
+of the 21 sites came back with no critical or high finding at all, and the worst had four.
+
+| Category | Sites | Mean critical + high |
+|---|---|---|
+| University departments | 4 | 1.0 |
+| Charities | 3 | 1.0 |
+| Law firms | 3 | 1.7 |
+| Developer tools | 4 | 2.2 |
+| Hospitals | 3 | 2.3 |
+| Restaurant groups | 4 | 2.5 |
+
+### Second holdout, prediction written 30 August 2026
+
+21 crawlable sites is a thin basis for a claim about generalisation, and a
+holdout costs nothing but machine time as long as nothing is tuned on it. So a
+second one, larger and chosen to be harder: 32 sites across eight categories,
+none used anywhere before — local news, government, industrial B2B, estate
+agents, museums, banking and insurance, edtech, and one category that should
+break us.
+
+**The one that should break us.** Every text check here is English. Sentence
+length, answer-first sections, imperative call-to-action verbs, and the
+"`<Brand>` is a ..." definition pattern have never run against a page that is
+not in English. Four of the 32 are French, German, Spanish and Dutch.
+
+| | First holdout | Predicted here |
+|---|---|---|
+| Critical + high per site | 1.81 | 1.5 – 2.5 |
+| Total findings per site | 12.4 | 11 – 16 |
+| Sites that cannot be crawled | 12% | 25 – 40% |
+
+The crawlability range goes up because 11 of the 32 refused a plain `HEAD`
+before the run — banks and museums run the most aggressive bot management of
+any category tried so far.
+
+**On the four non-English sites, specifically:** we expect `no-entity-definition`
+to fire on all four, because the copular pattern is English-only, and
+`long-sentences` and `fluff-first` to be unreliable. The right behaviour would
+be to detect the page language and decline the prose checks with a reason. We do
+not do that today. If the prediction holds, that is a limitation to document and
+fix, not a threshold to tune — and it is the most likely thing on this list to
+be quietly wrong in front of a judge auditing a non-English brand.
+
+**A named failure signal:** if any check fires on more than 70% of the whole
+sample, or if the four non-English sites average more than double the findings
+of the other 28, the audit is measuring language rather than quality.
+
+### Result — second holdout
+
+| | First holdout | This one | Predicted | |
+|---|---|---|---|---|
+| Critical + high per site | 1.81 | **1.81** | 1.5 – 2.5 | pass |
+| Total findings per site | 12.4 | **12.6** | 11 – 16 | pass |
+| Sites that cannot be crawled | 12% | **16%** | 25 – 40% | miss |
+
+The headline numbers came back identical to the first holdout on a sample chosen to be
+harder and sharing none of its categories. Two independent samples, 48 sites between them,
+same answer: the thresholds are not fitted to the sites they were set on.
+
+Crawlability was over-predicted for the second time, in the same direction and for the same
+reason. Eleven of the 32 refused a plain `HEAD`; five refused a declared, robots-respecting
+crawler. Being explicit about who you are gets you in.
+
+| Category | Sites | Mean findings | Mean critical + high |
+|---|---|---|---|
+| Banking and insurance | 4 | 9.8 | 0.8 |
+| Government | 4 | 10.2 | 1.0 |
+| Industrial B2B | 4 | 11.0 | 2.5 |
+| Edtech | 3 | 13.0 | 1.7 |
+| Estate agents | 3 | 13.3 | 1.7 |
+| Museums | 3 | 14.3 | 1.3 |
+| Local news | 4 | 16.0 | 2.8 |
+
+### The non-English prediction was wrong, and it still found two bugs
+
+We predicted the four non-English sites would trip the definition check across the board and
+that the prose checks would be unreliable, because every text check here is English. The
+failure signal was set in advance: more than double the findings of the other sites.
+
+**It did not happen.** Non-English sites averaged 14.5 findings against 12.4 for the rest —
+a ratio of 1.17, nowhere near the 2.0 that would have meant the audit was measuring language
+rather than quality. The definition check fired on one of the two crawlable sites, not both.
+
+Two caveats, because the result is weaker than it looks. Only two of the four were crawlable,
+so this rests on a sample of two. And the checks are still English-only: they did not produce
+nonsense here, but nothing in the code detects the page language and declines, so the correct
+reading is "no evidence of harm on two sites", not "handles other languages".
+
+What the category did do is surface two defects nothing else had:
+
+**A brand's own name came back corrupted.** `requests` implements HTTP/1.1 faithfully: a
+`text/*` response with no `charset` in the header is ISO-8859-1. Almost nothing on the web
+means that — most pages declare UTF-8 in a `<meta>` tag and say nothing in the header. A
+Spanish retailer's name therefore arrived with a replacement character inside it and was
+printed that way in the evidence line. Decoding now reads the header, then the document's own
+declaration, then charset detection, then UTF-8. Every fixture was pure ASCII, which is why
+219 passing tests had nothing to say about it.
+
+**A sentinel value was printed as a measurement.** The call-to-action extractor uses one
+million to mean "this link exists but its label is not in the body copy", which happens when
+the label lives in an `aria-label` or inside an image. A German retailer's report read: *the
+first call to action ("discover") appears 1000000 characters into the body text.* It now says
+the label is not in the page copy at all, which is both true and a more useful thing to know.
+
+Neither bug needed a non-English site. Both needed a site nobody had built a fixture for.
+
+### Third holdout, prediction written 30 August 2026
+
+40 sites, ten categories, none used in any earlier sample. Chosen against the gaps the first
+two left rather than for variety: small storefronts and marketplaces, because the product
+page-type bug was found in a fixture and nothing has confirmed the fix on a real shop;
+documentation sites, which are enormous, templated and thin per page; local trades, the low
+end of the professional web; podcasts, where the transcript check lives; open-source projects,
+which have no commercial motive at all; four more non-English sites, because the last attempt
+reached only two; and four sites run by accessibility organisations, where alt text and `lang`
+should be right and our checks should therefore stay quiet.
+
+| | Holdouts 1 and 2 | Predicted here |
+|---|---|---|
+| Critical + high per site | 1.81, 1.81 | 1.5 – 2.5 |
+| Total findings per site | 12.4, 12.6 | 11 – 16 |
+| Sites that cannot be crawled | 12%, 16% | 10 – 20% |
+
+Five of the 40 refused a plain `HEAD`, the lowest rate of any sample so far — small commerce
+and open source run far less bot management than banks and museums.
+
+**Three specific calls, each of which can be wrong on its own.**
+
+`no-product-schema` should now fire on real storefronts that lack Product markup. Before the
+page-type fix a `/products/<item>` page without the phrase "add to cart" in its crawlable text
+was classified as a listing, and listings are never asked for Product markup — so the check
+was exempting exactly the sites that needed it. If it fires on none of the eight commerce
+sites, the fix did not take.
+
+`alt-missing` and `missing-lang` should stay **quiet on the four accessibility organisations**.
+Those sites publish accessibility statements and are audited against them. If we report either
+on all four, our checks are wrong, not the sites.
+
+`no-transcript` should fire on at least one of the four podcast sites, and probably not all
+four — two of them publish full transcripts. This is the only check in the marketplace that
+has never fired on a real site in any sample, so it has never been shown to work outside a
+fixture.
+
+**Failure signals, set in advance:** any check above 70% of the sample; the accessibility
+category scoring worse than the average; or `no-product-schema` firing on zero commerce sites.
+
+### Result — third holdout
+
+40 sites, ten categories, chosen against the gaps the first two left rather than for variety.
+
+| | Predicted | Actual | |
+|---|---|---|---|
+| Critical + high per site | 1.5 – 2.5 | **1.34** | miss |
+| Total findings per site | 11 – 16 | **12.1** | pass |
+| Sites that cannot be crawled | 10 – 20% | **20%** | pass, at the edge |
+
+The serious-findings figure came in *below* the predicted floor, which is a miss even though it
+is in our favour. Documentation sites are the reason: four of them averaged 0.2 critical or high
+findings between them. They are templated, server-rendered, densely marked up and written by
+people whose job is being read by machines. Nothing was wrong with them, and the audit agreed.
+
+| Category | Sites | Mean findings | Mean critical + high |
+|---|---|---|---|
+| Local trades | 3 | 6.3 | 1.3 |
+| Documentation | 4 | 9.2 | 0.2 |
+| Podcasts | 4 | 10.5 | 1.2 |
+| Recruitment | 3 | 10.7 | 1.0 |
+| **Accessibility organisations** | 4 | **10.8** | **1.0** |
+| Marketplaces | 2 | 13.5 | 2.5 |
+| Non-English | 2 | 13.5 | 2.5 |
+| Small storefronts | 4 | 14.8 | 2.0 |
+| Open source | 4 | 16.0 | 1.2 |
+| Private healthcare | 2 | 18.0 | 1.5 |
+
+### The three named calls
+
+**`no-product-schema` had to fire on real storefronts. It fired on 2 of 6.** The page-type fix
+took: before it, a `/products/<item>` page whose crawlable text did not contain "add to cart"
+was classified as a listing, and listings are never asked for Product markup — the check was
+exempting exactly the sites that needed it. Two of six is the right shape rather than a weak
+result: the other four already publish Product markup, because their platform emits it.
+
+**`alt-missing` and `missing-lang` had to stay quiet on the accessibility organisations. They
+did:** alt text on 1 of 4, language on 0 of 4. And the category scored *better* than the sample
+average, 10.8 findings against 12.1. Four organisations that publish accessibility statements
+and are audited against them came out ahead on our accessibility-adjacent checks. That is the
+closest thing to an external control this project has.
+
+**`no-transcript` had to fire on at least one podcast site. It fired on none.** This was the
+only check in the marketplace that had never fired on a real site in any sample, and the
+holdout was set up to find out whether it worked. It half did not.
+
+Reading the four sites by hand splits the result. Two publish full transcripts, so silence
+there is correct and the check was right. The other two carry audio players — and the extractor
+counted `<video>` elements and video embeds and **never looked at `<audio>` at all**. A podcast
+episode page is the clearest instance in existence of content a machine cannot read without a
+transcript, and every one of them was invisible to the check meant to catch it.
+
+Worse, an episode page had no page type. `/episodes/<slug>` classified as `other`, which is
+excluded from every content check, so even with audio detected the page would have been skipped.
+Episodes are now articles — dated published pieces a machine should be able to read, quote and
+date — and audio is extracted alongside video, native elements and the common podcast hosts
+both.
+
+Neither correction rests on holdout data: `tests/mutations.py` now contains an episode page
+with a player and two lines of summary, and the check has to catch it.
+
+### The three checks that broke 70%, and what we did about each
+
+The protocol above says to treat those as broken until proven otherwise, and to read the
+findings by hand before touching any threshold. Three checks, three different answers.
+
+**`weak-corroboration`, 76%. Not broken; left alone.** Mean off-site profile breadth is 4.9 on
+the training set and 4.9 on the holdout. The threshold is 6, which came from a measured mean
+of 7.2 for brands assistants name. Six of 21 sites clear it. 76% is arithmetic on a
+`low`-severity recommendation drawn from the strongest signal in this study, not a check
+misfiring.
+
+**`meta-hygiene`, 76%. A bucket, not a check.** The 29 findings behind that number were four
+unrelated things sharing one tag: page titles, Open Graph tags, a missing `WebSite` type, and
+a page with no `lang` attribute. Different fixes, different owners. Split into
+`open-graph-incomplete`, `no-website-schema`, `missing-lang` and `microdata-only`. No
+detection changed — the same findings fire on the same pages — and the counts now mean
+something: Open Graph 57%, titles and descriptions 48%.
+
+**`no-entity-definition`, 81%. A real bug, and it was hiding a second one.** The check
+required the *entire* declared name as the subject of the sentence:
+
+> No sentence of the form "Department of Computer Science, University of Oxford is a ..."
+> appears in the first 150 words
+
+Nobody writes that. The check was unsatisfiable for any organisation with a long formal name,
+which is most institutions. It now tries every form the site asserts for itself, with legal
+suffixes stripped repeatedly, so `Acme Holdings, Inc.` also matches `Acme`. Writing the
+mutation that proves this fix immediately failed a second check: `schema-text-mismatch` was
+comparing the declared name to page text verbatim, so a site declaring a formal name in
+markup while writing its trading name in prose was reported as contradicting itself. Both now
+use one shared `name_forms()` helper, so a third check cannot reinvent the strict version.
+
+After the fix the check reports 76%, and on inspection it is **correct**. These sites really
+do not open with a sentence saying what they are — a developer-tools homepage leads with
+"Build, share and run", a law firm with a strapline. That is the central claim of this
+marketplace, measured: the most common gap on real sites is also the cheapest one to close,
+and it is one sentence.
+
+### On using a holdout twice
+
+The two bug fixes above were found because the holdout pointed at them, but neither was
+*justified* by holdout data: each is demonstrated by a case in `tests/mutations.py` that never
+touches these 24 sites. No threshold moved. The `meta-hygiene` split changes no detection at
+all.
+
+The sample was then re-run to confirm the fixes landed. That second pass is a confirmation,
+not a second test, and it is reported as one: critical-and-high moved 1.86 to 1.81, total
+findings 12.6 to 12.4, `meta-hygiene` 76% to 48%. Any further change made on the strength of
+these 24 sites needs a fresh holdout first — at that point they become training data like the
+other 36.
+
 ### What each outcome means
 
 | Outcome | Reading |

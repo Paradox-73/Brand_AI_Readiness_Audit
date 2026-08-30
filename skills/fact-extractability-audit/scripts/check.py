@@ -43,8 +43,8 @@ if not os.path.isfile(os.path.join(_SHARED, "audit_common.py")):
     ]))
 
 from audit_common import (  # noqa: E402
-    SkillResult, has_price, load_snapshot, pages_of, pct, sample, sentences,
-    truncate, word_count,
+    SkillResult, has_price, load_snapshot, name_forms, pages_of, pct, sample,
+    sentences, truncate, word_count,
 )
 
 SKILL = "fact-extractability-audit"
@@ -115,7 +115,7 @@ def run(snapshot):
             result.skip(name, "no content pages returned HTTP 200")
         return result
 
-    _check_entity_definition(result, snapshot, pages, brand_name)
+    _check_entity_definition(result, snapshot, pages, brand_name, brand)
     _check_heading_hierarchy(result, pages)
     _check_answer_first(result, pages, brand_name)
     _check_core_facts(result, snapshot, pages, brand_name)
@@ -134,6 +134,29 @@ def _brand_pattern(brand_name):
     return r"\s+".join(tokens)
 
 
+def _brand_forms(brand_name, brand):
+    """Every way the site could reasonably refer to itself in a sentence.
+
+    A site is not obliged to write its full legal or formal name as the subject
+    of its own definition. "Department of Computer Science, University of
+    Oxford" is a correct declared name and will never appear verbatim in the
+    sentence "The Department is one of the largest in the UK". Requiring the
+    whole string made the check unsatisfiable for any organisation with a long
+    formal name - which is most institutions, and 81% of a holdout sample.
+
+    Returns the declared name, every variant the site asserts, and the short
+    forms derivable from them, longest first so the most specific match wins.
+    """
+    forms = {brand_name}
+    forms.update(v for v in (brand.get("authoritative_variants") or []) if v)
+    forms.update(v for v in (brand.get("alternate_names") or []) if v)
+
+    for value in list(forms):
+        forms.update(name_forms(value))
+
+    return sorted({f for f in forms if len(f) > 2}, key=len, reverse=True)
+
+
 def _top_words(page, limit=DEFINITION_WINDOW_WORDS):
     """The opening of the page: headings plus the first N words of body text."""
     headings = page.get("headings") or {}
@@ -143,20 +166,25 @@ def _top_words(page, limit=DEFINITION_WINDOW_WORDS):
     return "{} {}".format(lead, " ".join(words[:limit])).strip()
 
 
-def _find_definition(text, brand_name):
-    """A quotable one-line definition: `<Brand> is a <category> that ...`."""
-    pattern = _brand_pattern(brand_name)
-    if not pattern:
-        return None
-    regex = re.compile(
-        COPULAR_RE_TEMPLATE.format(brand=pattern, minlen=MIN_DEFINITION_PREDICATE), re.I)
-    match = regex.search(text)
-    if not match:
-        return None
-    return truncate(match.group(0), 300)
+def _find_definition(text, brand_name, brand=None):
+    """A quotable one-line definition: `<Brand> is a <category> that ...`.
+
+    Tried against every form the site could use for itself, longest first, so a
+    match reports the most specific subject the sentence actually used.
+    """
+    for form in _brand_forms(brand_name, brand or {}):
+        pattern = _brand_pattern(form)
+        if not pattern:
+            continue
+        regex = re.compile(
+            COPULAR_RE_TEMPLATE.format(brand=pattern, minlen=MIN_DEFINITION_PREDICATE), re.I)
+        match = regex.search(text)
+        if match:
+            return truncate(match.group(0), 300)
+    return None
 
 
-def _check_entity_definition(result, snapshot, pages, brand_name):
+def _check_entity_definition(result, snapshot, pages, brand_name, brand=None):
     """The single most quotable fact on any site: what this brand actually is.
 
     Assistants need an identity sentence before they can say anything else
@@ -177,7 +205,7 @@ def _check_entity_definition(result, snapshot, pages, brand_name):
 
     found = None
     for page in identity:
-        definition = _find_definition(_top_words(page), brand_name)
+        definition = _find_definition(_top_words(page), brand_name, brand)
         if definition:
             found = (page, definition)
             break
@@ -192,10 +220,11 @@ def _check_entity_definition(result, snapshot, pages, brand_name):
 
     # Distinguish "the brand is named but never defined" from "the brand is
     # never named at the top of its own homepage", because the fixes differ.
-    pattern = _brand_pattern(brand_name)
     home = identity[0]
     top = _top_words(home)
-    named = bool(pattern and re.search(pattern, top, re.I))
+    named = any(re.search(_brand_pattern(form), top, re.I)
+                for form in _brand_forms(brand_name, brand or {})
+                if _brand_pattern(form))
     pronouns = len(re.findall(r"\b(?:we|our|us)\b", top, re.I))
 
     if not named and pronouns >= 3:

@@ -9,7 +9,8 @@ an optional `_rules.json` inside each fixture directory:
       "block_user_agents": ["GPTBot"],       # -> 403 for those UAs
       "status": {"/gone.html": 404},         # forced status codes
       "headers": {"/x.html": {"X-Robots-Tag": "noindex"}},
-      "redirects": {"/old.html": "/new.html"}
+      "redirects": {"/old.html": "/new.html"},
+      "omit_charset": true                   # -> "text/html" with no charset
     }
 
 Test-only. Nothing in `skills/` imports it.
@@ -108,8 +109,15 @@ class FixtureServer:
                 if extension in TEXT_TYPES:
                     body = body.replace(b"{{BASE}}", server.base_url.encode("utf-8"))
 
-                extra = server.rules.get("headers", {}).get(path, {})
-                self._respond(forced or 200, body, content_type, head_only, extra)
+                extra = dict(server.rules.get("headers", {}).get(path, {}))
+                # A fixture can drop the charset from the header to reproduce
+                # the commonest real-world case: the encoding is declared in a
+                # <meta> tag and nowhere else.
+                if server.rules.get("omit_charset"):
+                    content_type = content_type.split(";")[0]
+                override = extra.pop("Content-Type", None)
+                self._respond(forced or 200, body, override or content_type,
+                              head_only, extra)
 
             def _respond(self, status, body, content_type, head_only, extra=None):
                 self.send_response(status)

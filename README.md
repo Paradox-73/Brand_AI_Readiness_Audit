@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Agent Skills](https://img.shields.io/badge/Agent%20Skills-agentskills.io-6E56CF?style=flat-square)
 ![Skills](https://img.shields.io/badge/Skills-7%20(1%20entrypoint)-0F9D58?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-211%20passing-2EA043?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-242%20passing-2EA043?style=flat-square)
 ![Read Only](https://img.shields.io/badge/Mode-Read--only-FF6F00?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-4169E1?style=flat-square)
 
@@ -211,8 +211,11 @@ brand-ai-readiness-audit/              <- zip this directory to submit
     ├── test_checks.py                 # Does each check fire on the correct site?
     ├── test_runtime.py                # Schema, determinism, budget, safety
     ├── test_marketplace.py            # Manifest and SKILL.md format
-    ├── mutations.py                   # 37 ways to break one property of a clean site
+    ├── mutations.py                   # 43 ways to break one property of a clean site
     ├── test_mutations.py              # Does each check catch its own cause, and only it?
+    ├── test_fixes_work.py             # Paste the code we hand the user. Does the finding go?
+    ├── test_render.py                 # The optional browser pass, when Playwright is present
+    ├── test_encoding.py               # Non-ASCII text must survive the crawl
     ├── test_coverage.py               # Every root cause must have a case that produces it
     ├── fixtures/                      # 6 local websites, one per fault type
     │   ├── good-site/                 # No faults. Must produce zero findings
@@ -266,14 +269,34 @@ Controlling the cause is the only way to tell detection from correlation, and it
 defects the fixture suite had never touched — including one check that was documented,
 listed in every report, and had no implementation behind it.
 
-**We refuse to ship a claim we have not tested.** `tests/test_coverage.py` requires every
-root cause in the vocabulary to have a case that produces it. Two are exempt and the file
-records why: one needs a TLS origin, one needs a real Wikidata name collision.
+**We check that our own advice works.** `tests/test_fixes_work.py` breaks the site, reads the
+finding, pastes the code the report handed the user into the exact pages it named, runs again,
+and requires the finding to be gone. Ten cases, covering Organization, Article, FAQPage and
+WebSite markup, `robots.txt` and `sitemap.xml`. Five fixes are prose — "write one sentence
+saying what your brand is" — and the file lists them as un-machine-checkable rather than
+letting their absence imply coverage.
 
-What none of this settles is how the thresholds behave on page shapes nobody thought to
-build. The study sample is now closed — every threshold was moved after looking at it, which
-makes it training data — and the holdout protocol at the end of that reference says how to
-draw a fresh one.
+**We refuse to ship a claim we have not tested.** `tests/test_coverage.py` requires every root
+cause in the vocabulary to have a case that produces it, and a companion test fails if any
+finding hands out code with nothing proving the code works. Two causes are exempt with the
+reason recorded: one needs a TLS origin, one needs a real Wikidata name collision.
+
+**We held out three samples and wrote the prediction down first.** The 36 study sites are
+training data: every threshold moved after looking at them. So we drew fresh samples in
+categories nobody had touched — 24, then 32, then 40 sites, spanning law firms, hospitals,
+government, museums, banks, storefronts, documentation, podcasts, open source and four
+languages — recorded the expected numbers in the study file *before* each first crawl, and ran
+once.
+
+The first two returned **1.81 serious findings per site each**, on samples sharing no
+categories with one another or with the training set. Predictions that missed are reported
+alongside the ones that held: crawlability was over-predicted twice, the predicted top-three
+findings were one-for-three, and an expectation that non-English sites would break the prose
+checks turned out wrong.
+
+No threshold has ever been moved on holdout evidence. Where a holdout pointed at a defect, the
+fix had to be demonstrable on its own — as a mutation case that never touches those sites —
+before it was made.
 
 ### 5.3 Example Finding
 
@@ -347,13 +370,14 @@ pip install pytest
 python -m pytest tests/ -q
 ```
 
-211 tests, about six minutes. The suite starts a local web server, audits six test sites, and
+242 tests, about nine minutes. The suite starts a local web server, audits six test sites, and
 checks the results.
 
-Most of the time is the mutation suite: 37 cases that each take a copy of the clean fixture,
+Most of the time is the mutation suite: 43 cases that each take a copy of the clean fixture,
 break exactly one property, and assert the audit reports that property **and nothing else**.
-It is what tells us a check detects its own cause rather than correlating with it. Skip it
-while iterating and it drops to about a minute:
+It is what tells us a check detects its own cause rather than correlating with it, and it runs
+alongside ten tests that paste the code a report hands the user and require the finding to go
+away. Skip both while iterating and it drops to about 90 seconds:
 
 ```bash
 python -m pytest tests/ -q -m "not mutation"

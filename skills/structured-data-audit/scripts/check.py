@@ -44,7 +44,7 @@ if not os.path.isfile(os.path.join(_SHARED, "audit_common.py")):
 
 from audit_common import (  # noqa: E402
     CONTENT_TYPES, DEEP_TYPES, SkillResult, find_prices, load_snapshot,
-    pages_of, pct, sample, truncate,
+    name_forms, pages_of, pct, sample, truncate,
 )
 
 SKILL = "structured-data-audit"
@@ -637,7 +637,7 @@ def _check_website_searchaction(result, by_type):
         severity="low", confidence="medium",
         evidence="{} contains a search form but declares no WebSite type with a "
                  "potentialAction.".format(home["url"]),
-        mechanism="C", root_cause="meta-hygiene",
+        mechanism="C", root_cause="no-website-schema",
         summary="Add WebSite JSON-LD with a SearchAction to the homepage.",
         how_to_fix=[
             "Add the snippet below to the homepage head.",
@@ -700,9 +700,12 @@ def _check_consistency(result, pages, brand):
                 continue
             haystack = "{} {} {}".format(page.get("title", ""), text[:4000],
                                          " ".join(page.get("headings", {}).get("h1") or []))
-            if declared.lower() not in haystack.lower():
+            # A formal name in markup and a trading name in the prose is normal
+            # and correct. The conflict is when *no* form of the declared name
+            # appears, not when the legal suffix is missing from the sentence.
+            if not any(form.lower() in haystack.lower() for form in name_forms(declared)):
                 conflicts.append((page, 'Organization name "{}" does not appear in the page '
-                                        'title, headings or body text'.format(declared)))
+                                        'title, headings or body text, in any form'.format(declared)))
 
     if not conflicts:
         result.skip("jsonld-matches-visible-text",
@@ -823,7 +826,7 @@ def _check_open_graph(result, pages):
         severity="low", confidence="high",
         evidence="Pages missing at least one of og:title, og:description or og:image: {}.".format(
             ", ".join(sample([p["url"] for p in incomplete], 5))),
-        mechanism="B", root_cause="meta-hygiene",
+        mechanism="B", root_cause="open-graph-incomplete",
         summary="Add og:title, og:description and og:image to the site template.",
         how_to_fix=[
             "Add the three Open Graph tags to your base template, populated from the page's "
@@ -850,7 +853,7 @@ def _check_lang(result, pages):
         severity="low", confidence="high",
         evidence="Pages with no lang attribute on <html>: {}.".format(
             ", ".join(sample([p["url"] for p in without], 5))),
-        mechanism="C", root_cause="meta-hygiene",
+        mechanism="C", root_cause="missing-lang",
         summary='Add lang to the <html> element, for example <html lang="en">.',
         how_to_fix=[
             'Set the lang attribute in your base template, for example <html lang="en">.',
@@ -877,7 +880,7 @@ def _check_microdata_only(result, pages):
         severity="low", confidence="medium",
         evidence="Pages with microdata attributes but no JSON-LD block: {}.".format(
             ", ".join(sample([p["url"] for p in microdata_only], 5))),
-        mechanism="C", root_cause="meta-hygiene",
+        mechanism="C", root_cause="microdata-only",
         summary="Migrate the markup to JSON-LD, which is the format consumers support most consistently.",
         how_to_fix=[
             "Express the same entities as a JSON-LD block in the page head.",

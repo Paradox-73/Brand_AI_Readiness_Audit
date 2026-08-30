@@ -15,7 +15,7 @@
     "weak-corroboration",
     "no-orientation",
     "dead-end",
-    "meta-hygiene"
+    "open-graph-incomplete"
   ],
   "must_not_find": [
     "robots-block",
@@ -25,8 +25,21 @@
     "no-product-schema",
     "stale-content"
   ],
-  "must_recommend": ["R-LLMS-TXT", "R-HTML-FOR-PDF", "R-SAMEAS-WIKIDATA", "R-BOILERPLATE"],
-  "must_not_recommend": ["R-EMAIL-TEXT-FIRST"],
-  "critical_root_causes": ["js-shell"],
-  "citation_simulation_none_for_types": ["home", "about", "contact"]
+  "must_recommend": [
+    "R-LLMS-TXT",
+    "R-HTML-FOR-PDF",
+    "R-SAMEAS-WIKIDATA",
+    "R-BOILERPLATE"
+  ],
+  "must_not_recommend": [
+    "R-EMAIL-TEXT-FIRST"
+  ],
+  "critical_root_causes": [
+    "js-shell"
+  ],
+  "citation_simulation_none_for_types": [
+    "home",
+    "about",
+    "contact"
+  ]
 }
