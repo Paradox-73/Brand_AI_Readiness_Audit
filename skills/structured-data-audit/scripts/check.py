@@ -19,28 +19,38 @@ import sys
 from collections import Counter, defaultdict
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SHARED = os.path.join(os.path.dirname(os.path.dirname(_HERE)),
-                       "audit-orchestrator", "scripts")
-sys.path.insert(0, _SHARED)
 
-# This skill reads the marketplace's shared library. One definition of the
-# finding schema, the root-cause vocabulary and the page-type detector keeps six
-# skills from drifting apart. The trade-off is that a skill folder lifted out of
-# the marketplace on its own cannot run, so say that plainly instead of failing
-# with an import traceback.
-if not os.path.isfile(os.path.join(_SHARED, "audit_common.py")):
+# The marketplace's shared library: one definition of the finding schema, the
+# root-cause vocabulary and the page-type detector, so six skills cannot drift
+# apart on any of the three.
+#
+# Looked for beside this file first, then in the orchestrator. `package.py`
+# writes a copy into every skill directory when it builds the submission, so a
+# skill folder lifted out on its own still runs; the checkout keeps a single
+# source of truth so the copies cannot diverge from it.
+_SHARED_CANDIDATES = (
+    _HERE,
+    os.path.join(os.path.dirname(os.path.dirname(_HERE)), "audit-orchestrator", "scripts"),
+)
+_SHARED = next(
+    (path for path in _SHARED_CANDIDATES
+     if os.path.isfile(os.path.join(path, "audit_common.py"))),
+    None,
+)
+if _SHARED is None:
     raise SystemExit(os.linesep.join([
         "Cannot find the shared library that this skill depends on.",
-        "  Looked in: " + _SHARED,
+        "  Looked in: " + "; ".join(_SHARED_CANDIDATES),
         "",
-        "This skill belongs to the brand-ai-readiness-audit marketplace and reads",
-        "skills/audit-orchestrator/scripts/audit_common.py. Copy or run the whole",
-        "marketplace rather than a single skill directory.",
+        "This skill reads audit_common.py, which should sit either beside this",
+        "file or in skills/audit-orchestrator/scripts/. Copy the whole",
+        "marketplace, or rebuild the submission with package.py.",
         "",
-        "To perform these checks without the marketplace, follow the Procedure",
-        "section of this skill's SKILL.md by hand. It states every check in prose",
-        "and produces the same findings.",
+        "To perform these checks without it, follow the Procedure section of",
+        "this skill's SKILL.md by hand. It states every check in prose and",
+        "produces the same findings.",
     ]))
+sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
     CONTENT_TYPES, DEEP_TYPES, SkillResult, find_prices, load_snapshot,

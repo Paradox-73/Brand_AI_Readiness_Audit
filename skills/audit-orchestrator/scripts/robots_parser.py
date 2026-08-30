@@ -138,7 +138,12 @@ _BENIGN_DISALLOW = re.compile(
     r"^/(wp-admin|admin|administrator|cgi-bin|cart|checkout|basket|account|"
     r"login|signin|sign-in|logout|register|signup|search|\?|.*\?|tmp|temp|"
     r"private|internal|api|graphql|xmlrpc|wp-includes|wp-json|feed|print|"
-    r"thank-you|order|my-account|customer|user|profile|preview|draft)",
+    r"thank-you|order|my-account|customer|user|profile|preview|draft|"
+    # Asset directories. Blocking them is ordinary bandwidth hygiene and holds
+    # back no sentence anyone would quote. Reporting `/icons/` and `/images/`
+    # as "paths that look like real content" was true of neither.
+    r"icons?|images?|img|assets|static|media|files|uploads|css|js|"
+    r"javascript|fonts?|styles?|scripts?|dist|build|vendor|node_modules)",
     re.I,
 )
 

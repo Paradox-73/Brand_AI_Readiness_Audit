@@ -58,7 +58,12 @@ def test_report_has_every_required_key(audit, name):
                 "finding {} suggested_action is missing `{}`".format(finding["id"], key)
         assert re.match(r"^F-\d{3}$", finding["id"])
         assert finding["severity"] in ("critical", "high", "medium", "low", "info")
-        assert finding["suggested_action"]["priority"] in ("critical", "high", "medium", "low")
+        # Deliberately not the severity words. Priority answers "what should you
+        # do first", severity answers "how bad is this", and sharing a
+        # vocabulary made a medium finding read as "Priority critical".
+        assert finding["suggested_action"]["priority"] in (
+            "do first", "do soon", "schedule", "when convenient")
+        assert finding["suggested_action"]["priority"] != finding["severity"]
 
 
 @pytest.mark.parametrize("name", FIXTURE_NAMES)

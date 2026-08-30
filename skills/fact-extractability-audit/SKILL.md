@@ -106,6 +106,8 @@ own H2s.
 
 ## Not applicable when
 
+- **The site is not in English.** Three of the six checks here reason about English sentences: the definition pattern, the answer-first test and the sentence-length threshold. On a site declaring another language they decline and say so, rather than guessing. Heading order, core facts and name consistency are structural and still run.
+
 - No brand name could be determined from structured data, `og:site_name` or the page title —
   there is nothing to look for a definition of.
 - Neither a home nor an about page was crawled.

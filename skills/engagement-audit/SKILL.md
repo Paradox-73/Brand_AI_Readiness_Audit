@@ -100,6 +100,8 @@ Findings carry mechanism `G` and a `root_cause` of `no-orientation`, `dead-end`,
 
 ## Not applicable when
 
+- **The site is not in English**, for the wording half of homepage orientation. Whether a heading says nothing ("welcome", "home") and whether a link reads as a call to action are both English tests. On a non-English site this check reports only whether a heading exists, and states what it did not judge. Everything else in this skill is structural.
+
 - No content page returned HTTP 200.
 - The homepage was not crawled — orientation cannot be assessed.
 - Fewer than four pages were crawled — too few to establish what the site's normal

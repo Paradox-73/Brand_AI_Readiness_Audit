@@ -33,7 +33,7 @@ EXCLUDE_DIRS = {
 # File suffixes and names that must never enter the zip.
 EXCLUDE_SUFFIXES = (".pyc", ".pyo", ".zip", ".log")
 EXCLUDE_NAMES = {
-    ".DS_Store", "Thumbs.db", "desktop.ini", ".gitignore", ".gitattributes",
+    "Thumbs.db", "desktop.ini",
     "snapshot.json", "report.json", "report.md", "report.html",
     # Our own working notes. The brief asks for the manifest, the skills and a
     # README; internal planning documents are not part of the deliverable and
@@ -43,12 +43,54 @@ EXCLUDE_NAMES = {
 }
 
 
+SHARED_LIBRARY = os.path.join("skills", "audit-orchestrator", "scripts", "audit_common.py")
+
+VENDOR_HEADER = """# ---------------------------------------------------------------------------
+# GENERATED COPY - do not edit.
+#
+# The single source of this file is skills/audit-orchestrator/scripts/audit_common.py.
+# package.py writes a copy into every skill that reads it, so that each skill
+# folder satisfies the brief's portability rule on its own: lift one out of the
+# marketplace and it still runs.
+#
+# The checkout keeps one copy so the definitions cannot drift; the submission
+# carries seven so no skill depends on its neighbours being present.
+# ---------------------------------------------------------------------------
+"""
+
+
+def vendored_shared_library(root):
+    """One `(archive path, bytes)` pair per skill that reads the shared library.
+
+    Returned rather than written to disk: the checkout stays single-source, and
+    only the zip carries the copies.
+    """
+    with open(os.path.join(root, SHARED_LIBRARY), encoding="utf-8") as handle:
+        source = handle.read()
+    payload = (VENDOR_HEADER + source).encode("utf-8")
+
+    copies = []
+    skills_dir = os.path.join(root, "skills")
+    for name in sorted(os.listdir(skills_dir)):
+        scripts = os.path.join(skills_dir, name, "scripts")
+        if name == "audit-orchestrator" or not os.path.isfile(
+                os.path.join(scripts, "check.py")):
+            continue
+        copies.append(("skills/{}/scripts/audit_common.py".format(name), payload))
+    return copies
+
+
 def collect_files():
     """List every file to package, in a stable order."""
     selected = []
     for directory, subdirectories, files in os.walk(ROOT):
         subdirectories[:] = sorted(d for d in subdirectories if d not in EXCLUDE_DIRS)
         for filename in sorted(files):
+            # Anything hidden is tooling, not deliverable. Naming artefacts
+            # one at a time was how a 283 KB `.coverage` file reached a built
+            # zip: it was in `.gitignore`, which this script does not read.
+            if filename.startswith("."):
+                continue
             if filename in EXCLUDE_NAMES or filename.endswith(EXCLUDE_SUFFIXES):
                 continue
             if filename.endswith(".findings.json"):
@@ -63,11 +105,14 @@ def build(out_path):
     if directory:
         os.makedirs(directory, exist_ok=True)
 
+    copies = vendored_shared_library(ROOT)
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in files:
             relative = os.path.relpath(path, ROOT).replace(os.sep, "/")
             archive.write(path, "{}/{}".format(PACKAGE_NAME, relative))
-    return files, os.path.getsize(out_path)
+        for relative, payload in copies:
+            archive.writestr("{}/{}".format(PACKAGE_NAME, relative), payload)
+    return files + [name for name, _ in copies], os.path.getsize(out_path)
 
 
 def run_checks():

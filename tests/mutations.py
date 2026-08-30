@@ -666,3 +666,38 @@ mutation(
                   'Podcast episode 12</a></p></main>')),
     ),
 )
+
+
+mutation(
+    "the homepage is a meta-refresh stub pointing at the real one",
+    expect={"meta-refresh"},
+    # A real site answered its homepage with 216 bytes and a refresh tag. The
+    # audit read the stub and reported that the site had no heading, no
+    # navigation and no call to action - all true of the stub, none of the site.
+    apply=lambda site: (
+        os.rename(os.path.join(site, "index.html"), os.path.join(site, "home.html")),
+        add_file(site, "index.html",
+                 '<!doctype html><html lang="en"><head>'
+                 '<title>{{BASE}}/home.html</title>'
+                 '<link rel="canonical" href="{{BASE}}/home.html">'
+                 '<meta charset="utf-8">'
+                 '<meta http-equiv="refresh" content="0; url={{BASE}}/home.html">'
+                 '</head></html>'),
+    ),
+)
+
+
+mutation(
+    "the product is free and the site says so instead of naming a price",
+    # Nothing is broken. "Free and open source" answers "what does it cost" as
+    # completely as a figure does, and the check used to demand a number from a
+    # project that has none - on a real open-source site, in a real report.
+    expect=set(),
+    # Removing every figure from the pricing section means it no longer opens
+    # with one, which the answer-first check is right to notice.
+    also={"fluff-first"},
+    apply=lambda site: edit_all(
+        site,
+        swap(r"\$[\d,]+(?: per month| per year)?",
+             "free and open source, with no licence fee")),
+)

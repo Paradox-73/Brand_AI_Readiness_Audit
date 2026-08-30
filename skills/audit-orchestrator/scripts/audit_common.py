@@ -86,7 +86,7 @@ MECHANISMS = {
 ROOT_CAUSES = frozenset({
     # Gate A - access
     "robots-block", "bot-manager-block", "sitemap-missing", "sitemap-broken",
-    "non-200", "redirect-chain", "noindex", "canonical-broken",
+    "non-200", "redirect-chain", "meta-refresh", "noindex", "canonical-broken",
     "insecure-transport", "host-inconsistency",
     # Gate A/C - readability
     "js-shell", "thin-html", "image-locked-facts", "pdf-locked-facts",
@@ -184,6 +184,114 @@ def response_text(response):
     return content.decode("utf-8", errors="replace")
 
 
+# --------------------------------------------------------------------------
+# Language
+#
+# Every prose check in this marketplace reasons about English: the definition
+# pattern "<Brand> is a ...", the warm-up phrases that mark a section as not
+# answering first, the thirty-word sentence threshold, the imperative verbs that
+# identify a call to action, and the list of headings that say nothing ("home",
+# "welcome"). None of that transfers. Run on a German page they do not produce
+# subtly worse answers - they produce confident nonsense, which is the one thing
+# an audit must never do.
+#
+# So the language is detected once and the checks that cannot judge it say so.
+# A report that states "the prose checks were not run: this site is in German,
+# and they only reason about English" is more useful than one that guesses, and
+# it fits the rule the rest of the marketplace already follows - silence is
+# explained.
+# --------------------------------------------------------------------------
+
+PROSE_LANGUAGE = "en"
+
+# Function words are the cheapest reliable signal there is: they are frequent,
+# short, and almost disjoint between these languages. Used only when a page
+# declares no `lang` attribute at all.
+_LANGUAGE_MARKERS = {
+    "en": (" the ", " and ", " of ", " to ", " that ", " with ", " for ", " is "),
+    "de": (" der ", " die ", " das ", " und ", " mit ", " für ", " ist ", " den "),
+    "fr": (" le ", " la ", " les ", " des ", " et ", " pour ", " avec ", " est "),
+    "es": (" el ", " la ", " los ", " las ", " de ", " para ", " con ", " es "),
+    "nl": (" de ", " het ", " een ", " en ", " van ", " voor ", " met ", " is "),
+    "it": (" il ", " la ", " di ", " che ", " per ", " con ", " del ", " una "),
+    "pt": (" o ", " a ", " de ", " que ", " para ", " com ", " uma ", " dos "),
+}
+
+
+def primary_subtag(lang):
+    """`de-DE` -> `de`. Empty string for anything unusable."""
+    value = str(lang or "").strip().lower()
+    return value.split("-")[0].split("_")[0] if value else ""
+
+
+def guess_language_from_text(text):
+    """Language of a body of text from function-word frequency.
+
+    Deliberately crude and deliberately cautious: it returns "" unless one
+    language leads clearly, because guessing wrongly is worse than not guessing.
+    """
+    sample = " " + re.sub(r"\s+", " ", (text or "")[:4000]).lower() + " "
+    if len(sample) < 200:
+        return ""
+    scores = {code: sum(sample.count(word) for word in words)
+              for code, words in _LANGUAGE_MARKERS.items()}
+    ranked = sorted(scores.items(), key=lambda kv: -kv[1])
+    best, runner_up = ranked[0], ranked[1]
+    if best[1] < 5 or best[1] < runner_up[1] * 1.5:
+        return ""
+    return best[0]
+
+
+def detect_site_language(pages):
+    """The language of the site, and how we know.
+
+    Declared `lang` attributes first, because a site stating its own language is
+    better evidence than anything inferred from its words. Text only decides
+    when nothing is declared.
+    """
+    declared = {}
+    for page in pages or []:
+        if page.get("status") != 200:
+            continue
+        code = primary_subtag(page.get("lang"))
+        if code:
+            declared[code] = declared.get(code, 0) + 1
+    if declared:
+        code = max(declared, key=lambda k: (declared[k], k))
+        return {"code": code, "source": "declared",
+                "pages_declaring": sum(declared.values()),
+                "prose_checks_apply": code == PROSE_LANGUAGE}
+
+    text = " ".join((p.get("body_text") or "")[:2000] for p in (pages or [])[:5])
+    guessed = guess_language_from_text(text)
+    if guessed:
+        return {"code": guessed, "source": "inferred from the page text",
+                "pages_declaring": 0,
+                "prose_checks_apply": guessed == PROSE_LANGUAGE}
+    # Nothing declared and nothing clear in the text. Proceed as English, which
+    # is what every earlier version did unconditionally, but record that it is
+    # an assumption so a reader can discount the prose findings if it is wrong.
+    return {"code": "", "source": "not declared and not inferable",
+            "pages_declaring": 0, "prose_checks_apply": True}
+
+
+def language_of(snapshot):
+    """The language record a check should consult. Always returns a dict."""
+    value = snapshot.get("site_language")
+    if isinstance(value, dict) and value:
+        return value
+    return detect_site_language(snapshot.get("pages") or [])
+
+
+def prose_skip_reason(language):
+    """Why a prose check declined, in words a site owner can act on."""
+    return ("this site is in {} ({}), and this check reasons about English prose only. "
+            "It was not run rather than guessed at. The structural checks in this skill "
+            "were unaffected.".format(
+                (language.get("code") or "an undetermined language").upper(),
+                language.get("source", "detected")))
+
+
 def name_forms(declared):
     """Every way an organisation could reasonably refer to itself in a sentence.
 
@@ -258,10 +366,17 @@ def same_site(url_a, url_b):
         return False
 
 
-# Default documents that every common server also serves at the directory
-# root. Folding them together stops the crawler spending half its budget
-# fetching `/` and `/index.html` as if they were two pages.
-_INDEX_FILE_RE = re.compile(r"/(?:index|default|home)\.(?:html?|php|aspx?|jsp)$", re.I)
+# Default documents that every common server also serves at the directory root.
+# Folding them together stops the crawler spending half its budget fetching `/`
+# and `/index.html` as if they were two pages.
+#
+# `home.html` was in this list and should not have been. No server serves it at
+# the directory root; it is an ordinary page name, and a great many sites use it
+# for a real page. Folding it meant that page was merged into the homepage and
+# never crawled as itself - and if a site genuinely publishes the same content at
+# both `/` and `/home.html`, that is duplication we should report rather than
+# quietly hide.
+_INDEX_FILE_RE = re.compile(r"/(?:index|default)\.(?:html?|php|aspx?|jsp)$", re.I)
 
 
 def normalise_url(url, base=None):

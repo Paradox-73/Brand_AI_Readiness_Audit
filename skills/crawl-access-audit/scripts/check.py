@@ -19,28 +19,38 @@ from collections import Counter
 from urllib.parse import urlparse
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SHARED = os.path.join(os.path.dirname(os.path.dirname(_HERE)),
-                       "audit-orchestrator", "scripts")
-sys.path.insert(0, _SHARED)
 
-# This skill reads the marketplace's shared library. One definition of the
-# finding schema, the root-cause vocabulary and the page-type detector keeps six
-# skills from drifting apart. The trade-off is that a skill folder lifted out of
-# the marketplace on its own cannot run, so say that plainly instead of failing
-# with an import traceback.
-if not os.path.isfile(os.path.join(_SHARED, "audit_common.py")):
+# The marketplace's shared library: one definition of the finding schema, the
+# root-cause vocabulary and the page-type detector, so six skills cannot drift
+# apart on any of the three.
+#
+# Looked for beside this file first, then in the orchestrator. `package.py`
+# writes a copy into every skill directory when it builds the submission, so a
+# skill folder lifted out on its own still runs; the checkout keeps a single
+# source of truth so the copies cannot diverge from it.
+_SHARED_CANDIDATES = (
+    _HERE,
+    os.path.join(os.path.dirname(os.path.dirname(_HERE)), "audit-orchestrator", "scripts"),
+)
+_SHARED = next(
+    (path for path in _SHARED_CANDIDATES
+     if os.path.isfile(os.path.join(path, "audit_common.py"))),
+    None,
+)
+if _SHARED is None:
     raise SystemExit(os.linesep.join([
         "Cannot find the shared library that this skill depends on.",
-        "  Looked in: " + _SHARED,
+        "  Looked in: " + "; ".join(_SHARED_CANDIDATES),
         "",
-        "This skill belongs to the brand-ai-readiness-audit marketplace and reads",
-        "skills/audit-orchestrator/scripts/audit_common.py. Copy or run the whole",
-        "marketplace rather than a single skill directory.",
+        "This skill reads audit_common.py, which should sit either beside this",
+        "file or in skills/audit-orchestrator/scripts/. Copy the whole",
+        "marketplace, or rebuild the submission with package.py.",
         "",
-        "To perform these checks without the marketplace, follow the Procedure",
-        "section of this skill's SKILL.md by hand. It states every check in prose",
-        "and produces the same findings.",
+        "To perform these checks without it, follow the Procedure section of",
+        "this skill's SKILL.md by hand. It states every check in prose and",
+        "produces the same findings.",
     ]))
+sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
     CONTENT_TYPES, USER_AGENT, FetchError, Fetcher, SkillResult, load_snapshot,
@@ -301,8 +311,9 @@ def _check_robots_blocks(result, robots, origin):
             id_hint="robots-blocks-content-paths",
             title="robots.txt disallows {} path(s) that look like real content".format(len(content_blocks)),
             severity="medium", confidence="medium",
-            evidence="Disallowed for all crawlers: {}. Admin, cart, checkout and search paths "
-                     "were excluded from this list because blocking those is normal.".format(
+            evidence="Disallowed for all crawlers: {}. Admin, cart, checkout, search and "
+                     "asset paths were excluded from this list because blocking those is "
+                     "normal.".format(
                          ", ".join(content_blocks[:5])),
             mechanism="A", root_cause="robots-block",
             summary="Review these disallow rules and remove any that cover pages you want quoted.",
@@ -683,6 +694,55 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
         result.skip("noindex-on-content-pages", "no crawled content page carries a noindex directive")
 
     _check_canonicals(result, snapshot, ok_pages, fetcher)
+    _check_meta_refresh(result, snapshot, ok_pages)
+
+
+def _check_meta_refresh(result, snapshot, ok_pages):
+    """Pages that redirect with markup instead of an HTTP status.
+
+    A `<meta http-equiv="refresh">` is a redirect only for consumers that
+    render HTML. Server-side crawlers - including several that feed AI answers -
+    read the stub and stop, which is a handful of bytes with no heading, no
+    links and nothing to quote. The audit follows it so the report describes the
+    real page, and reports the stub separately, because a consumer that does not
+    follow it sees what we first saw.
+    """
+    result.check("meta-refresh-redirects")
+    stubs = [p for p in ok_pages if p.get("meta_refresh_from")]
+    if not stubs:
+        result.skip("meta-refresh-redirects",
+                    "no crawled page redirects by meta refresh instead of an HTTP status")
+        return
+
+    home_affected = any(p.get("page_type") == "home" for p in stubs)
+    result.add(
+        id_hint="meta-refresh-instead-of-http-redirect",
+        title="{} page(s) redirect with markup rather than an HTTP status".format(len(stubs)),
+        severity="high" if home_affected else "medium",
+        confidence="high",
+        evidence="; ".join(
+            "{} answers with {} bytes and a meta refresh to {}".format(
+                p["meta_refresh_from"]["url"], p["meta_refresh_from"].get("html_len", 0),
+                p["url"]) for p in sorted(stubs, key=lambda x: x["url"])[:3]) + ".",
+        mechanism="A", root_cause="meta-refresh",
+        summary="Replace the meta refresh with a 301 redirect issued by the server.",
+        how_to_fix=[
+            "Return `HTTP/1.1 301 Moved Permanently` with a `Location` header instead of "
+            "serving a page that contains a refresh tag.",
+            "Most static hosts support this in configuration: a `_redirects` file, a "
+            "`redirects` block, or a rewrite rule, depending on the platform.",
+            "If the refresh exists to choose a language, redirect on `Accept-Language` at the "
+            "server and give each language a real URL that can be linked and cited.",
+            "Verify with `curl -sI <url>`: the first line should be a 301, and the body should "
+            "be empty.",
+        ],
+        effort="low", owner="developer",
+        rationale="Mechanism A: a meta refresh is a redirect only for something that renders "
+                  "HTML. A crawler that reads the first response and stops sees a few hundred "
+                  "bytes with no heading, no links and nothing worth quoting, and concludes "
+                  "the page is empty rather than that it moved.",
+        affected_pages=[p["meta_refresh_from"]["url"] for p in stubs],
+    )
 
 
 def _check_canonicals(result, snapshot, ok_pages, fetcher=None):

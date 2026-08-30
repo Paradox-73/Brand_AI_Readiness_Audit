@@ -21,32 +21,43 @@ from collections import Counter
 from urllib.parse import urlparse
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SHARED = os.path.join(os.path.dirname(os.path.dirname(_HERE)),
-                       "audit-orchestrator", "scripts")
-sys.path.insert(0, _SHARED)
 
-# This skill reads the marketplace's shared library. One definition of the
-# finding schema, the root-cause vocabulary and the page-type detector keeps six
-# skills from drifting apart. The trade-off is that a skill folder lifted out of
-# the marketplace on its own cannot run, so say that plainly instead of failing
-# with an import traceback.
-if not os.path.isfile(os.path.join(_SHARED, "audit_common.py")):
+# The marketplace's shared library: one definition of the finding schema, the
+# root-cause vocabulary and the page-type detector, so six skills cannot drift
+# apart on any of the three.
+#
+# Looked for beside this file first, then in the orchestrator. `package.py`
+# writes a copy into every skill directory when it builds the submission, so a
+# skill folder lifted out on its own still runs; the checkout keeps a single
+# source of truth so the copies cannot diverge from it.
+_SHARED_CANDIDATES = (
+    _HERE,
+    os.path.join(os.path.dirname(os.path.dirname(_HERE)), "audit-orchestrator", "scripts"),
+)
+_SHARED = next(
+    (path for path in _SHARED_CANDIDATES
+     if os.path.isfile(os.path.join(path, "audit_common.py"))),
+    None,
+)
+if _SHARED is None:
     raise SystemExit(os.linesep.join([
         "Cannot find the shared library that this skill depends on.",
-        "  Looked in: " + _SHARED,
+        "  Looked in: " + "; ".join(_SHARED_CANDIDATES),
         "",
-        "This skill belongs to the brand-ai-readiness-audit marketplace and reads",
-        "skills/audit-orchestrator/scripts/audit_common.py. Copy or run the whole",
-        "marketplace rather than a single skill directory.",
+        "This skill reads audit_common.py, which should sit either beside this",
+        "file or in skills/audit-orchestrator/scripts/. Copy the whole",
+        "marketplace, or rebuild the submission with package.py.",
         "",
-        "To perform these checks without the marketplace, follow the Procedure",
-        "section of this skill's SKILL.md by hand. It states every check in prose",
-        "and produces the same findings.",
+        "To perform these checks without it, follow the Procedure section of",
+        "this skill's SKILL.md by hand. It states every check in prose and",
+        "produces the same findings.",
     ]))
+sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
-    CONTENT_TYPES, DEEP_TYPES, FetchError, Fetcher, SkillResult, load_snapshot,
-    normalise_url, pages_of, pct, sample, same_site, truncate, word_count,
+    CONTENT_TYPES, DEEP_TYPES, FetchError, Fetcher, SkillResult, language_of,
+    load_snapshot, normalise_url, pages_of, pct, sample, same_site, truncate,
+    word_count,
 )
 
 SKILL = "engagement-audit"
@@ -105,7 +116,11 @@ def run(snapshot, allow_network=True):
 
     home = next((p for p in pages if p["page_type"] == "home"), None)
 
-    _check_homepage_orientation(result, home)
+    language = language_of(snapshot)
+    english = bool(language.get("prose_checks_apply"))
+    result.signal("site_language", language.get("code") or "undetermined")
+
+    _check_homepage_orientation(result, home, english)
     _check_navigation(result, home, pages)
     _check_dead_ends(result, pages)
     _check_orphans(result, snapshot, pages)
@@ -135,7 +150,17 @@ def run(snapshot, allow_network=True):
 
 # --------------------------------------------------------------------------
 
-def _check_homepage_orientation(result, home):
+def _check_homepage_orientation(result, home, english=True):
+    """Does the homepage say where you are and what to do next?
+
+    Two of the three signals here are English: the list of headings that say
+    nothing ("welcome", "home"), and the imperative verbs that identify a call
+    to action. On a site in another language both go quiet for the wrong reason,
+    and "no call-to-action link was found anywhere in the page" would be a
+    confident falsehood about a page with a perfectly good button on it. So on a
+    non-English site this check reports only what it can actually see: whether
+    there is a heading at all.
+    """
     result.check("homepage-orientation")
     if home is None:
         result.skip("homepage-orientation", "the homepage was not crawled")
@@ -147,10 +172,17 @@ def _check_homepage_orientation(result, home):
 
     if not h1s:
         problems.append("the homepage has no H1")
-    elif h1s[0].strip().lower() in GENERIC_H1:
+    elif english and h1s[0].strip().lower() in GENERIC_H1:
         problems.append('the H1 is "{}", which says nothing about what the business does'.format(h1s[0]))
 
-    if not cta.get("found"):
+    if not english:
+        if not problems:
+            result.skip("homepage-orientation",
+                        "the homepage has an H1. Whether its wording orients a visitor, and "
+                        "whether its call to action reads as one, were not judged: both tests "
+                        "are English-only and this site is not in English")
+            return
+    elif not cta.get("found"):
         problems.append("no call-to-action link was found anywhere in the page")
     elif not cta.get("within_first_1500"):
         if cta.get("offset_known"):
@@ -167,7 +199,8 @@ def _check_homepage_orientation(result, home):
                     "{} characters".format(h1s[0], cta.get("text"), CTA_BYTE_WINDOW))
         return
 
-    no_cta = not cta.get("found")
+
+    no_cta = english and not cta.get("found")
     result.add(
         id_hint="homepage-does-not-orient-visitors",
         title="The homepage does not tell an arriving visitor where they are or what to do next",

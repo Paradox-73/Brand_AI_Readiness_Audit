@@ -189,6 +189,7 @@ def extract_page(url, final_url, status, headers, html, redirect_chain, elapsed_
         "meta_description": meta.get("description", ""),
         "meta_robots": meta.get("robots", ""),
         "canonical": _canonical(soup, final_url),
+        "meta_refresh": _meta_refresh(soup, final_url),
         "lang": (soup.html.get("lang") if soup.html else "") or "",
         "has_viewport": "viewport" in meta,
         "og": og,
@@ -255,6 +256,31 @@ def _meta_tags(soup):
             continue
         out.setdefault(key, (tag.get("content") or "").strip())
     return out
+
+
+_META_REFRESH_RE = re.compile(r"^\s*(\d+)\s*;\s*url\s*=\s*(.+?)\s*$", re.I)
+
+
+def _meta_refresh(soup, base):
+    """A client-side redirect: `<meta http-equiv="refresh" content="0; url=...">`.
+
+    Worth recording for two reasons. A server-side crawler that does not follow
+    it audits a stub - one real site answered its homepage with 216 bytes and a
+    refresh, and the audit dutifully reported that it had no heading, no
+    navigation and no call to action, all of which were true of the stub and
+    none of which were true of the site. And a consumer that does not follow it
+    sees exactly what we saw, so it is a finding in its own right.
+    """
+    tag = soup.find("meta", attrs={"http-equiv": re.compile(r"^refresh$", re.I)})
+    if not tag or not tag.get("content"):
+        return None
+    match = _META_REFRESH_RE.match(tag["content"])
+    if not match:
+        return None
+    target = normalise_url(match.group(2).strip("'\""), base)
+    if not target:
+        return None
+    return {"delay": int(match.group(1)), "url": target}
 
 
 def _canonical(soup, base):

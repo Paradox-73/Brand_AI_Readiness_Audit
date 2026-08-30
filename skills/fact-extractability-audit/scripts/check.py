@@ -19,32 +19,42 @@ import re
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SHARED = os.path.join(os.path.dirname(os.path.dirname(_HERE)),
-                       "audit-orchestrator", "scripts")
-sys.path.insert(0, _SHARED)
 
-# This skill reads the marketplace's shared library. One definition of the
-# finding schema, the root-cause vocabulary and the page-type detector keeps six
-# skills from drifting apart. The trade-off is that a skill folder lifted out of
-# the marketplace on its own cannot run, so say that plainly instead of failing
-# with an import traceback.
-if not os.path.isfile(os.path.join(_SHARED, "audit_common.py")):
+# The marketplace's shared library: one definition of the finding schema, the
+# root-cause vocabulary and the page-type detector, so six skills cannot drift
+# apart on any of the three.
+#
+# Looked for beside this file first, then in the orchestrator. `package.py`
+# writes a copy into every skill directory when it builds the submission, so a
+# skill folder lifted out on its own still runs; the checkout keeps a single
+# source of truth so the copies cannot diverge from it.
+_SHARED_CANDIDATES = (
+    _HERE,
+    os.path.join(os.path.dirname(os.path.dirname(_HERE)), "audit-orchestrator", "scripts"),
+)
+_SHARED = next(
+    (path for path in _SHARED_CANDIDATES
+     if os.path.isfile(os.path.join(path, "audit_common.py"))),
+    None,
+)
+if _SHARED is None:
     raise SystemExit(os.linesep.join([
         "Cannot find the shared library that this skill depends on.",
-        "  Looked in: " + _SHARED,
+        "  Looked in: " + "; ".join(_SHARED_CANDIDATES),
         "",
-        "This skill belongs to the brand-ai-readiness-audit marketplace and reads",
-        "skills/audit-orchestrator/scripts/audit_common.py. Copy or run the whole",
-        "marketplace rather than a single skill directory.",
+        "This skill reads audit_common.py, which should sit either beside this",
+        "file or in skills/audit-orchestrator/scripts/. Copy the whole",
+        "marketplace, or rebuild the submission with package.py.",
         "",
-        "To perform these checks without the marketplace, follow the Procedure",
-        "section of this skill's SKILL.md by hand. It states every check in prose",
-        "and produces the same findings.",
+        "To perform these checks without it, follow the Procedure section of",
+        "this skill's SKILL.md by hand. It states every check in prose and",
+        "produces the same findings.",
     ]))
+sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
-    SkillResult, has_price, load_snapshot, name_forms, pages_of, pct, sample,
-    sentences, truncate, word_count,
+    SkillResult, has_price, language_of, load_snapshot, name_forms, pages_of,
+    pct, prose_skip_reason, sample, sentences, truncate, word_count,
 )
 
 SKILL = "fact-extractability-audit"
@@ -76,10 +86,21 @@ CONCRETE_VALUE_RE = re.compile(
     re.I,
 )
 
+# Ways of answering "what does it cost" other than with a number. Both branches
+# are real answers a machine can quote; only silence is a defect.
+#
+# The second group exists because the check asked a free open-source project for
+# its pricing. "Free and open source" is a complete and quotable answer to the
+# question, and demanding a figure from a project that has none is the audit
+# being wrong about the site rather than the other way round.
 PRICING_ESCAPE_RE = re.compile(
     r"\b(?:contact (?:us )?for (?:a )?(?:price|pricing|quote)"
     r"|request a quote|custom(?:ised|ized)? pricing|pricing on (?:request|application)"
-    r"|talk to sales|get a quote|poa)\b", re.I)
+    r"|talk to sales|get a quote|poa"
+    r"|free (?:and )?open[- ]source|open[- ]source(?: and)? free"
+    r"|completely free|entirely free|always free|free to (?:use|download|install)"
+    r"|no (?:cost|charge|licence fee|license fee)|free of charge"
+    r"|costs? nothing|zero cost)\b", re.I)
 
 FOUNDING_FACT_RE = re.compile(
     r"\b(?:founded|established|incorporated|started|launched|since|operating since|"
@@ -115,12 +136,25 @@ def run(snapshot):
             result.skip(name, "no content pages returned HTTP 200")
         return result
 
-    _check_entity_definition(result, snapshot, pages, brand_name, brand)
+    # Three of these six reason about English sentences. The other three are
+    # structural - heading order, name agreement, whether a price appears as a
+    # number - and hold in any language, so they run regardless.
+    language = language_of(snapshot)
+    result.signal("site_language", language.get("code") or "undetermined")
+    result.signal("site_language_source", language.get("source", ""))
+
+    if language.get("prose_checks_apply"):
+        _check_entity_definition(result, snapshot, pages, brand_name, brand)
+        _check_answer_first(result, pages, brand_name)
+        _check_long_sentences(result, pages)
+    else:
+        reason = prose_skip_reason(language)
+        for name in ("entity-definition", "answer-first-paragraphs", "long-sentences"):
+            result.skip(name, reason)
+
     _check_heading_hierarchy(result, pages)
-    _check_answer_first(result, pages, brand_name)
     _check_core_facts(result, snapshot, pages, brand_name)
     _check_naming_consistency(result, snapshot, pages, brand)
-    _check_long_sentences(result, pages)
     return result
 
 

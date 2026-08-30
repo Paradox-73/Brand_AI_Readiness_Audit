@@ -25,7 +25,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from audit_common import (  # noqa: E402
     MAX_DEPTH, MAX_PAGES, MAX_SITEMAP_SAMPLE, REQUEST_DELAY, REQUEST_TIMEOUT,
     SEED, USER_AGENT, WALL_CLOCK_BUDGET, FetchError, Fetcher, detect_page_type,
-    eprint, is_forbidden_path, normalise_url, origin_of, response_text, same_site,
+    detect_site_language, eprint, is_forbidden_path, normalise_url, origin_of,
+    response_text, same_site,
     site_label, strip_www, truncate, write_json,
 )
 
@@ -35,6 +36,10 @@ from robots_parser import (  # noqa: E402
 )
 
 SNAPSHOT_SCHEMA_VERSION = 1
+
+# A meta refresh with a delay this short is a redirect, not a courtesy pause on a
+# page someone is meant to read. Longer ones stay where they are.
+META_REFRESH_MAX_DELAY = 5
 
 def dedup_key(url):
     """Identity of a page for crawl purposes, ignoring the `www.` prefix.
@@ -363,6 +368,62 @@ def detect_brand(pages, origin):
     }
 
 
+def _resolve_scheme(fetcher, origin, seed_url, target):
+    """Fall back to http when a bare hostname was assumed to be https.
+
+    `example.com` becomes `https://example.com`, which is the right default and
+    is what the README documents. A site still served only over http then
+    returned nothing at all - no pages, no findings, no explanation - when the
+    useful answer was already in our vocabulary: `insecure-transport`. So the
+    fallback runs only when the scheme was ours to assume, and only when https
+    fails to connect rather than answering with an error.
+    """
+    if "://" in (target or "") or not origin.startswith("https://"):
+        return origin, seed_url, False
+    if fetcher.try_get(origin.rstrip("/") + "/", method="HEAD") is not None:
+        return origin, seed_url, False
+    downgraded = origin.replace("https://", "http://", 1)
+    if fetcher.try_get(downgraded.rstrip("/") + "/", method="HEAD") is None:
+        return origin, seed_url, False
+    return downgraded, seed_url.replace("https://", "http://", 1), True
+
+
+def _follow_meta_refresh(fetcher, record, depth, source, origin, notes):
+    """Audit the page a meta refresh points at, not the stub that points there.
+
+    A homepage answering with 216 bytes and `<meta http-equiv="refresh">` is a
+    real and common pattern - language selection, legacy URLs, static hosts
+    without redirect rules. Auditing the stub produced four confident findings
+    about a page nobody has ever seen: no heading, no navigation, no call to
+    action, no facts. All true of the stub. None true of the site.
+
+    Followed only when the site is telling every visitor to go immediately
+    (a short delay) and the destination is its own. The stub is kept in the
+    record as `meta_refresh_from`, because a consumer that does not follow it
+    sees what we first saw, and crawl-access-audit reports that.
+    """
+    refresh = (record.get("meta_refresh") or {}) if record.get("status") == 200 else {}
+    target = refresh.get("url")
+    if not target or refresh.get("delay", 99) > META_REFRESH_MAX_DELAY:
+        return record
+    if not same_site(target, origin) or normalise_url(target) == normalise_url(record["url"]):
+        return record
+
+    followed = fetch_page(fetcher, target, depth, source, origin)
+    if followed.get("status") != 200:
+        return record
+    followed["meta_refresh_from"] = {
+        "url": record["url"],
+        "delay": refresh.get("delay"),
+        "html_len": record.get("html_len"),
+    }
+    followed["redirect_chain"] = list(record.get("redirect_chain") or []) + [record["url"]]
+    notes.append(
+        "{} answers with a meta-refresh redirect to {}; the destination was audited "
+        "instead of the stub".format(record["url"], target))
+    return followed
+
+
 def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
           respect_robots=True, delay=REQUEST_DELAY, render=False):
     origin, seed_url = normalise_target(target)
@@ -371,6 +432,12 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
     fetcher = Fetcher(delay=delay, timeout=REQUEST_TIMEOUT, deadline=deadline)
 
     notes = []
+    origin, seed_url, downgraded = _resolve_scheme(fetcher, origin, seed_url, target)
+    if downgraded:
+        notes.append(
+            "https did not answer, so the site was audited over http. That is itself a "
+            "finding and is reported as one; the alternative was to return nothing."
+        )
     robots = fetch_robots(fetcher, origin)
     sitemaps, sitemap_in_robots = fetch_sitemaps(fetcher, origin, robots, deadline)
 
@@ -425,6 +492,7 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
                 break
             url, depth, source = queue.popleft()
             record = fetch_page(fetcher, url, depth, source, origin)
+            record = _follow_meta_refresh(fetcher, record, depth, source, origin, notes)
             # Two queued URLs that redirect to the same destination are one
             # page; keeping both would double-count every finding on it.
             landed = normalise_url(record.get("final_url") or url) or url
@@ -432,6 +500,15 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
                 skipped.append({"url": url, "reason": "redirects to an already-crawled page"})
                 continue
             fetched_final.add(landed)
+            # Whatever the root landed on is the homepage. A site whose `/`
+            # redirects to `/en/`, or answers with a meta refresh to
+            # `/home.html`, still has a homepage - but page-type detection only
+            # ever calls the path `/` home, so the real one was classified
+            # `other` and dropped from every content check. Common enough on
+            # multilingual and statically hosted sites to matter.
+            if source == "homepage" and record.get("status") == 200                     and record.get("page_type") != "home":
+                record["page_type"] = "home"
+                record["page_type_source"] = "reached from the site root"
             pages.append(record)
 
             if record.get("status") != 200 or depth >= MAX_DEPTH:
@@ -476,6 +553,9 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
         "origin": origin,
         "seed_url": seed_url,
         "brand": detect_brand(pages, origin),
+        # Detected once, here, so six skills cannot reach six different answers
+        # about what language the site is in.
+        "site_language": detect_site_language(pages),
         "crawl": {
             "pages_crawled": len(pages),
             "pages_ok": sum(1 for p in pages if p.get("status") == 200),

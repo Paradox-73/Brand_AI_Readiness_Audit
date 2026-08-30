@@ -42,7 +42,12 @@ SKILL_ORDER = [
     "engagement-audit",
 ]
 
-PRIORITY_BANDS = ((2.0, "critical"), (1.0, "high"), (0.45, "medium"), (0.0, "low"))
+# Priority and severity are different questions - how bad is this, versus what
+# should you do first - and they answered in the same four words. A report that
+# lists a finding under "Medium findings" and then says "Priority critical" two
+# lines later reads as a contradiction, whatever the arithmetic underneath. The
+# bands now say what they mean as an instruction.
+PRIORITY_BANDS = ((2.0, "do first"), (1.0, "do soon"), (0.45, "schedule"), (0.0, "when convenient"))
 
 # Measured in the within-category study: brands assistants name carry a date on
 # 34% of crawled pages, comparable brands they ignore on 17%. The floor sits

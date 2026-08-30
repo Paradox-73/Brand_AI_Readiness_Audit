@@ -33,7 +33,7 @@ python run_audit.py <printed url>
 
 **Should not happen**
 
-- Re-summarising all 19 findings in chat. The report is the deliverable; the chat message is
+- Re-summarising every finding in chat. The report is the deliverable; the chat message is
   a pointer to it.
 - Any attempt to fix the site. This marketplace is recommend-only.
 - Fetching anything under `/cart`, `/checkout`, `/login`, `/admin`, or any path robots.txt
