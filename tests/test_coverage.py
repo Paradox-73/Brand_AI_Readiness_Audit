@@ -33,6 +33,18 @@ UNSTAGEABLE = {
     "entity-ambiguity",
 }
 
+# Causes proved by a unit test instead of a fixture, and the file that proves
+# them. This is not an exemption: the guarantee still holds, it is just met
+# somewhere the fixture server cannot reach. The test below opens each file and
+# checks the cause is actually named in it, so an entry cannot rot into a lie.
+PROVED_BY_UNIT_TEST = {
+    # Proving this needs a real platform to answer 404 for a profile that does
+    # not exist. The fixture server can only serve itself, and pointing the
+    # suite at LinkedIn on every run would make it slow, rude and dependent on
+    # somebody else's uptime.
+    "dead-profile-link": "test_profile_links.py",
+}
+
 
 def _covered():
     covered = set()
@@ -47,7 +59,7 @@ def _covered():
 
 
 def test_every_root_cause_has_a_case_that_produces_it():
-    missing = ROOT_CAUSES - _covered() - UNSTAGEABLE
+    missing = ROOT_CAUSES - _covered() - UNSTAGEABLE - set(PROVED_BY_UNIT_TEST)
     assert not missing, (
         "these root causes can be reported to a user but nothing in the suite "
         "makes them fire, so nobody knows whether they work: {}. Add a mutation "
@@ -73,3 +85,24 @@ def test_no_case_claims_a_root_cause_that_does_not_exist():
     assert not unknown, (
         "mutations expect root causes the vocabulary does not define: {}".format(
             sorted(unknown)))
+
+
+def test_the_unit_test_registry_points_at_files_that_prove_what_it_claims():
+    """An entry here has to name a file that exists and mentions the cause.
+
+    Without this the registry is a way to silence the coverage check by typing
+    a root cause into a dictionary, which is the opposite of what it is for.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cause, filename in sorted(PROVED_BY_UNIT_TEST.items()):
+        assert cause in ROOT_CAUSES, "{} is not a real root cause".format(cause)
+        assert cause not in UNSTAGEABLE, (
+            "{} is listed as both proved and unstageable".format(cause))
+        path = os.path.join(here, filename)
+        assert os.path.isfile(path), "{} claims proof in {}, which does not exist".format(
+            cause, filename)
+        with open(path, encoding="utf-8") as handle:
+            body = handle.read()
+        assert cause in body, (
+            "{} claims to be proved in {}, but that file never mentions it".format(
+                cause, filename))

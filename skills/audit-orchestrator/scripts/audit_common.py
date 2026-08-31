@@ -45,8 +45,16 @@ RETRY_BACKOFF_SECONDS = 1.5
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
 # Crawl budget. Fixed so two runs against the same site see the same pages.
+#
+# Sixty pages, not thirty, and the number was measured rather than chosen.
+# On a large real site thirty pages finished in 84 s and reported 16
+# problems; sixty finished in 99 s and reported 19, the three extra being
+# whole categories the smaller sample never saw - pages with no onward
+# link, articles with no Article markup, videos with no transcript. A
+# hundred pages cost a further 72 s and added one. Sixty uses 99 s of the
+# 240 s budget, so a slow site still finishes.
 SEED = 42
-MAX_PAGES = 30
+MAX_PAGES = 60
 MAX_SITEMAP_SAMPLE = 8
 MAX_DEPTH = 2
 REQUEST_TIMEOUT = 10.0
@@ -105,12 +113,37 @@ ROOT_CAUSES = frozenset({
     "missing-core-fact", "name-inconsistency", "long-sentences",
     # D - freshness and corroboration
     "stale-content", "no-date-signal", "weak-corroboration", "entity-ambiguity",
-    "nap-inconsistency",
+    "nap-inconsistency", "dead-profile-link",
     # Engagement
     "no-orientation", "dead-end", "inconsistent-chrome", "broken-links", "orphan-pages",
     "no-breadcrumbs", "title-body-drift", "page-weight",
     "intrusive-interstitial", "readability", "form-friction",
 })
+
+# Off-site profiles we are willing to check the existence of.
+#
+# Corroboration is the strongest signal this marketplace measures, and until now
+# it counted the profile links a site *declares*. A brand listing a LinkedIn page
+# that was deleted two years ago scored the same as one whose page is live, so
+# the number we report was a claim rather than a measurement.
+#
+# Checking is only honest where a "not found" means not found. We asked each
+# platform for a profile that certainly does not exist and recorded the answer:
+#
+#   LinkedIn, X, YouTube, GitHub, Wikipedia, Wikidata   404 for a dead profile,
+#                                                       200 for a live one
+#   Instagram, TikTok, Medium, Pinterest, Threads       200 for anything, so a
+#                                                       200 proves nothing
+#   Crunchbase, Yelp, Glassdoor, Trustpilot             403 to any crawler, live
+#                                                       or dead alike
+#
+# So we verify the first group and say nothing about the rest, rather than
+# reporting a live profile as dead because its host dislikes crawlers. The same
+# rule as everywhere else here: a block is not evidence.
+VERIFIABLE_PROFILE_PLATFORMS = ("LinkedIn", "Wikipedia", "Wikidata", "GitHub", "X", "YouTube")
+
+# Statuses that mean the profile is genuinely not there.
+PROFILE_GONE_STATUS = frozenset({404, 410})
 
 # Page types. Detection drives every applicability guard in the marketplace:
 # we never expect Product schema on a site that has no product pages.

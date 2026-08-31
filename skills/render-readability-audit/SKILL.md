@@ -1,8 +1,8 @@
 ---
 name: render-readability-audit
-description: Check whether a machine can actually read the HTML a site delivers. Detects JavaScript shells where the real content only exists after hydration, pages whose substance is locked inside images, PDFs, video or iframes, and catalogues hidden behind a load-more button with no crawlable pagination. Optionally compares static HTML against a Playwright-rendered DOM to measure exactly how much text JavaScript supplies. Use when a site looks complete in a browser but is missing or thin in AI answers and search results, when a brand runs a React, Next.js, Vue or Angular site, or as the second gate of a full AI-readiness audit.
+description: Check whether a machine can actually read the HTML a site delivers. Detects JavaScript shells where the real content only exists after hydration, pages whose substance is locked inside images, PDFs, video or iframes, and catalogues hidden behind a load-more button with no crawlable pagination. Compares static HTML against a Playwright-rendered DOM, whenever a browser is available, to measure exactly how much text JavaScript supplies. Use when a site looks complete in a browser but is missing or thin in AI answers and search results, when a brand runs a React, Next.js, Vue or Angular site, or as the second gate of a full AI-readiness audit.
 license: MIT
-compatibility: Requires Python 3.10+ with beautifulsoup4 and lxml. Makes no network requests. Playwright is optional and enables the rendered-DOM comparison.
+compatibility: Requires Python 3.10+ with beautifulsoup4 and lxml. Makes no network requests itself. Playwright is optional; when it is installed the crawl runs a rendered pass by default and this skill measures the JavaScript gap instead of inferring it.
 allowed-tools: Bash(python3:*) Bash(python:*) Read
 metadata:
   author: brand-ai-readiness-audit
@@ -27,7 +27,10 @@ as thin or title-only.
 
 - `--snapshot snapshot.json` produced by the orchestrator's `crawl.py`.
 - `--out <path>` for the findings JSON.
-- The snapshot carries `rendered_text_len` per page only if the crawl ran with `--render`.
+- The snapshot carries `rendered_text_len` per page whenever the crawl was able to run a
+  browser. That pass runs by default when Playwright is installed, so on most machines
+  the field is present; `--no-render` suppresses it and an absent Playwright means the
+  crawl records why in its notes.
 
 ## Procedure
 

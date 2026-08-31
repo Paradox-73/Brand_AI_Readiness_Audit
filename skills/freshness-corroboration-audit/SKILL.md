@@ -1,8 +1,8 @@
 ---
 name: freshness-corroboration-audit
-description: Check whether a brand's facts are current, agreed upon across independent sources, and distinguishable from other things sharing its name. Audits content staleness and missing date signals, counts how many authoritative off-site profiles corroborate the brand, queries Wikidata for name collisions, and detects where the site contradicts itself on telephone, address or boilerplate. Use when an AI assistant describes a brand with outdated prices, an old logo or a discontinued product, when it confuses the brand with a different company of the same name, or when a rebrand has not been picked up anywhere.
+description: Check whether a brand's facts are current, agreed upon across independent sources, and distinguishable from other things sharing its name. Audits content staleness and missing date signals, counts how many authoritative off-site profiles corroborate the brand and confirms those profile links still resolve, queries Wikidata for name collisions, and detects where the site contradicts itself on telephone, address or boilerplate. Use when an AI assistant describes a brand with outdated prices, an old logo or a discontinued product, when it confuses the brand with a different company of the same name, or when a rebrand has not been picked up anywhere.
 license: MIT
-compatibility: Requires Python 3.10+ with requests. Makes up to 4 extra read-only requests to Wikidata's public search API; pass --no-network to make none.
+compatibility: Requires Python 3.10+ with requests. Makes up to 10 extra read-only requests: 4 to Wikidata's public search API and one HEAD per off-site profile link it is able to verify. Pass --no-network to make none.
 allowed-tools: Bash(python3:*) Bash(python:*) Read WebSearch
 metadata:
   author: brand-ai-readiness-audit
@@ -68,14 +68,39 @@ confuses the brand with something else that shares its name.
    **medium**; zero is **medium** with stronger evidence. A fact stated only on the brand's
    own site is one source's word for it.
 
-7. **Entity ambiguity.** Query Wikidata's public search API once for the brand name and count
+7. **Do those profile links resolve?** Breadth in check 6 counts what the site *declares*,
+   which is what the study measured. This is the separate question of whether the declared
+   links still lead anywhere. Send one HEAD request per profile and report the ones that
+   return 404 or 410: one is **low**, more than one is **medium**. A `sameAs` entry pointing
+   at a deleted page is worse than no entry, because it is a claim the brand makes that does
+   not check out, on exactly the signal a machine uses to decide the brand is corroborated.
+
+   **Only ask platforms that answer honestly.** We requested a profile that certainly does not
+   exist from each platform and recorded the reply:
+
+   | Platform | Dead profile | Live profile | Verified? |
+   |---|---|---|---|
+   | LinkedIn, X, YouTube, GitHub, Wikipedia, Wikidata | 404 | 200 | yes |
+   | Instagram, TikTok, Medium, Pinterest, Threads | 200 | 200 | no - a 200 proves nothing |
+   | Crunchbase, Yelp, Glassdoor, Trustpilot | 403 | 403 | no - refuses every crawler |
+
+   So six platforms are checked and the rest are left alone. A 403, a timeout or a redirect
+   to a sign-in page is recorded as **unchecked**, never as dead. Reporting a live Instagram
+   account as missing, because Instagram answers 200 to everything, would be worse than not
+   looking. The same principle as the rest of this marketplace: a block is not evidence.
+
+   Do **not** subtract dead links from the breadth count in check 6. That number is compared
+   against a study that measured declared links, and changing the measure would quietly
+   invalidate the comparison.
+
+8. **Entity ambiguity.** Query Wikidata's public search API once for the brand name and count
    matching entities. Two or more, *and* no disambiguation on the site, is **medium** —
    **high** at four or more. Treat the site as already disambiguated if it links to Wikidata
    or Wikipedia, or if it declares an `alternateName` plus a description plus three or more
    profiles. Where the agent runtime provides web search, record the suggested query in the
    report; record the query, not results scraped without attribution.
 
-8. **Self-contradiction.** A brand that disagrees with itself is the hardest case for
+9. **Self-contradiction.** A brand that disagrees with itself is the hardest case for
    anything weighing sources, and does more damage than silence because it undermines every
    other fact on the site. Report **high** when:
    - an `Organization` telephone does not match the number shown on the same page;
@@ -90,13 +115,15 @@ confuses the brand with something else that shares its name.
 ## Output
 
 Standard skill JSON: `findings[]`, `checks_run[]`, `not_applicable[]` (each with a reason),
-`extra_requests_made` (at most 4), and signals `authoritative_profile_count`,
-`profile_platforms`, `has_wikidata_or_wikipedia`, `wikidata_match_count`,
-`wikidata_matches`, `no_date_signals`, `newest_article_date`, `press_page_present`,
-`distinct_org_descriptions`, `suggested_web_search`, `reference_date`.
+`extra_requests_made` (at most 10), and signals `authoritative_profile_count`,
+`profile_platforms`, `profile_breadth`, `profile_links_checked`, `profile_links_alive`,
+`profile_links_gone`, `profile_links_unchecked`, `has_wikidata_or_wikipedia`,
+`wikidata_match_count`, `wikidata_matches`, `no_date_signals`, `newest_article_date`,
+`press_page_present`, `distinct_org_descriptions`, `suggested_web_search`,
+`reference_date`.
 
 All findings carry mechanism `D` and a `root_cause` of `stale-content`, `no-date-signal`,
-`weak-corroboration`, `entity-ambiguity` or `nap-inconsistency`.
+`weak-corroboration`, `dead-profile-link`, `entity-ambiguity` or `nap-inconsistency`.
 
 The headline fix is a **canonical boilerplate block** — one paragraph of identity, address
 and contact details to reuse verbatim on the site, LinkedIn, the press kit, app stores and
@@ -112,9 +139,14 @@ signal available and costs nothing but discipline.
 - No copyright year appears anywhere in the text.
 - Fewer than five sitemap entries carry a parsable `lastmod`.
 - Three or more authoritative profiles are already linked — the reason names them.
+- No profile is linked on a platform that answers honestly about whether a profile exists, so
+  there is nothing we can check without inventing the answer.
+- Every verifiable profile link resolved — the reason names each one that was checked.
 - Wikidata returns fewer than two matches, or the site already disambiguates itself.
 - `--no-network` was passed, or Wikidata could not be reached: an audit-environment
   limitation, recorded as such and never as a site defect.
+- A profile host answered 403, timed out, or redirected to a sign-in page. That is recorded
+  as unchecked. It is never reported as a dead link, because a refusal is not an answer.
 
 ## References
 

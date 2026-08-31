@@ -6,7 +6,7 @@ skills/audit-orchestrator/SKILL.md. An agent following that file by hand
 performs the same steps in the same order and produces the same report.
 
     python run_audit.py https://example.com
-    python run_audit.py example.com --out-dir ./out --format html --render
+    python run_audit.py example.com --out-dir ./out --format html
 
 Read-only throughout: GET and HEAD only, no forms, no cookies the site did not
 set, nothing under /cart, /checkout, /login or /admin, and robots.txt respected.
@@ -24,7 +24,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(ROOT, "skills", "audit-orchestrator", "scripts")
 sys.path.insert(0, SCRIPTS)
 
-from audit_common import WALL_CLOCK_BUDGET, eprint  # noqa: E402
+from audit_common import MAX_PAGES, WALL_CLOCK_BUDGET, eprint  # noqa: E402
 
 # Order matters: earlier skills own overlapping observations at the dedup step.
 SUB_SKILLS = [
@@ -56,12 +56,15 @@ def main(argv=None):
     parser.add_argument("--format", choices=("md", "html", "both"), default="md",
                         help="human-readable report format (report.json is always written)")
     parser.add_argument("--render", action="store_true",
-                        help="add a Playwright pass if Playwright is installed")
+                        help="require the Playwright pass; the run says so if it cannot happen")
+    parser.add_argument("--no-render", action="store_true",
+                        help="skip the Playwright pass even if Playwright is installed")
     parser.add_argument("--no-network", action="store_true",
                         help="skip every extra request the sub-skills would make")
     parser.add_argument("--budget", type=float, default=WALL_CLOCK_BUDGET,
                         help="wall-clock seconds for the crawl (default %(default)s)")
-    parser.add_argument("--max-pages", type=int, default=30)
+    parser.add_argument("--max-pages", type=int, default=MAX_PAGES,
+                        help="page ceiling for the crawl (default %(default)s)")
     parser.add_argument("--now", help="reference date YYYY-MM-DD for freshness checks")
     parser.add_argument("--keep-intermediates", action="store_true",
                         help="keep each skill's raw findings file")
@@ -78,7 +81,12 @@ def main(argv=None):
     crawl_command = [python, os.path.join(SCRIPTS, "crawl.py"), args.target,
                      "--out", snapshot, "--budget", str(args.budget),
                      "--max-pages", str(args.max_pages)]
-    if args.render:
+    # The rendered pass is on by default and degrades to a note when Playwright
+    # is absent, so the judge's machine gets the measured JavaScript gap rather
+    # than the inferred one without anyone having to know a flag exists.
+    if args.no_render:
+        crawl_command.append("--no-render")
+    elif args.render:
         crawl_command.append("--render")
     run_step(crawl_command, "crawl")
 

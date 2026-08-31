@@ -41,5 +41,10 @@
     "home",
     "about",
     "contact"
+  ],
+  "expect_critical_at_least_when_rendered": 0,
+  "why_rendering_changes_this": "The homepage carries 13 characters of static text and 538 after JavaScript runs. Without a browser we cannot tell whether the text is reachable at all, so the verdict is critical at medium confidence. With one, we have measured that it is reachable to anything that executes JavaScript, and the finding becomes high at high confidence: still serious, because the answer crawlers this marketplace is about fetch raw HTML, but no longer the worst case. The rendered pass runs by default now, so this fixture reports high on a machine with Playwright installed and critical on one without. Both are correct; the difference is what was known.",
+  "high_root_causes_when_rendered": [
+    "js-shell"
   ]
 }

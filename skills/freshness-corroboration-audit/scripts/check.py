@@ -57,8 +57,8 @@ if _SHARED is None:
 sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
-    CONTENT_TYPES, SkillResult, load_snapshot, pages_of, pct, sample, truncate,
-    FetchError, Fetcher,
+    CONTENT_TYPES, PROFILE_GONE_STATUS, SkillResult, VERIFIABLE_PROFILE_PLATFORMS,
+    load_snapshot, pages_of, pct, sample, truncate, FetchError, Fetcher,
 )
 
 SKILL = "freshness-corroboration-audit"
@@ -87,7 +87,9 @@ AUTHORITATIVE = ("LinkedIn", "Wikipedia", "Wikidata", "Crunchbase", "GitHub",
 WIKIDATA_API = ("https://www.wikidata.org/w/api.php?action=wbsearchentities"
                 "&search={}&language=en&uselang=en&format=json&limit=10&type=item")
 
-MAX_EXTRA_REQUESTS = 4
+# Four for the Wikidata name search, six for the profile links we are able
+# to verify - one per platform in VERIFIABLE_PROFILE_PLATFORMS.
+MAX_EXTRA_REQUESTS = 10
 
 _ISO_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 _MONTHS = {m.lower(): i for i, m in enumerate(
@@ -145,7 +147,7 @@ def run(snapshot, now=None, allow_network=True):
     if not pages:
         for name in ("content-freshness", "date-signals-present", "footer-copyright-year",
                      "stale-year-references", "authoritative-profiles", "entity-ambiguity",
-                     "fact-consistency-across-pages"):
+                     "profile-links-resolve", "fact-consistency-across-pages"):
             result.skip(name, "no content pages returned HTTP 200")
         return result
 
@@ -163,6 +165,7 @@ def run(snapshot, now=None, allow_network=True):
             fetcher = Fetcher(max_requests=MAX_EXTRA_REQUESTS)
         except FetchError:
             fetcher = None
+    _check_profile_links_resolve(result, profiles, fetcher, allow_network)
     _check_entity_ambiguity(result, snapshot, pages, brand, profiles, fetcher, allow_network)
     if fetcher is not None:
         result.extra_requests_made = fetcher.count
@@ -523,6 +526,106 @@ def _check_authoritative_profiles(result, snapshot, pages):
                   "and it is almost entirely within a brand's control.",
     )
     return profiles
+
+
+def _check_profile_links_resolve(result, profiles, fetcher, allow_network):
+    """Do the profiles the brand lists actually exist?
+
+    Breadth is counted from what the site declares, because that is what the
+    study measured and changing the measure would invalidate the comparison.
+    This is the separate question: of the profiles declared, how many are still
+    there. A `sameAs` entry pointing at a deleted page is worse than no entry -
+    it is a fact the site asserts that does not check out, on exactly the signal
+    an assistant uses to decide whether a brand is corroborated.
+
+    Only the platforms in VERIFIABLE_PROFILE_PLATFORMS are asked, and only a 404
+    or 410 counts as gone. Everything else - a 403, a timeout, a redirect to a
+    sign-in page - is recorded as unchecked. See the comment on that constant
+    for the measurements behind the list.
+    """
+    result.check("profile-links-resolve")
+
+    checkable = {platform: url for platform, url in (profiles or {}).items()
+                 if platform in VERIFIABLE_PROFILE_PLATFORMS}
+    if not checkable:
+        result.skip("profile-links-resolve",
+                    "the site links to no profile on a platform that answers honestly about "
+                    "whether a profile exists ({})".format(
+                        ", ".join(VERIFIABLE_PROFILE_PLATFORMS)))
+        return
+    if not allow_network or fetcher is None:
+        result.skip("profile-links-resolve",
+                    "checking whether {} profile link(s) still resolve needs network access, "
+                    "and this run was told not to make extra requests".format(len(checkable)))
+        return
+
+    gone, alive, unchecked = [], [], []
+    for platform, url in sorted(checkable.items()):
+        try:
+            response = fetcher.get(url, method="HEAD")
+        except FetchError:
+            unchecked.append((platform, url, "could not be reached"))
+            continue
+        status = response.status_code
+        final = (getattr(response, "url", "") or "").lower()
+        if status in PROFILE_GONE_STATUS:
+            gone.append((platform, url, status))
+        elif status == 200 and ("/login" in final or "/signin" in final or "/uas/login" in final):
+            # A sign-in wall is not an answer about whether the profile exists.
+            unchecked.append((platform, url, "redirected to a sign-in page"))
+        elif 200 <= status < 400:
+            alive.append((platform, url))
+        else:
+            unchecked.append((platform, url, "answered HTTP {}".format(status)))
+
+    result.signal("profile_links_checked", len(checkable))
+    result.signal("profile_links_alive", len(alive))
+    result.signal("profile_links_gone", [p for p, _u, _s in gone])
+    result.signal("profile_links_unchecked", [p for p, _u, _r in unchecked])
+
+    if not gone:
+        if alive:
+            reason = "all {} verifiable profile link(s) resolve ({})".format(
+                len(alive), ", ".join(p for p, _u in alive))
+        else:
+            reason = "none of the profile links could be checked: {}".format(
+                "; ".join("{} {}".format(p, r) for p, _u, r in unchecked))
+        result.skip("profile-links-resolve", reason)
+        return
+
+    evidence = "; ".join(
+        "{} at {} returned HTTP {}".format(platform, truncate(url, 90), status)
+        for platform, url, status in gone)
+    if alive:
+        evidence += ". {} other profile link(s) resolved.".format(len(alive))
+    if unchecked:
+        evidence += ". Not checked: {}.".format(
+            ", ".join("{} ({})".format(p, r) for p, _u, r in unchecked))
+
+    result.add(
+        id_hint="profile-link-does-not-resolve",
+        title="{} of the profile link{} the brand publishes lead nowhere".format(
+            len(gone), "" if len(gone) == 1 else "s"),
+        severity="medium" if len(gone) > 1 else "low",
+        confidence="high",
+        evidence=evidence,
+        mechanism="D", root_cause="dead-profile-link",
+        summary="Point the profile links at pages that exist, or remove them.",
+        how_to_fix=[
+            "Open each URL above. If the profile moved, correct the link in the page footer "
+            "and in the Organization `sameAs` array.",
+            "If the profile was closed, delete the entry rather than leaving it. A `sameAs` "
+            "target that returns 404 is a claim the site makes that does not check out.",
+            "If you want that profile back, recreate it under the same name and the same "
+            "one-sentence description as the others, then relink it.",
+        ],
+        effort="low", owner="marketing",
+        rationale="Mechanism D: corroboration works by a machine following the link and finding "
+                  "the same brand described the same way at the other end. A link that returns "
+                  "404 gives it nothing to agree with, so that profile counts for nothing - and "
+                  "the site reads as less maintained than it is.",
+        affected_pages=[url for _p, url, _s in gone],
+    )
 
 
 def _check_entity_ambiguity(result, snapshot, pages, brand, profiles, fetcher, allow_network):

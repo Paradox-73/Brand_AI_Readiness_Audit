@@ -42,7 +42,7 @@ Run `python run_audit.py <url>` to do all of this at once, or follow the steps d
 2. **Crawl once.** Run `scripts/crawl.py <origin> --out snapshot.json`. It fetches
    robots.txt, the sitemaps, `/llms.txt`, the homepage, up to 8 sitemap URLs sampled with
    seed 42 and spread across detected page types, and then breadth-first from the homepage
-   to depth 2. Hard caps: 30 pages, 240 s wall clock, 10 s per request, 0.5 s between
+   to depth 2. Hard caps: 60 pages, 240 s wall clock, 10 s per request, 0.5 s between
    requests, single threaded.
    If the homepage does not respond after two attempts, stop and report one critical
    finding: an unreachable homepage makes every other check meaningless.

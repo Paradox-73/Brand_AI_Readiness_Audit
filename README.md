@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Agent Skills](https://img.shields.io/badge/Agent%20Skills-agentskills.io-6E56CF?style=flat-square)
 ![Skills](https://img.shields.io/badge/Skills-7%20(1%20entrypoint)-0F9D58?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-277%20passing-2EA043?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-298%20passing-2EA043?style=flat-square)
 ![Read Only](https://img.shields.io/badge/Mode-Read--only-FF6F00?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-4169E1?style=flat-square)
 
@@ -33,7 +33,7 @@ matters if the one before it passed.
 | `freshness-corroboration-audit` | Is it current, and does anywhere else agree? Dates, staleness, off-site profile breadth, name collisions | Trusted |
 | `engagement-audit` | Does the person who clicks through stay? Orientation, dead ends, orphans, broken links, breadcrumbs, interstitials, forms | Visitor stays |
 
-Between them: **68 checks, 74 findings, 48 named root causes.**
+Between them: **70 checks, 76 findings, 55 named root causes.**
 
 Six is the number of gates there are. A test fails the build if any two skills ever claim the
 same root cause, so the separation is enforced rather than asserted.
@@ -66,7 +66,8 @@ same root cause, so the separation is enforced rather than asserted.
 
 The six sub-skills **never fetch the site themselves**. They read fields off `snapshot.json`.
 That is what makes this one crawl rather than six, and why a full audit finishes inside five
-minutes and thirty page requests.
+minutes and sixty page requests. A real run against a large public site takes about 140
+seconds of the 300 available.
 
 `compose_report.py` merges the six result files. It deduplicates **across** skills — while
 deliberately keeping several findings from one skill that share a cause, because those are
@@ -127,9 +128,9 @@ specified in `skills/audit-orchestrator/references/report-schema.json`.
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--max-pages` | 30 | Page ceiling |
+| `--max-pages` | 60 | Page ceiling |
 | `--budget` | 240 | Wall-clock seconds |
-| `--render` | off | Compare static HTML against a Playwright-rendered DOM |
+| `--render` | on when Playwright is installed | Compare static HTML against a browser-rendered DOM. `--no-render` turns it off |
 | `--no-network` | off | Snapshot only; no extra probes |
 | `--format html` | md | Also write `report.html` |
 
@@ -137,8 +138,8 @@ The tests, if you want them:
 
 ```bash
 pip install pytest
-python -m pytest -q                        # 277 tests, about 8 minutes
-python -m pytest -q -m "not mutation"      # 218 tests, about 2 minutes
+python -m pytest -q                        # 298 tests, about 15 minutes
+python -m pytest -q -m "not mutation"      # 241 tests, about 4 minutes
 ```
 
 > **Windows path limit.** Do not unzip into a deep directory — `pip` cannot install `lxml` if
@@ -161,17 +162,20 @@ This README is deliberately short. Everything below lives where a skill can read
 | `evals/README.md` | Three prompts a judge is likely to type, and what should happen |
 
 **One number, if you read nothing else.** Brands assistants name link to **7.1** other places
-about themselves; comparable competitors they ignore link **4.6**. That separated in all six
-categories studied — the only measure that did — and it is the cheapest fix here. You cannot
-become famous this quarter; you can claim six profiles this week and put the same sentence on
-all of them.
+about themselves; comparable competitors they ignore link **4.6**. The audit also confirms
+those profile links still resolve, on the six platforms that answer that question honestly.
+That separated in all six categories studied — the only measure that did — and it is the
+cheapest fix here. You cannot become famous this quarter; you can claim six profiles this week
+and put the same sentence on all of them.
 
 ---
 
 ## Limits, stated rather than found
 
-- **Thirty pages is a sample** on a large site. The report says how many it read, and every
-  finding describes only those pages.
+- **Sixty pages is still a sample** on a large site. The report says how many it read, and
+  every finding describes only those pages. Sixty was measured, not picked: on a large real
+  site thirty pages found 16 problems in 84 s, sixty found 19 in 99 s, and a hundred added
+  one more for another 72 s.
 - **The prose checks are English.** The definition pattern, the answer-first test, sentence
   length and the call-to-action verbs all assume it. The crawl detects the site language once
   and those checks **decline** on a site in another language rather than guessing. Everything
@@ -183,8 +187,15 @@ all of them.
   browser's identity, which circumvents a deliberate access decision. A block is a finding.
 - **Name conflicts are checked against Wikidata only.** That says how many organisations share
   a name, not which one an assistant currently prefers.
+- **Only six platforms can be asked whether a profile exists.** LinkedIn, X, YouTube, GitHub,
+  Wikipedia and Wikidata answer 404 for a profile that is not there. Instagram, TikTok, Medium,
+  Pinterest and Threads answer 200 for anything; Crunchbase, Yelp, Glassdoor and Trustpilot
+  refuse every crawler. Those nine are reported as unchecked rather than guessed at.
 - **Without Playwright the JavaScript gap is inferred, not measured**, so the homepage-shell
-  finding drops to medium confidence rather than claiming certainty it does not have.
+  finding drops to medium confidence rather than claiming certainty it does not have. With
+  Playwright — which the audit uses automatically when it is installed — the same finding is
+  measured, and a homepage whose text JavaScript does recover is reported as high rather than
+  critical. Both verdicts are correct; the difference is what was known.
 - **A robots.txt block stops the run.** The verdict explains the empty result instead of
   presenting it as a clean bill of health.
 

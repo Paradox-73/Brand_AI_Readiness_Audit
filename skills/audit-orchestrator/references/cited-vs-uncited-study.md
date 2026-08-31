@@ -77,6 +77,46 @@ platform, passes at 6 or more, and reports the observed benchmark in its evidenc
 This is the most actionable finding in the study. A brand cannot become famous this quarter.
 It can claim six profiles this week and put the same sentence on all of them.
 
+### The number counted declared links, and now it is checked
+
+For most of this project's life the breadth figure counted the profile URLs a site
+**declares** — links in the footer, entries in the `sameAs` array. Nobody asked whether they
+led anywhere. A brand listing a LinkedIn page deleted two years ago scored exactly the same
+as one whose page is live, on the measure we call the strongest in the marketplace.
+
+Checking is only honest where "not found" means not found. We asked each platform for a
+profile that certainly does not exist, and for one that certainly does, and recorded both
+answers:
+
+| Platform | Dead profile | Live profile | Can we verify? |
+|---|---|---|---|
+| LinkedIn | 404 | 200 | yes |
+| X | 404 | 200 | yes |
+| YouTube | 404 | 200 | yes |
+| GitHub | 404 | 200 | yes |
+| Wikipedia | 404 | 200 | yes |
+| Wikidata | 404 | 200 | yes |
+| Instagram | 200 | 200 | no — 200 for a username that has never existed |
+| TikTok | 200 | 200 | no |
+| Medium | 200 | 200 | no |
+| Pinterest | 200 | 200 | no |
+| Threads | 200, redirected to sign-in | 200 | no |
+| Crunchbase | 403 | 403 | no — refuses every crawler |
+| Yelp | 403 | 403 | no |
+| Glassdoor | 403 | 403 | no |
+| Trustpilot | 403 | 403 | no |
+
+**Change made.** Six platforms are checked with one HEAD request each. Only a 404 or 410
+counts as gone; a 403, a timeout or a redirect to a sign-in page is recorded as *unchecked*.
+Reporting a live Instagram account as missing, because Instagram answers 200 to everything,
+would have been worse than not looking — the same rule that stops us treating a bot block as
+evidence about a site.
+
+**What was deliberately not changed.** Dead links are *not* subtracted from the breadth
+count. The 7.2-versus-4.6 comparison was measured on declared links, and quietly redefining
+the measure would invalidate the comparison it is reported against. Links that lead nowhere
+get their own finding, `dead-profile-link`, at low severity for one and medium for several.
+
 ---
 
 ## Result 3 — Date coverage separates, but the earlier threshold was wrong

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fetch a bounded, deterministic sample of a site and write snapshot.json.
 
-One crawl feeds all six sub-skills. The budget is fixed (seed 42, 30 pages,
+One crawl feeds all six sub-skills. The budget is fixed (seed 42, 60 pages,
 240 s wall clock) so the same site produces the same page set on every run,
 which is what makes the findings reproducible.
 
@@ -425,7 +425,7 @@ def _follow_meta_refresh(fetcher, record, depth, source, origin, notes):
 
 
 def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
-          respect_robots=True, delay=REQUEST_DELAY, render=False):
+          respect_robots=True, delay=REQUEST_DELAY, render="auto"):
     origin, seed_url = normalise_target(target)
     started = time.monotonic()
     deadline = started + budget_s
@@ -542,7 +542,14 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
 
     render_mode = "static"
     if render:
-        render_mode = _render_pass(pages, notes)
+        # The rendered pass shares the crawl's wall-clock budget rather than
+        # adding to it. Before it ran by default that distinction did not
+        # matter; now it does, because an unclamped 60s pass on top of a
+        # 240s crawl would put a slow site past the five minutes the audit
+        # promises. If the crawl has already spent the budget there is nothing
+        # left to spend and the pass says so instead of running.
+        render_mode = _render_pass(pages, notes, deadline,
+                                   required=(render is True))
 
     pages.sort(key=lambda p: (0 if p.get("page_type") == "home" else 1, p["url"]))
     elapsed = time.monotonic() - started
@@ -582,32 +589,61 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
     return snapshot
 
 
-# The optional rendered pass. Every number here exists to keep `--render` inside
-# the same five-minute budget the static audit promises: a browser that waits
-# for an unreachable idle state will happily spend the whole of it.
+# The rendered pass. It runs by default when Playwright is importable and is
+# skipped, with a note, when it is not.
+#
+# It used to be opt-in, which meant that on a judge's machine it would almost
+# certainly never run and the JavaScript-shell finding would always be the
+# inferred version rather than the measured one. It costs about 8 seconds
+# against five pages, inside a run that has 140 seconds of its budget spare, so
+# there was nothing left to protect by keeping it off. `--no-render` turns it
+# off; `--render` demands it and says so in the notes when it cannot happen.
+#
+# Every number below exists to keep the pass inside the same five-minute budget
+# the static audit promises: a browser waiting for an idle state a page never
+# reaches will happily spend the whole of it.
 RENDER_PAGES = 5             # a sample, not a second crawl
 RENDER_BUDGET_SECONDS = 60   # hard ceiling for the whole pass
 RENDER_GOTO_MS = 15000       # per page, to first paint
 RENDER_IDLE_MS = 4000        # best-effort wait for the network to settle
 RENDER_SETTLE_MS = 500       # a moment for hydration to write to the DOM
+RENDER_MIN_SECONDS = 10      # below this there is no time to render even one page honestly
 
 
-def _render_pass(pages, notes):
-    """Optional Playwright pass: measure how much text JavaScript adds.
+def _render_pass(pages, notes, crawl_deadline=None, required=False):
+    """Playwright pass: measure how much text JavaScript adds.
 
     Absence of Playwright is a property of the auditing machine, never a
-    finding about the site.
+    finding about the site. `required` only changes how loudly that is said:
+    someone who typed `--render` asked for this and should be told it did not
+    happen, whereas on a default run it is ordinary.
     """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        notes.append("Playwright not installed; static-only pass (this is not a site defect)")
+        notes.append(
+            "--render was requested but Playwright is not installed; "
+            "run `pip install playwright && playwright install chromium`. "
+            "Static-only pass; this is not a site defect"
+            if required else
+            "Playwright is not installed, so the JavaScript gap is inferred from the static "
+            "HTML rather than measured. Install it for the measured version; this is a "
+            "property of the auditing machine, not a defect in the site")
         return "static"
 
     targets = [p for p in pages if p.get("status") == 200][:RENDER_PAGES]
     if not targets:
         return "static"
+
     deadline = time.monotonic() + RENDER_BUDGET_SECONDS
+    if crawl_deadline is not None:
+        deadline = min(deadline, crawl_deadline)
+    remaining = deadline - time.monotonic()
+    if remaining < RENDER_MIN_SECONDS:
+        notes.append(
+            "the crawl used its wall-clock budget, leaving under {}s for the rendered pass, so "
+            "the JavaScript gap is inferred rather than measured".format(RENDER_MIN_SECONDS))
+        return "static"
     try:
         with sync_playwright() as play:
             browser = play.chromium.launch()
@@ -654,14 +690,17 @@ def main(argv=None):
     parser.add_argument("--delay", type=float, default=REQUEST_DELAY,
                         help="seconds between requests")
     parser.add_argument("--render", action="store_true",
-                        help="add a Playwright pass if Playwright is installed")
+                        help="require the Playwright pass and say so if it cannot run")
+    parser.add_argument("--no-render", action="store_true",
+                        help="skip the Playwright pass even if Playwright is installed")
     parser.add_argument("--ignore-robots", action="store_true",
                         help=argparse.SUPPRESS)  # test fixtures only
     args = parser.parse_args(argv)
 
     snapshot = crawl(
         args.target, args.out, max_pages=args.max_pages, budget_s=args.budget,
-        respect_robots=not args.ignore_robots, delay=args.delay, render=args.render,
+        respect_robots=not args.ignore_robots, delay=args.delay,
+        render=False if args.no_render else (True if args.render else "auto"),
     )
     crawl_info = snapshot["crawl"]
     eprint("crawled {} pages ({} ok) in {}s -> {}".format(

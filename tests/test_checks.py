@@ -102,16 +102,34 @@ def test_fixture_severity_expectations(audit, golden, name):
     result = audit(name)
 
     minimum_critical = expected.get("expect_critical_at_least")
+    # A fixture may expect a different floor once a browser has measured what
+    # JavaScript actually recovers. js-shell-site is the case: unmeasured, an
+    # empty homepage is critical at medium confidence because we cannot tell
+    # whether the text is reachable; measured, it is high at high confidence
+    # because we know it is - to anything that runs JavaScript. The rendered
+    # pass is on by default, so both machines are normal and both verdicts are
+    # right. Asserting the pair is the point.
+    if result.snapshot["crawl"].get("render_mode") == "rendered" \
+            and "expect_critical_at_least_when_rendered" in expected:
+        minimum_critical = expected["expect_critical_at_least_when_rendered"]
     if minimum_critical:
         criticals = result.severities("critical")
         assert len(criticals) >= minimum_critical, \
             "{}: expected at least {} critical finding(s), got {}".format(
                 name, minimum_critical, [f["title"] for f in criticals])
 
-    for root_cause in expected.get("critical_root_causes", []):
-        matching = [f for f in result.findings_with(root_cause) if f["severity"] == "critical"]
-        assert matching, "{}: `{}` should be critical, got {}".format(
-            name, root_cause,
+    rendered = result.snapshot["crawl"].get("render_mode") == "rendered"
+    if rendered and "high_root_causes_when_rendered" in expected:
+        # Same reason as above: measuring what JavaScript recovers moves this
+        # from critical-at-medium-confidence to high-at-high-confidence.
+        wanted = [(cause, "high") for cause in expected["high_root_causes_when_rendered"]]
+    else:
+        wanted = [(cause, "critical") for cause in expected.get("critical_root_causes", [])]
+
+    for root_cause, severity in wanted:
+        matching = [f for f in result.findings_with(root_cause) if f["severity"] == severity]
+        assert matching, "{}: `{}` should be {}, got {}".format(
+            name, root_cause, severity,
             [(f["root_cause"], f["severity"]) for f in result.report["findings"]])
 
     minimum_info = expected.get("expect_info_at_least")
@@ -244,7 +262,10 @@ def test_extra_requests_stay_within_declared_budgets(audit, name):
         "render-readability-audit": 0,
         "structured-data-audit": 0,
         "fact-extractability-audit": 0,
-        "freshness-corroboration-audit": 4,
+        # 4 for the Wikidata name search, 6 for the profile links it can
+        # verify. Fixture audits run this skill offline (see conftest), so
+        # the number that matters here is the ceiling, not the usage.
+        "freshness-corroboration-audit": 10,
         "engagement-audit": 20,
     }
     result = audit(name)

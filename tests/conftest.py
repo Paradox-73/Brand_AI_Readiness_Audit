@@ -109,7 +109,23 @@ def _audit(name, out_dir, no_network=False, site_dir=None):
                     "--snapshot", snapshot_path, "--out", out_path]
             if skill == "freshness-corroboration-audit":
                 args += ["--now", REFERENCE_DATE]
-            if no_network:
+                # Always offline, even when the rest of the suite is not.
+                #
+                # This skill is the only one that talks to third parties: the
+                # Wikidata name search, and a HEAD to each profile link the site
+                # publishes. The fixtures declare profile URLs on real hosts -
+                # `linkedin.com/company/brightpath-analytics-example` and the
+                # like - which do not exist, so with the network on, every
+                # fixture audit sent five requests to LinkedIn, GitHub, X,
+                # YouTube and Wikidata, and the mutation suite multiplied that
+                # by fifty. A test run should not hammer other people's servers,
+                # and a suite that fails when LinkedIn is slow is not testing
+                # this code.
+                #
+                # The profile check is covered offline in test_profile_links.py,
+                # against a stub that answers with whatever the case needs.
+                args.append("--no-network")
+            elif no_network:
                 args.append("--no-network")
             run_script(args, "{} [{}]".format(skill, name))
             findings_paths.append(out_path)
