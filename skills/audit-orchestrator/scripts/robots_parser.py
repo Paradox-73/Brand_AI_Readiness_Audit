@@ -139,6 +139,14 @@ _BENIGN_DISALLOW = re.compile(
     r"login|signin|sign-in|logout|register|signup|search|\?|.*\?|tmp|temp|"
     r"private|internal|api|graphql|xmlrpc|wp-includes|wp-json|feed|print|"
     r"thank-you|order|my-account|customer|user|profile|preview|draft|"
+    # Authentication and invitation routes. A site is right to keep these out
+    # of an index, and reporting `/oauth`, `/confirm`, `/notifications` and
+    # `/invites/` as "paths that look like real content" put three wrong items
+    # at the top of a real report. The list already knew `/login` and
+    # `/signup`; it had simply never been extended to the rest of the category.
+    r"oauth|auth|sso|saml|callback|confirm|verify|verification|activate|"
+    r"reset-password|forgot|password|invite|invites|invitation|notifications|"
+    r"onboarding|billing|unsubscribe|webhooks?|"
     # Asset directories. Blocking them is ordinary bandwidth hygiene and holds
     # back no sentence anyone would quote. Reporting `/icons/` and `/images/`
     # as "paths that look like real content" was true of neither.
@@ -155,7 +163,8 @@ _BENIGN_ANYWHERE = re.compile(
     r"(?:^|[/*?&=_-])(?:print|preview|draft|cart|checkout|basket|login|signin|"
     r"logout|register|signup|account|admin|search|filter|sort|sortby|orderby|"
     r"session|sessionid|utm_|replytocom|add-to-cart|wishlist|compare|currency|"
-    r"variant|cgi-bin|feed|rss|atom|json|xml|api|graphql|amp)\b", re.I)
+    r"variant|cgi-bin|feed|rss|atom|json|xml|api|graphql|amp|oauth|sso|saml|"
+    r"callback|confirm|verify|activate|invite|invitation|webhook)\b", re.I)
 
 
 def benign_disallow(rule):

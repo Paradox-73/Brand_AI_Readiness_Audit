@@ -258,6 +258,7 @@ def _check_thin_pages(result, content_pages, shells):
     This is the plain case: the page really does say almost nothing, so there
     is no sentence for an assistant to lift and nothing for a visitor to read.
     """
+    result.check("thin-html")
     shell_urls = {p["url"] for p in shells}
     thin = [p for p in content_pages
             if p["url"] not in shell_urls
@@ -302,6 +303,7 @@ def _check_thin_pages(result, content_pages, shells):
 
 
 def _check_render_gap(result, content_pages, render_mode):
+    result.check("static-vs-rendered-text-gap")
     if render_mode != "rendered":
         return
     measured = [p for p in content_pages if "rendered_text_len" in p]

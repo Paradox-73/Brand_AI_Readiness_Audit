@@ -519,7 +519,10 @@ def _check_authoritative_profiles(result, snapshot, pages):
         evidence="Distinct off-site profiles linked from the crawled pages or listed in "
                  "`sameAs`: {}. In our within-category study, brands assistants name linked "
                  "a mean of {} and comparable brands they do not name linked {} - the only "
-                 "measure that pointed the same way in all six categories tested.".format(
+                 "measure that pointed the same way in all six categories tested. That study "
+                 "is ours: 29 crawlable sites, and whether an assistant \"names\" a brand was "
+                 "a judgement we made rather than a systematic query, so treat it as a strong "
+                 "association and not a proven cause.".format(
                      ", ".join(sorted(profiles)) or "none",
                      PROFILE_BREADTH_NAMED_MEAN, PROFILE_BREADTH_UNNAMED_MEAN),
         mechanism="D", root_cause="weak-corroboration",

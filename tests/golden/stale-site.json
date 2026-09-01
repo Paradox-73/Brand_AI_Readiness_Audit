@@ -7,8 +7,7 @@
     "stale-content",
     "no-date-signal",
     "weak-corroboration",
-    "nap-inconsistency",
-    "missing-schema-props"
+    "nap-inconsistency"
   ],
   "must_not_find": [
     "robots-block",
@@ -21,6 +20,12 @@
     "broken-links",
     "orphan-pages"
   ],
-  "must_recommend": ["R-SAMEAS-WIKIDATA", "R-DATE-SIGNALS", "R-PRESS-PAGE", "R-BOILERPLATE"],
-  "note": "nap-inconsistency must be high severity: a site that contradicts itself on contact details poisons every downstream source that copies from it. This fixture depends on the fixed reference date; without --now the staleness thresholds drift with the calendar."
+  "must_recommend": [
+    "R-SAMEAS-WIKIDATA",
+    "R-DATE-SIGNALS",
+    "R-PRESS-PAGE",
+    "R-BOILERPLATE"
+  ],
+  "note": "nap-inconsistency must be high severity: a site that contradicts itself on contact details poisons every downstream source that copies from it. This fixture depends on the fixed reference date; without --now the staleness thresholds drift with the calendar.",
+  "why_no_missing_schema_props": "This fixture's Organization declares name, url, logo and description, and the site links to no off-site profiles at all. `sameAs` was therefore counted as a missing high-value property - so the report told the owner to list profiles they do not have, while `weak-corroboration` two sections away told them to go and create some. One problem, two findings, and the first had no fix. The check now ignores an absent `sameAs` when the site genuinely declares no profiles; `weak-corroboration` still fires here and owns that advice. `missing-schema-props` is still proved by the mutation that strips Article dates."
 }

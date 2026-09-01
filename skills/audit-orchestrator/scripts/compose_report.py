@@ -519,9 +519,22 @@ def compose(snapshot, skill_results, audited_at=None):
         finding["reach"] = reach
     findings = assign_ids(findings)
 
+    # Severity first, then the priority score inside each band.
+    #
+    # Ranking on the score alone inverted the report against itself. `reach`
+    # floors at 0.25 for a finding that lists the pages it affects, while a
+    # finding listing none is treated as site-wide and gets 1.0 - so on a
+    # sixty-page crawl, naming your evidence was a four-fold penalty. The
+    # result on a real site: both `high` findings ranked below two `medium`
+    # ones, and "add og:image" (low, site-wide, cheap) outranked "this site has
+    # no machine-readable identity". The report told the owner to do the small
+    # thing first, under a heading that said the opposite.
+    #
+    # The score still decides order within a band, which is where it earns its
+    # keep: two mediums, the cheaper and wider one first.
     ranked = sorted(findings,
-                    key=lambda f: (-f["suggested_action"]["priority_score"],
-                                   SEVERITY_RANK[f["severity"]], f["id"]))
+                    key=lambda f: (SEVERITY_RANK[f["severity"]],
+                                   -f["suggested_action"]["priority_score"], f["id"]))
     start_here = _start_here_ids(ranked)
 
     counts = {level: sum(1 for f in findings if f["severity"] == level)
@@ -537,7 +550,8 @@ def compose(snapshot, skill_results, audited_at=None):
             "medium": counts["medium"],
             "low": counts["low"],
             "info": counts["info"],
-            "verdict": _verdict(counts, findings, crawl, signals),
+            "verdict": _verdict(counts, findings, crawl, signals,
+                                (snapshot.get("brand") or {}).get("name") or ""),
         },
         "findings": [_public_finding(f) for f in findings],
         "start_here": start_here,
@@ -591,6 +605,13 @@ def _public_finding(finding):
         "mechanism": finding["mechanism"],
         "mechanism_description": MECHANISMS[finding["mechanism"]],
         "root_cause": finding["root_cause"],
+        # `id` is F-001, F-002 ... assigned in order, so fixing one renumbers
+        # every finding after it and the same problem has a different id in the
+        # next run. A developer comparing a before and an after had to match on
+        # root_cause by hand. This is the handle to compare on: it names the
+        # specific problem and does not move.
+        "stable_id": finding["id_hint"],
+        "check": finding.get("check"),
         "affected_pages": finding["affected_pages"],
         "affected_page_count": finding["affected_page_count"],
         "reach": finding["reach"],
@@ -639,13 +660,25 @@ def _llms_txt_template(snapshot, brand):
     from a naming convention the crawl had already disproved.
     """
     wanted = ("about", "pricing", "product", "service", "faq", "contact")
+    titles = {}
+    for page in pages_of(snapshot):
+        title = (page.get("title") or "").strip()
+        if title:
+            titles[title] = titles.get(title, 0) + 1
     seen, lines = set(), []
     for page_type in wanted:
         for page in pages_of(snapshot, types=(page_type,)):
             if page["url"] in seen:
                 continue
             seen.add(page["url"])
-            label = (page.get("title") or page_type).strip()
+            # Not the page's <title> when titles are duplicated across the
+            # site: this template labelled a product page "Coppergate Ceramics"
+            # and the FAQ page "About", because it copied the very duplicate
+            # titles the same report flags as a defect. A report that
+            # propagates the bug it is reporting is worse than one that says
+            # nothing.
+            title = (page.get("title") or "").strip()
+            label = title if title and titles.get(title, 0) == 1 else page_type.upper()[:1] + page_type[1:]
             lines.append("- [{}]({}): <one line saying what is on this page>".format(
                 truncate(label, 60), page["url"]))
             break
@@ -678,7 +711,7 @@ def _start_here_ids(ranked, limit=3):
     return [f["id"] for f in (substantive + remainder)[:limit]]
 
 
-def _verdict(counts, findings, crawl=None, signals=None):
+def _verdict(counts, findings, crawl=None, signals=None, brand_label=""):
     """One paragraph naming what is actually wrong, not how many things are.
 
     This used to be a pure severity ladder, and on a site with no off-site
@@ -713,13 +746,24 @@ def _verdict(counts, findings, crawl=None, signals=None):
     uncorroborated = ("weak-corroboration" in causes
                       or (breadth is not None and breadth <= 1))
     if undeclared and uncorroborated:
-        return ("A machine can reach this site and read it. What it cannot do is work out who "
-                "the brand is. The pages never state an identity in a form a machine reads, "
-                "and no independent source is linked that would agree with one if they did. "
-                "That single pattern is behind most of the findings below, and it is why an "
-                "assistant asked about this category has nothing about this brand to repeat. "
-                "{} finding(s) follow, ordered by how much each changes relative to the work "
-                "involved.".format(len(findings)))
+        # Name the brand and the two specific gaps. The first version of this
+        # paragraph was identical, word for word, for a two-person pottery and
+        # for a widely-cited software project - which reads as a template
+        # rather than a diagnosis, and discredits everything under it.
+        missing = []
+        if "no-org-schema" in causes:
+            missing.append("no page carries Organization or LocalBusiness markup")
+        if "no-entity-definition" in causes:
+            missing.append("no page states in one sentence what it is")
+        if breadth is not None:
+            missing.append(plural(breadth, "off-site profile is linked",
+                                  "off-site profiles are linked"))
+        return ("A machine can reach {} and read it. What it cannot do is establish who the "
+                "brand is: {}. Nothing on the site says it in a form a machine reads, and "
+                "nothing off the site corroborates it, so an assistant asked about this "
+                "category has no fact about this brand it can safely repeat. Most of what "
+                "follows is a consequence of that.".format(
+                    brand_label or "this site", "; ".join(missing) or "the identity is undeclared"))
 
     if counts["high"] >= 3:
         return ("The site is reachable, but {} high-severity problems mean a machine fetching "

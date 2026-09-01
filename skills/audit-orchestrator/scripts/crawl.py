@@ -297,6 +297,35 @@ def fetch_page(fetcher, url, depth, source, origin):
     return record
 
 
+# Words a title carries around the brand rather than as part of it.
+TITLE_BOILERPLATE_LEAD = ("welcome to ", "the official ", "official ")
+TITLE_BOILERPLATE_TAIL = (
+    " home page", " homepage", " home", " official site", " official website",
+    " website", " web site", " site", " online", " uk", " usa",
+)
+
+
+def _strip_title_boilerplate(title):
+    """"SQLite Home Page" -> "SQLite". Returns "" if nothing is left."""
+    value = (title or "").strip()
+    lowered = value.lower()
+    for lead in TITLE_BOILERPLATE_LEAD:
+        if lowered.startswith(lead):
+            value = value[len(lead):].strip()
+            lowered = value.lower()
+            break
+    changed = True
+    while changed:
+        changed = False
+        for tail in TITLE_BOILERPLATE_TAIL:
+            if lowered.endswith(tail) and len(value) > len(tail) + 1:
+                value = value[: -len(tail)].strip(" -–—:|,")
+                lowered = value.lower()
+                changed = True
+                break
+    return value
+
+
 def detect_brand(pages, origin):
     """Work out the brand name and, separately, how the site declares it.
 
@@ -351,6 +380,17 @@ def detect_brand(pages, origin):
             for index, value in enumerate(ordered):
                 fallback.append({"name": value, "source": "title-part-{}".format(index)})
         elif parts:
+            # A title with no separator is often the brand plus boilerplate:
+            # "SQLite Home Page", "Welcome to Acme", "Acme - Official Site".
+            # Taking it whole made the brand name "SQLite Home Page", which then
+            # broke the definition check downstream: the homepage says "SQLite
+            # is a C-language library that implements ...", and the check was
+            # looking for a sentence starting "SQLite Home Page is". One bad
+            # name produced a false "no page states what the brand is" on a
+            # site whose first sentence states exactly that.
+            stripped = _strip_title_boilerplate(parts[0])
+            if stripped and stripped != parts[0]:
+                fallback.append({"name": stripped, "source": "title-part-0"})
             fallback.append({"name": parts[0], "source": "title"})
 
     host = urlparse(origin).netloc.lower()

@@ -25,6 +25,9 @@ from fixture_server import FixtureServer
 
 FIXTURE_NAMES = all_fixture_names()
 
+SEVERITY_RANK_FOR_TEST = {
+    "critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
 # The contest's minimum report shape. Nothing below is optional.
 REQUIRED_TOP_LEVEL = ("site", "audited_at", "summary", "findings")
 REQUIRED_SUMMARY = ("total_findings", "critical", "high", "medium")
@@ -103,8 +106,13 @@ def test_start_here_points_at_real_findings(audit, name):
         # tags, which control what a link preview looks like when shared -
         # above structured data that does not parse, because a cheap site-wide
         # fix carries full reach and the lowest effort divisor.
+        # Severity leads; the priority score orders within each band. Ranking
+        # on the score alone let a `low` site-wide fix outrank a `high` one,
+        # because reach floors at 0.25 for a finding that names its pages and
+        # is 1.0 for one that names none.
         ranked = sorted(actionable,
-                        key=lambda f: -f["suggested_action"]["priority_score"])
+                        key=lambda f: (SEVERITY_RANK_FOR_TEST[f["severity"]],
+                                       -f["suggested_action"]["priority_score"], f["id"]))
         substantive = [f for f in ranked if f["severity"] in ("critical", "high", "medium")]
         expected = [f["id"] for f in
                     (substantive + [f for f in ranked if f not in substantive])[:3]]

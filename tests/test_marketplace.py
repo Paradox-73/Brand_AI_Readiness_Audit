@@ -627,3 +627,95 @@ def test_no_skill_uses_a_name_it_never_defines_or_imports():
 
     assert not offenders, "names used but never defined or imported:\n" + "\n".join(
         sorted(set(offenders))[:20])
+
+
+def test_every_referenced_path_exists_with_exactly_that_case():
+    """Windows does not care about case. macOS and Linux do.
+
+    This project has only ever run on Windows, where `References/Foo.md` and
+    `references/foo.md` are the same file. On a judge's Mac or Linux box the
+    second one is a missing file and whatever reads it fails. Nothing in the
+    suite would have noticed, because the suite runs here.
+
+    Checks every path this project names in its own code and documentation
+    against the tree, case included.
+    """
+    tracked = set()
+    for base in ("skills", "tests", "evals"):
+        root = os.path.join(ROOT, base)
+        for directory, subdirectories, files in os.walk(root):
+            subdirectories[:] = [d for d in subdirectories
+                                 if d not in ("__pycache__", ".venv", ".git", ".pytest_cache")]
+            for filename in files:
+                tracked.add(os.path.relpath(
+                    os.path.join(directory, filename), ROOT).replace(os.sep, "/"))
+    for filename in ("README.md", "marketplace.json", "run_audit.py", "package.py",
+                     "requirements.txt", "LICENSE", "pytest.ini"):
+        if os.path.isfile(os.path.join(ROOT, filename)):
+            tracked.add(filename)
+
+    by_lower = {p.lower(): p for p in tracked}
+    reference = re.compile(
+        r"(?<![\w/.-])((?:skills|tests|evals|references|scripts)/[A-Za-z0-9_./-]+\.[a-z]{2,5})")
+
+    problems = []
+    for path in sorted(tracked):
+        if not path.endswith((".py", ".md", ".json")):
+            continue
+        with open(os.path.join(ROOT, path), encoding="utf-8", errors="ignore") as handle:
+            text = handle.read()
+        for ref in sorted(set(reference.findall(text))):
+            if ref in tracked or any(p.endswith("/" + ref) for p in tracked):
+                continue
+            if ref.lower() in by_lower:
+                problems.append("{} refers to {!r}; the file is {!r}".format(
+                    path, ref, by_lower[ref.lower()]))
+            elif any(p.lower().endswith("/" + ref.lower()) for p in tracked):
+                match = next(p for p in tracked if p.lower().endswith("/" + ref.lower()))
+                problems.append("{} refers to {!r}; the file is {!r}".format(
+                    path, ref, match))
+
+    assert not problems, ("these paths differ only in case, which works here and "
+                          "fails on macOS and Linux:\n" + "\n".join(problems))
+
+
+def test_every_check_registers_itself_before_it_can_fire():
+    """A finding must be stamped with the check that produced it.
+
+    `SkillResult.add()` records the last check name registered, so the report
+    can say which checks fired, which declined and which ran clean. Four
+    functions registered their name only inside the branch that *declines* -
+    via `skip()`, which registers as a side effect - so on the branch that
+    fires, the finding was stamped with some unrelated check registered
+    earlier.
+
+    The visible consequence: a judge's report listed `thin-html` under "checks
+    that ran and found nothing wrong" on the same page as a finding whose root
+    cause was `thin-html`. The appendix contradicted the findings, in the one
+    section whose whole purpose is to make silence trustworthy.
+    """
+    import ast
+
+    problems = []
+    for skill in sorted(os.listdir(SKILLS_DIR)):
+        script = os.path.join(SKILLS_DIR, skill, "scripts", "check.py")
+        if not os.path.isfile(script):
+            continue
+        with open(script, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read(), filename=script)
+
+        for function in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+            registers, emits = False, 0
+            for node in ast.walk(function):
+                if not (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)):
+                    continue
+                if node.func.attr == "check" and node.args:
+                    registers = True
+                if node.func.attr == "add":
+                    emits += 1
+            if emits and not registers:
+                problems.append("{}: {}() emits {} finding(s) without calling "
+                                "result.check()".format(skill, function.name, emits))
+
+    assert not problems, "\n".join(problems)

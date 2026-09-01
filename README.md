@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Agent Skills](https://img.shields.io/badge/Agent%20Skills-agentskills.io-6E56CF?style=flat-square)
 ![Skills](https://img.shields.io/badge/Skills-7%20(1%20entrypoint)-0F9D58?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-442%20passing-2EA043?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-464%20passing-2EA043?style=flat-square)
 ![Read Only](https://img.shields.io/badge/Mode-Read--only-FF6F00?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-4169E1?style=flat-square)
 
@@ -67,9 +67,14 @@ same root cause, so the separation is enforced rather than asserted.
 ```
 
 The six sub-skills **never fetch the site themselves**. They read fields off `snapshot.json`.
-That is what makes this one crawl rather than six, and why a full audit finishes inside five
-minutes and sixty page requests. A real run against a large public site takes about 140
-seconds of the 300 available.
+That is what makes this one crawl rather than six.
+
+**Measured, not estimated.** The crawl is capped at 60 page requests. Four sub-skills then make
+a bounded number of extra read-only requests — link and sitemap targets the crawl did not
+reach, and one Wikidata lookup — declared in each skill's `compatibility` line and capped at 40,
+16, 10 and 2. On two large public sites the totals were **117 and 103 requests, in 223 s and
+195 s** of the 300 allowed; a small site finishes in about 20 s. `--no-network` reduces it to
+the 60.
 
 `compose_report.py` merges the six result files. It deduplicates **across** skills — while
 deliberately keeping several findings from one skill that share a cause, because those are
@@ -142,16 +147,8 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 python -m venv .venv; .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
-```bat
-:: Windows cmd.exe, if you would rather not change the policy
-python -m venv .venv && .venv\Scripts\activate.bat
-pip install -r requirements.txt
-```
-```bash
-# Windows Git Bash
-python -m venv .venv && source .venv/Scripts/activate
-pip install -r requirements.txt
-```
+Rather not change the policy? In `cmd.exe` activate with
+`.venv\Scripts\activate.bat`; in Git Bash, `source .venv/Scripts/activate`.
 
 Then run it:
 
@@ -181,8 +178,8 @@ The tests, if you want them:
 
 ```bash
 pip install pytest
-python3 -m pytest -q                        # 442 tests, about 15 minutes
-python3 -m pytest -q -m "not mutation"      # 385 tests, about 4 minutes
+python3 -m pytest -q                        # 464 tests, about 16 minutes
+python3 -m pytest -q -m "not mutation"      # 407 tests, about 4 minutes
 ```
 
 > **Windows path limit.** Do not unzip into a deep directory — `pip` cannot install `lxml` if
@@ -210,6 +207,8 @@ those profile links still resolve, on the six platforms that answer that questio
 That separated in all six categories studied — the only measure that did — and it is the
 cheapest fix here. You cannot become famous this quarter; you can claim six profiles this week
 and put the same sentence on all of them.
+
+*What that number is and is not:* our own study of 29 crawlable sites, six categories, matched within category. Whether an assistant "names" a brand was a prominence judgement we made, not a systematic query of any assistant. It is the strongest association we found and it is not a proven cause. The study says so at greater length, including the measures that did **not** separate the two groups.
 
 ---
 

@@ -940,6 +940,65 @@ def example_urls(urls, limit=5):
     return sorted(set(u for u in urls if u))[:limit]
 
 
+# --------------------------------------------------------------------------
+# Bot-manager challenge pages
+#
+# A bot manager that answers 403 is easy: the status says the crawler was
+# refused, and `crawl-access-audit` reports it as a bot block. The dangerous
+# case is the one that answers 2xx.
+#
+# Measured on real commercial homepages: one returns HTTP 202 with 3,962 bytes
+# of HTML and *zero* characters of readable text; another returns 200 with
+# 2,857 bytes and thirty-two characters. Both are verification pages. To every
+# content check they look like a site that shipped an empty page - so the audit
+# would report a JavaScript shell, no structured data, no quotable fact and
+# thin content, four confident findings about a homepage that is fine.
+#
+# That is the same error as calling a refused link a dead link, in a different
+# costume, and it fires on exactly the bot-managed commercial sites this
+# marketplace is aimed at.
+#
+# Detection is by vendor marker rather than by shape, because "almost no text"
+# is also what a genuine JavaScript shell looks like, and that is a real
+# finding we must keep reporting. These strings appear in the challenge
+# scaffolding itself and not in ordinary pages; the text ceiling is a second
+# gate so that an article *about* bot management is never mistaken for one.
+# --------------------------------------------------------------------------
+
+CHALLENGE_MARKERS = {
+    "AWS WAF": ("awswafcookiedomainlist", "reportchallengeerror", "__challenge_"),
+    "Akamai Bot Manager": ("sec-if-cpt-container", "sec-bc-tile-container",
+                           "scf-akamai-logo", "behavioral-content"),
+    "Cloudflare": ("__cf_chl", "cf_chl_opt", "cf-chl-", "just a moment...",
+                   "attention required! | cloudflare"),
+    "DataDome": ("captcha-delivery", "datadome-", "dd_cookie"),
+    "PerimeterX": ("perimeterx", "px-captcha", "_pxhd"),
+    "Imperva Incapsula": ("_incapsula_resource", "incapsula incident id"),
+    "Distil": ("distil_r_captcha",),
+}
+
+# Above this much readable text the page carried content, whatever else is in
+# it. Real homepages we measured run 5,000 to 10,000 characters; the challenge
+# pages ran 0 and 32.
+CHALLENGE_TEXT_CEILING = 800
+
+
+def detect_challenge(html, page_text):
+    """Which bot manager served a verification page here, if any.
+
+    Returns the vendor name, or None. The name matters: the fix is to
+    allow-list crawlers in that product, and naming it saves the site owner
+    the first hour of the job.
+    """
+    if len(page_text or "") > CHALLENGE_TEXT_CEILING:
+        return None
+    low = (html or "").lower()
+    for vendor, markers in sorted(CHALLENGE_MARKERS.items()):
+        if any(marker in low for marker in markers):
+            return vendor
+    return None
+
+
 def plural(count, singular, plural_form=None):
     """`1 page`, not `1 page(s)`.
 

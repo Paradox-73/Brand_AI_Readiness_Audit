@@ -54,7 +54,8 @@ sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
     CONTENT_TYPES, DEEP_TYPES, example_urls, find_prices, load_snapshot,
-    name_forms, pages_of, pct, plural, sample, SkillResult, truncate
+    name_forms, pages_of, pct, plural, sample, sentences, SkillResult,
+    truncate
 )
 
 SKILL = "structured-data-audit"
@@ -76,7 +77,11 @@ FAQ_TYPES = {"faqpage", "qapage"}
 # could be.
 HIGH_VALUE_PROPS = {
     "Organization": ["name", "url", "logo", "description", "sameAs"],
-    "Product": ["name", "description", "image", "brand"],
+    # No "Product" entry. It listed name, description, image and brand and was
+    # never read - _check_product validates the Offer only. A list that grades
+    # nothing, while the snippet demanded two of its keys (image and sku, both
+    # unfillable on a site with no images), had the tool disagreeing with
+    # itself about what mattered. Restore it only alongside a check that reads it.
     "Offer": ["price", "priceCurrency", "availability"],
     "Article": ["headline", "datePublished", "dateModified", "author"],
 }
@@ -123,7 +128,7 @@ def run(snapshot):
 
     _check_jsonld_validity(result, pages)
     _check_organization(result, snapshot, pages, by_type, brand)
-    _check_product(result, by_type)
+    _check_product(result, by_type, brand)
     _check_article(result, by_type)
     _check_faq(result, by_type)
     _check_breadcrumbs(result, pages, by_type)
@@ -175,11 +180,48 @@ def _missing_props(node, props):
 
 
 def _site_logo(snapshot, pages):
+    """The site's logo URL, or None if we never saw one.
+
+    This used to invent `<origin>/logo.png` when no og:image was found, and put
+    it in a snippet labelled paste-ready beside `name` and `url`, which were
+    discovered. Nothing marked one as real and the other as a guess. On a site
+    with no images at all that shipped a 404 into structured data, which is
+    worse than an obvious placeholder because it looks finished.
+    """
     for page in pages:
         og_image = (page.get("og") or {}).get("og:image")
         if og_image:
             return og_image
-    return snapshot["origin"].rstrip("/") + "/logo.png"
+    for page in pages:
+        for image in (page.get("images") or []):
+            src = image.get("src") if isinstance(image, dict) else image
+            if src and "logo" in str(src).lower():
+                return src
+    return None
+
+
+def _brand_definition(pages, brand):
+    """The site's own sentence defining itself, if it has written one.
+
+    `fact-extractability-audit` looks for exactly this - "<Brand> is a ..." -
+    and the audit prints it in the report. The Organization snippet was still
+    emitting `<one sentence: what you do, for whom>` while the answer sat two
+    sections above it.
+    """
+    name = (brand or {}).get("name") or ""
+    if not name:
+        return ""
+    lowered = name.lower()
+    home = next((p for p in pages if p.get("page_type") == "home"), None)
+    for page in filter(None, [home] + list(pages)):
+        for paragraph in (page.get("paragraphs") or [])[:12]:
+            for sentence in sentences(paragraph):
+                text = sentence.strip()
+                if 40 <= len(text) <= 300 and lowered in text.lower() and \
+                        re.search(r"\b(is|are|makes|provides|offers|builds|designs)\b",
+                                  text, re.I):
+                    return text
+    return ""
 
 
 def _site_description(pages):
@@ -289,6 +331,23 @@ def _check_organization(result, snapshot, pages, by_type, brand):
 
     page, node = org_nodes[0]
     missing = _missing_props(node, HIGH_VALUE_PROPS["Organization"])
+
+    # A brand that links to no profiles anywhere cannot fill `sameAs`, and this
+    # check only ever tested that the key was present - so leaving our own
+    # placeholder `.../<your-company>` in the snippet passed, and deleting it,
+    # which is the honest thing to do, failed. The tool rewarded pasting
+    # placeholder text and penalised removing it. If the site declares no
+    # profiles at all, the absence of `sameAs` is not the finding to raise here;
+    # freshness-corroboration-audit already reports having none, which is the
+    # actual problem and has a different fix.
+    if "sameAs" in missing and not _all_same_as(pages):
+        missing = [m for m in missing if m != "sameAs"]
+
+    # Same reasoning for a logo we could not find: we no longer invent one, so
+    # we do not then mark the site down for not having the one we invented.
+    if "logo" in missing and not _site_logo(snapshot, pages):
+        missing = [m for m in missing if m != "logo"]
+
     if missing:
         result.add(
             id_hint="organization-schema-missing-properties",
@@ -320,22 +379,77 @@ def _check_organization(result, snapshot, pages, by_type, brand):
 
 
 def _org_snippet(snapshot, pages, brand):
+    """Organization, or LocalBusiness when the site shows a real-world address.
+
+    Three things changed here, all the same mistake in different clothes.
+
+    `sameAs` used to ship `.../<your-company>` placeholder URLs when the brand
+    linked to no profiles. A developer then has two choices: publish two dead
+    URLs, or delete the key and trip our own follow-up check, which tests for
+    the key's presence and not its contents. That rewarded pasting placeholder
+    text and penalised removing it. The key is now omitted when there is
+    nothing true to put in it, and the follow-up check ignores an absent
+    `sameAs` when the site genuinely has no profiles to declare.
+
+    `logo` used to be invented. `description` used to be a placeholder while
+    the site's own defining sentence sat elsewhere in the same report.
+
+    And the finding is titled "No Organization **or LocalBusiness** markup" on
+    a site whose address, telephone and opening hours the audit has already
+    parsed - then emitted bare Organization every time. A business with a
+    postal address gets LocalBusiness, which is the type those facts belong to.
+    """
     same_as = _all_same_as(pages)
+    facts = _contact_facts_for_snippet(pages)
+
     payload = {
         "@context": "https://schema.org",
-        "@type": "Organization",
+        "@type": "LocalBusiness" if facts.get("has_address") else "Organization",
         "name": brand.get("name") or snapshot["site"],
         "url": snapshot["origin"].rstrip("/") + "/",
-        "logo": _site_logo(snapshot, pages),
-        "description": _site_description(pages) or "<one sentence: what you do, for whom>",
-        "sameAs": same_as or ["https://www.linkedin.com/company/<your-company>",
-                              "https://www.wikidata.org/wiki/<your-item>"],
     }
+    logo = _site_logo(snapshot, pages)
+    if logo:
+        payload["logo"] = logo
+    description = _site_description(pages) or _brand_definition(pages, brand)
+    if description:
+        payload["description"] = description
+    if facts.get("address"):
+        payload["address"] = {"@type": "PostalAddress", "streetAddress": facts["address"]}
+        if facts.get("postal_code"):
+            payload["address"]["postalCode"] = facts["postal_code"]
+    if facts.get("telephone"):
+        payload["telephone"] = facts["telephone"]
+    if same_as:
+        payload["sameAs"] = same_as
     return '<script type="application/ld+json">\n{}\n</script>'.format(
         json.dumps(payload, indent=2, ensure_ascii=False))
 
 
-def _check_product(result, by_type):
+def _contact_facts_for_snippet(pages):
+    """Real-world location facts the crawl already extracted.
+
+    Only values the site *declared* are treated as safe to paste. A telephone
+    number in a `tel:` link is declared; one scraped out of prose by a regular
+    expression is a guess, and a guess does not belong in structured data that
+    a machine will repeat as fact. The street and postcode are pattern matches,
+    so they go in with an instruction to check them rather than silently.
+    """
+    out = {}
+    for page in pages:
+        facts = page.get("contact_facts") or {}
+        if not out.get("telephone") and facts.get("declared_phones"):
+            out["telephone"] = facts["declared_phones"][0]
+        if not out.get("address") and facts.get("street_hint"):
+            out["address"] = facts["street_hint"]
+        if not out.get("postal_code") and facts.get("postcode_hint"):
+            out["postal_code"] = facts["postcode_hint"]
+        if facts.get("has_address"):
+            out["has_address"] = True
+    return out
+
+
+def _check_product(result, by_type, brand):
     result.check("product-markup")
     products = by_type.get("product", [])
     if not products:
@@ -371,7 +485,7 @@ def _check_product(result, by_type):
                       "an assistant for. Stated only as styled text, they are ambiguous; stated "
                       "as Offer properties, they are unambiguous data.",
             affected_pages=[p["url"] for p in without],
-            snippet=_product_snippet(products[0]),
+            snippet=_product_snippet(products[0], (brand or {}).get("name") or ""),
         )
         return
 
@@ -407,7 +521,7 @@ def _check_product(result, by_type):
             rationale="A Product without a priced Offer answers 'what is this' but "
                       "not 'what does it cost', which is the question being asked.",
             affected_pages=[p["url"] for p, _ in incomplete],
-            snippet=_product_snippet(products[0]),
+            snippet=_product_snippet(products[0], (brand or {}).get("name") or ""),
         )
     else:
         result.skip("product-markup",
@@ -415,7 +529,15 @@ def _check_product(result, by_type):
                     "Offer".format(len(products)))
 
 
-def _product_snippet(page):
+def _product_snippet(page, brand_name=""):
+    """One product's markup, filled in from that product's own page.
+
+    `image` and `sku` used to be `<absolute image URL>` and `<your SKU>`. On a
+    site with no images at all the first is unsatisfiable, and a two-person
+    pottery may have no SKUs - so the snippet demanded two values that could
+    not be supplied, while our own checks never looked at either. A key we
+    cannot fill and do not grade does not belong in paste-ready code.
+    """
     prices = find_prices(page.get("body_text", ""))
     number = ""
     currency = "USD"
@@ -433,10 +555,6 @@ def _product_snippet(page):
         "@context": "https://schema.org",
         "@type": "Product",
         "name": (page.get("headings", {}).get("h1") or [page.get("title", "")])[0] or "<product name>",
-        "description": page.get("meta_description") or "<one sentence describing the product>",
-        "image": (page.get("og") or {}).get("og:image", "<absolute image URL>"),
-        "sku": "<your SKU>",
-        "brand": {"@type": "Brand", "name": "<brand name>"},
         "offers": {
             "@type": "Offer",
             "url": page["url"],
@@ -445,6 +563,16 @@ def _product_snippet(page):
             "availability": "https://schema.org/InStock",
         },
     }
+    # Optional keys only when the site actually supplies them. A key we cannot
+    # fill and do not grade does not belong in code labelled paste-ready.
+    if page.get("meta_description"):
+        payload["description"] = page["meta_description"]
+    image = (page.get("og") or {}).get("og:image")
+    if image:
+        payload["image"] = image
+    if brand_name:
+        payload["brand"] = {"@type": "Brand", "name": brand_name}
+
     return '<script type="application/ld+json">\n{}\n</script>'.format(
         json.dumps(payload, indent=2, ensure_ascii=False))
 
@@ -574,8 +702,20 @@ def _check_faq(result, by_type):
     )
 
 
+# Enough for any real FAQ page. It used to be three, undisclosed, so a page
+# with five questions produced markup covering three - and the FAQ check then
+# passed that markup, so the truncation was never caught by anything.
+FAQ_SNIPPET_MAX = 20
+
+
 def _faq_snippet(page):
-    sections = (page.get("sections") or [])[:3]
+    """Every question on the page, not the first three.
+
+    The instruction printed above this snippet says "listing each question and
+    its answer text verbatim". The snippet did not do what its own instruction
+    said: it dropped 40% of a five-question page, with no ellipsis and no note.
+    """
+    sections = (page.get("sections") or [])[:FAQ_SNIPPET_MAX]
     entities = []
     for section in sections:
         entities.append({

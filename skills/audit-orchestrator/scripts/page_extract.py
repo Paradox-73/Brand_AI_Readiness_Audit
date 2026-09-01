@@ -12,16 +12,8 @@ import re
 from urllib.parse import urljoin, urlparse
 
 from audit_common import (
-    detect_page_type,
-    find_prices,
-    main_text,
-    make_soup,
-    normalise_url,
-    same_site,
-    sentences,
-    truncate,
-    visible_text,
-    word_count,
+    detect_challenge, detect_page_type, find_prices, main_text, make_soup,
+    normalise_url, same_site, sentences, truncate, visible_text, word_count,
 )
 
 # Root containers frameworks mount into. An empty one means the delivered HTML
@@ -106,18 +98,43 @@ AS_OF_YEAR_RE = re.compile(
     r"|valid (?:for|until|through)|figures? for|data (?:from|for)|prices? (?:as of|for)"
     r"|edition|guide for|report for)\s+(?:\w+\s+){0,2}((?:19|20)\d{2})\b", re.I)
 
-PHONE_RE = re.compile(r"(?:\+\d{1,3}[\s.-]?)?(?:\(\d{2,4}\)[\s.-]?)?\d{3,4}[\s.-]?\d{3,4}(?:[\s.-]?\d{2,4})?")
+# `\b` before a leading zero used to leave it behind: "01904 555 812" came out
+# as "1904 555 812", a different number, which then failed to match the same
+# number written elsewhere on the site.
+PHONE_RE = re.compile(
+    r"(?<![\d/])"
+    r"(?:\+\d{1,3}[\s.-]?)?"
+    r"(?:\(0?\d{2,5}\)|0?\d{2,5})"
+    r"[\s.-]?\d{3,4}[\s.-]?\d{2,4}"
+    r"(?![\d/])")
 EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]{2,}\b")
+
+# Alphanumeric formats first. A bare five- or six-digit run is also what a
+# phone number looks like, and searching left to right on "…YO1 9TT. 01904 555
+# 812." with the US branch first returned the area code as the postcode. The
+# numeric branches now refuse to match anything sitting inside a longer run of
+# digits and spaces, which is what a phone number is.
 POSTCODE_HINT_RE = re.compile(
-    r"\b(?:\d{5}(?:-\d{4})?"                       # US
-    r"|[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}"          # UK
-    r"|\d{6}"                                      # IN / SG
-    r"|[A-Z]\d[A-Z]\s*\d[A-Z]\d)\b"                # CA
+    r"\b(?:[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}"       # UK
+    r"|[A-Z]\d[A-Z]\s*\d[A-Z]\d"                    # CA
+    r"|(?<!\d)\d{5}(?:-\d{4})?(?![\s.-]?\d{3})(?!\d)"   # US, not a phone's area code
+    r"|(?<!\d)\d{6}(?![\s.-]?\d{3})(?!\d))\b"           # IN / SG, likewise
 )
+
+# The original required a street-type word, so "41 Walmgate, York" matched
+# nothing - and neither does most of the UK, where the street type is often
+# part of the name (gate, row, mews, close) or absent entirely. The second
+# branch accepts a number followed by capitalised words when a postcode follows
+# close behind, which is what an address looks like when the word "Street" is
+# not in it.
 STREET_HINT_RE = re.compile(
     r"\b\d+[A-Za-z]?\s+[\w.'-]+(?:\s+[\w.'-]+){0,3}\s+"
     r"(?:street|st\.?|road|rd\.?|avenue|ave\.?|lane|ln\.?|drive|dr\.?|boulevard|blvd\.?|"
-    r"way|court|ct\.?|place|pl\.?|suite|ste\.?|floor|marg|nagar|colony)\b",
+    r"way|court|ct\.?|place|pl\.?|suite|ste\.?|floor|marg|nagar|colony|gate|row|mews|"
+    r"close|terrace|crescent|parade|walk|green|hill|square|sq\.?|parkway|pkwy\.?|"
+    r"highway|hwy\.?|circle|cir\.?|trail|loop|alley|plaza|park|gardens|grove)\b"
+    r"|\b\d+[A-Za-z]?\s+[A-Z][\w.'-]+(?:,?\s+[A-Z][\w.'-]+){0,3}"
+    r"(?=[,\s]+(?:[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}|[A-Z]\d[A-Z]\s*\d[A-Z]\d|\d{5}))",
     re.I,
 )
 
@@ -438,10 +455,55 @@ def main_region(soup):
     return soup.select_one(MAIN_REGION_SELECTOR) or soup.body or soup
 
 
+# Semantic navigation first. Plenty of real sites - including ones that predate
+# `<nav>` and plenty that simply never adopted it - put their menu in a div with
+# a class saying so, and we reported those as having no navigation at all: an
+# eight-item menu in `<div class="menu mainmenu">` was read as "the primary
+# navigation has 0 items", at high severity, on a site anyone can see has one.
+NAV_SELECTOR = (
+    "nav, header nav, [role=navigation], "
+    "[class*=mainmenu], [class*=main-menu], [class*=main-nav], [class*=mainnav], "
+    "[class*=navbar], [class*=nav-menu], [class*=menu-main], [class*=site-nav], "
+    "[class*=primary-nav], [class*=topnav], [class*=top-nav], "
+    "[id*=mainmenu], [id*=main-menu], [id*=main-nav], [id*=navbar], [id*=site-nav]"
+)
+
+# Minimum links before an unlabelled block counts as navigation. Below this it
+# is a group of related links, not a menu.
+NAV_SHAPE_MIN_LINKS = 3
+
+
+def _nav_by_shape(soup):
+    """Blocks that behave like a menu on sites that never say `nav`.
+
+    Only consulted when nothing semantic matched, and only near the top of the
+    document, so a footer link list or a body paragraph full of links is not
+    mistaken for the primary navigation.
+    """
+    body = soup.body or soup
+    candidates = []
+    for node in body.find_all(["ul", "div", "header"], recursive=True)[:60]:
+        anchors = node.find_all("a", href=True)
+        if len(anchors) < NAV_SHAPE_MIN_LINKS:
+            continue
+        # A menu is mostly short labels, not sentences.
+        labels = [_text_or_empty(a) for a in anchors]
+        if not labels or sum(len(l) for l in labels) / float(len(labels)) > 40:
+            continue
+        if any(len(l) > 80 for l in labels):
+            continue
+        candidates.append((len(anchors), node))
+        if len(candidates) >= 3:
+            break
+    return [node for _count, node in candidates[:1]]
+
+
 def _links(soup, base, origin):
     internal, external, nav, footer = [], [], [], []
     main_region_node = main_region(soup)
-    nav_nodes = soup.select("nav, header nav, [role=navigation]")
+    nav_nodes = soup.select(NAV_SELECTOR)
+    if not nav_nodes:
+        nav_nodes = _nav_by_shape(soup)
     footer_nodes = soup.select("footer, [role=contentinfo]")
 
     def collect(container, bucket):
@@ -647,65 +709,6 @@ def _pdf_links(soup, base):
         if len(out) >= 20:
             break
     return out
-
-
-# --------------------------------------------------------------------------
-# Bot-manager challenge pages
-#
-# A bot manager that answers 403 is easy: the status says the crawler was
-# refused, and `crawl-access-audit` reports it as a bot block. The dangerous
-# case is the one that answers 2xx.
-#
-# Measured on real commercial homepages: one returns HTTP 202 with 3,962 bytes
-# of HTML and *zero* characters of readable text; another returns 200 with
-# 2,857 bytes and thirty-two characters. Both are verification pages. To every
-# content check they look like a site that shipped an empty page - so the audit
-# would report a JavaScript shell, no structured data, no quotable fact and
-# thin content, four confident findings about a homepage that is fine.
-#
-# That is the same error as calling a refused link a dead link, in a different
-# costume, and it fires on exactly the bot-managed commercial sites this
-# marketplace is aimed at.
-#
-# Detection is by vendor marker rather than by shape, because "almost no text"
-# is also what a genuine JavaScript shell looks like, and that is a real
-# finding we must keep reporting. These strings appear in the challenge
-# scaffolding itself and not in ordinary pages; the text ceiling is a second
-# gate so that an article *about* bot management is never mistaken for one.
-# --------------------------------------------------------------------------
-
-CHALLENGE_MARKERS = {
-    "AWS WAF": ("awswafcookiedomainlist", "reportchallengeerror", "__challenge_"),
-    "Akamai Bot Manager": ("sec-if-cpt-container", "sec-bc-tile-container",
-                           "scf-akamai-logo", "behavioral-content"),
-    "Cloudflare": ("__cf_chl", "cf_chl_opt", "cf-chl-", "just a moment...",
-                   "attention required! | cloudflare"),
-    "DataDome": ("captcha-delivery", "datadome-", "dd_cookie"),
-    "PerimeterX": ("perimeterx", "px-captcha", "_pxhd"),
-    "Imperva Incapsula": ("_incapsula_resource", "incapsula incident id"),
-    "Distil": ("distil_r_captcha",),
-}
-
-# Above this much readable text the page carried content, whatever else is in
-# it. Real homepages we measured run 5,000 to 10,000 characters; the challenge
-# pages ran 0 and 32.
-CHALLENGE_TEXT_CEILING = 800
-
-
-def detect_challenge(html, page_text):
-    """Which bot manager served a verification page here, if any.
-
-    Returns the vendor name, or None. The name matters: the fix is to
-    allow-list crawlers in that product, and naming it saves the site owner
-    the first hour of the job.
-    """
-    if len(page_text or "") > CHALLENGE_TEXT_CEILING:
-        return None
-    low = (html or "").lower()
-    for vendor, markers in sorted(CHALLENGE_MARKERS.items()):
-        if any(marker in low for marker in markers):
-            return vendor
-    return None
 
 
 def _spa_shell(soup, html, page_text):
@@ -920,6 +923,16 @@ def _social_profiles(external_links, jsonld):
     return dict(sorted(found.items()))
 
 
+def _is_hidden(node):
+    """Markup that says this element is not displayed."""
+    if node.get("hidden") is not None:
+        return True
+    if str(node.get("aria-hidden", "")).lower() == "true":
+        return True
+    style = (node.get("style") or "").replace(" ", "").lower()
+    return "display:none" in style or "visibility:hidden" in style or "opacity:0" in style
+
+
 def _interstitial(soup):
     markup = str(soup)[:200000].lower()
     cookie = [hint for hint in COOKIE_BANNER_HINTS if hint in markup]
@@ -927,15 +940,35 @@ def _interstitial(soup):
     # Substring class matching flagged 18 of 20 pages on a real retail site,
     # because `class="modal-opener"` contains both "modal" and "open". Match
     # whole class tokens, and require the element to be genuinely displayed.
+    # Markup that states it is open.
     blocking = bool(soup.select(
-        'dialog[open], [aria-modal="true"][role="dialog"], '
+        'dialog[open], '
         '[class~="modal"][class~="open"], [class~="modal"][class~="is-open"], '
         '[class~="overlay"][class~="active"], [class~="modal"][class~="show"]'
     ))
-    for node in soup.select('[aria-modal="true"][role="dialog"]'):
-        # A dialog explicitly hidden on first paint covers nothing.
-        if node.get("hidden") is not None or "display:none" in (node.get("style") or "").replace(" ", ""):
-            blocking = False
+
+    # An `aria-modal` dialog is NOT evidence on its own. Every dialog component
+    # in every component library carries `role="dialog" aria-modal="true"` in
+    # the DOM while closed, so presence alone reported 22 pages of one real
+    # site as covering their content the moment a visitor arrives. It counts
+    # only when it is not hidden and something else says it is showing.
+    #
+    # The previous loop also cleared `blocking` outright when the *last* such
+    # node was hidden, discarding a genuine overlay found by the selectors
+    # above.
+    for node in soup.select('[aria-modal="true"][role="dialog"], [role="dialog"]'):
+        if _is_hidden(node):
+            continue
+        tokens = {c.lower() for c in (node.get("class") or [])}
+        identity = " ".join(tokens | {str(node.get("id") or "").lower()})
+        if tokens & {"open", "is-open", "active", "show", "shown", "visible", "is-visible"}:
+            blocking = True
+        # A consent wall or a newsletter interstitial is a different animal
+        # from a component-library dialog: it is displayed on first paint by
+        # design, which is the whole point of it. Named by its own class, and
+        # not hidden, it counts.
+        elif any(hint in identity for hint in COOKIE_BANNER_HINTS + MODAL_HINTS):
+            blocking = True
     return {
         "cookie_banner_hints": cookie[:5],
         "modal_hints": modal[:5],

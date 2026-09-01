@@ -291,7 +291,7 @@ def test_a_low_rate_is_not_reported_either_way():
 # that is fine.
 # --------------------------------------------------------------------------
 
-from page_extract import CHALLENGE_TEXT_CEILING, detect_challenge  # noqa: E402
+from audit_common import CHALLENGE_TEXT_CEILING, detect_challenge  # noqa: E402
 
 AWS_WAF = ('<html><head><title></title><script>window.awsWafCookieDomainList = '
            "['x']; function reportChallengeError(){}</script></head><body></body></html>")

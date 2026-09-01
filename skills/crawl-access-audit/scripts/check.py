@@ -52,11 +52,11 @@ if _SHARED is None:
     ]))
 sys.path.insert(0, _SHARED)
 
-from page_extract import CHALLENGE_TEXT_CEILING  # noqa: E402
 from audit_common import (  # noqa: E402
-    CONTENT_TYPES, example_urls, explain_fetch_error, Fetcher, FetchError,
-    link_verdict, load_snapshot, pages_of, pct, plural, REFUSED_STATUS,
-    sample, SkillResult, strip_www, USER_AGENT
+    CHALLENGE_TEXT_CEILING, CONTENT_TYPES, example_urls,
+    explain_fetch_error, Fetcher, FetchError, link_verdict, load_snapshot,
+    pages_of, pct, plural, REFUSED_STATUS, sample, SkillResult, strip_www,
+    USER_AGENT
 )
 from robots_parser import (  # noqa: E402
     blocks_entire_site, group_for, is_disallowed, substantive_disallows,
@@ -112,6 +112,27 @@ def run(snapshot, allow_network=True):
             fetcher = Fetcher(max_requests=MAX_EXTRA_REQUESTS)
         except FetchError:
             fetcher = None
+
+    # When the host itself never answered, everything downstream is a
+    # restatement of that one fact. The entrypoint's SKILL.md says so - "stop
+    # and report one critical finding" - and this did not: auditing a domain
+    # that does not resolve produced four findings, including "No XML sitemap
+    # is available" and "robots.txt could not be fetched" about a hostname with
+    # no DNS record, one of them carrying an effort estimate of several days of
+    # development time to fix a typo.
+    home_url = origin.rstrip("/") + "/"
+    home = next((p for p in pages if p["url"] == home_url), None)
+    if home is not None and home.get("status") is None and not pages_of(snapshot):
+        _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher)
+        for name in ("robots-txt-reachable", "robots-blocks-all-crawlers",
+                     "robots-blocks-ai-answer-crawlers", "sitemap-present",
+                     "sitemap-parses", "sitemap-urls-resolve", "canonical-targets",
+                     "bot-manager-user-agent-comparison", "https-transport",
+                     "bot-manager-challenge-page", "llms-txt-presence"):
+            result.skip(name, "the host did not respond at all, so nothing else about it "
+                              "could be examined; fixing that is the only action available")
+        result.signal("host_unreachable", True)
+        return result
 
     _check_challenge_pages(result, snapshot)
     _check_robots_reachable(result, robots)
@@ -496,6 +517,7 @@ def _check_sitemaps(result, snapshot, fetcher):
 
 def _check_sitemap_urls_resolve(result, snapshot, reachable, fetcher):
     """Find sitemap entries that 404, preferring statuses the crawl already has."""
+    result.check("sitemap-urls-resolve")
     known = {p["url"]: p.get("status") for p in snapshot.get("pages") or []}
     listed = []
     for record in reachable:
@@ -877,6 +899,7 @@ def _check_meta_refresh(result, snapshot, ok_pages):
 
 
 def _check_canonicals(result, snapshot, ok_pages, fetcher=None):
+    result.check("canonical-targets")
     origin_host = strip_www(urlparse(snapshot["origin"]).netloc.lower())
     known_status = {p["url"]: p.get("status") for p in snapshot.get("pages") or []}
     off_domain, broken = [], []

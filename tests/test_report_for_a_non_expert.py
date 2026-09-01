@@ -72,8 +72,11 @@ def test_a_brand_with_no_identity_and_no_corroboration_is_not_told_it_is_sound()
 def test_that_verdict_names_the_pattern_rather_than_counting():
     findings = [{"root_cause": "no-entity-definition", "severity": "medium"},
                 {"root_cause": "weak-corroboration", "severity": "medium"}]
-    verdict = compose._verdict(COUNTS, findings, {}, {"profile_breadth": 1})
-    assert "nothing about this brand to repeat" in verdict
+    verdict = compose._verdict(COUNTS, findings, {}, {"profile_breadth": 1}, "A Brand")
+    assert "no fact about this brand it can safely repeat" in verdict
+    # Specific to this site, not a template: it names the brand and the gap.
+    assert "A Brand" in verdict
+    assert "no page states in one sentence what it is" in verdict
 
 
 def test_a_site_that_does_declare_itself_gets_the_ordinary_verdict():
