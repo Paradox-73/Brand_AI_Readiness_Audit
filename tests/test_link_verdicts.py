@@ -276,3 +276,103 @@ def test_a_low_rate_is_not_reported_either_way():
     result = _rate([403], good=19)   # 1 of 21 = 4.8%, under the 10% threshold
     assert _rate_finding(result) is None
     assert any("below the 10% threshold" in s["reason"] for s in result.not_applicable)
+
+
+# --------------------------------------------------------------------------
+# Bot-manager challenge pages
+#
+# The 403 case is easy: the status says the crawler was refused. This is the
+# one that answers 2xx. Measured on real commercial homepages: one returns
+# HTTP 202 with 3,962 bytes of HTML and zero characters of readable text,
+# another returns 200 with 2,857 bytes and thirty-two. Both are verification
+# pages. To every content check they look like a site that shipped an empty
+# page, so the audit would report a JavaScript shell, missing structured data,
+# no quotable fact and thin content - four confident findings about a homepage
+# that is fine.
+# --------------------------------------------------------------------------
+
+from page_extract import CHALLENGE_TEXT_CEILING, detect_challenge  # noqa: E402
+
+AWS_WAF = ('<html><head><title></title><script>window.awsWafCookieDomainList = '
+           "['x']; function reportChallengeError(){}</script></head><body></body></html>")
+AKAMAI = ('<html><body><script src="/QU4/n/N/x"></script>'
+          '<div id="sec-if-cpt-container"><div class="behavioral-content">'
+          '<div id="sec-bc-tile-container"></div></div></div></body></html>')
+
+
+@pytest.mark.parametrize("html,vendor", [
+    (AWS_WAF, "AWS WAF"),
+    (AKAMAI, "Akamai Bot Manager"),
+    ('<html><body>__cf_chl_opt</body></html>', "Cloudflare"),
+    ('<html><body>_Incapsula_Resource</body></html>', "Imperva Incapsula"),
+    ('<html><body>px-captcha</body></html>', "PerimeterX"),
+])
+def test_a_challenge_page_is_recognised_and_the_vendor_named(html, vendor):
+    """Naming the vendor is the point: the fix is a rule in that product."""
+    assert detect_challenge(html, "") == vendor
+
+
+def test_an_article_about_bot_management_is_not_a_challenge():
+    """The text ceiling is the second gate, and this is what it is for."""
+    prose = "PerimeterX and DataDome are bot management vendors. " * 60
+    assert detect_challenge("<html><body>{}</body></html>".format(prose), prose) is None
+
+
+def test_a_genuinely_empty_page_is_not_called_a_challenge():
+    """An empty page is a real finding - a JavaScript shell - and must stay one."""
+    assert detect_challenge("<html><body></body></html>", "") is None
+
+
+def test_the_text_ceiling_is_what_decides_a_borderline_page():
+    assert detect_challenge(AWS_WAF, "x" * (CHALLENGE_TEXT_CEILING - 1)) == "AWS WAF"
+    assert detect_challenge(AWS_WAF, "x" * (CHALLENGE_TEXT_CEILING + 1)) is None
+
+
+def test_challenge_pages_are_kept_out_of_the_content_checks():
+    from audit_common import pages_of
+    snapshot = {"pages": [
+        {"url": HOME, "status": 200, "page_type": "home"},
+        {"url": HOME + "b", "status": 200, "page_type": "other",
+         "challenge": "Akamai Bot Manager"},
+    ]}
+    assert [p["url"] for p in pages_of(snapshot)] == [HOME]
+
+
+def test_crawl_access_can_still_see_them():
+    """It has to: for that skill the challenge is the finding."""
+    from audit_common import pages_of
+    snapshot = {"pages": [
+        {"url": HOME, "status": 200, "page_type": "home", "challenge": "AWS WAF"},
+    ]}
+    assert pages_of(snapshot) == []
+    assert len(pages_of(snapshot, include_challenged=True)) == 1
+
+
+def _challenge_result(pages):
+    snapshot = {"origin": "https://an-invented-host.test", "pages": pages,
+                "crawl": {"head_supported": True}}
+    result = SkillResult("crawl-access-audit")
+    access._check_challenge_pages(result, snapshot)
+    return result
+
+
+def test_a_walled_site_is_reported_as_a_bot_block_not_as_empty_pages():
+    pages = [{"url": HOME + str(i), "status": 200, "page_type": "other",
+              "challenge": "Akamai Bot Manager"} for i in range(6)]
+    finding = next(f for f in _challenge_result(pages).findings)
+    assert finding["root_cause"] == "bot-manager-block"
+    assert "Akamai Bot Manager" in finding["title"]
+    assert finding["severity"] == "critical"
+
+
+def test_a_partly_walled_site_is_high_not_critical():
+    pages = [{"url": HOME + str(i), "status": 200, "page_type": "other"} for i in range(8)]
+    pages += [{"url": HOME + "w", "status": 200, "page_type": "other", "challenge": "AWS WAF"}]
+    finding = next(f for f in _challenge_result(pages).findings)
+    assert finding["severity"] == "high"
+
+
+def test_a_clean_site_says_it_checked_and_found_none():
+    result = _challenge_result([{"url": HOME, "status": 200, "page_type": "home"}])
+    assert result.findings == []
+    assert any("verification page" in s["reason"] for s in result.not_applicable)

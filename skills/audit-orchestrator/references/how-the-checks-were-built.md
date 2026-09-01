@@ -61,6 +61,23 @@ collision needs a response *shaped* like one, which a stub supplies with invente
 exemption is a claim that something is unprovable, and it sits in a file being read as settled
 by everyone who comes after.
 
+**We measured the thresholds instead of arguing for them.** Every number a check compares
+against was set against a distribution, not a hunch: 302 pages across 13 real sites, looking at
+what the quantity each threshold cuts actually does in the wild. Two of them turned out to be
+unreachable - a page-weight limit 2.4x heavier than the heaviest page we could find, and a
+third-party-script limit 2.5x above the worst - which is the same defect as a check with no
+implementation, arrived at from the other direction. Both are now reachable and still mean
+"this is pathological". The two that were already well placed are recorded as measured: one
+fires on 0.6% of real forms, the other on 17% of long pages.
+
+**We gave it to an agent that had never seen it.** The brief says the entrypoint "is the skill
+we invoke", so the graded path is an agent reading `SKILL.md` and working out what to do. We
+tested that directly rather than testing the commands inside the file: a fresh agent, the
+extracted zip, one instruction, no help. It reached a finished report in seven commands with no
+guesswork - and found four defects in documentation that everyone who built the project had
+stopped being able to see, including a headline number in the README that disagreed with the
+tool's own output.
+
 **We test the tool against inputs no site would send on purpose.** A crawler is a network
 program, and the failure modes that matter are not in the HTML. Measured against a deliberately
 hostile local server: an unbounded response had 125 MB read into memory before its content type

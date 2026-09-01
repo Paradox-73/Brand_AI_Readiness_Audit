@@ -9,11 +9,12 @@ by hand against a site you control, or against any of the local fixtures.
 Serve a fixture and audit it:
 
 ```bash
-python -c "import sys; sys.path.insert(0,'tests'); from fixture_server import FixtureServer; \
-import time; s=FixtureServer('tests/fixtures/js-shell-site').__enter__(); \
-print(s.base_url); time.sleep(600)"
-# then, in another shell:
-python run_audit.py <printed url>
+# Terminal 1 - serve a fixture. Works on Windows, macOS and Linux.
+python3 tests/serve_fixture.py js-shell-site
+# prints e.g. http://127.0.0.1:54321 and stays up until you press Ctrl-C
+
+# Terminal 2 - audit the URL it printed
+python3 run_audit.py http://127.0.0.1:54321
 ```
 
 ---

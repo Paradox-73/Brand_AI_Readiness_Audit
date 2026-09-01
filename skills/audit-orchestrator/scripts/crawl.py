@@ -806,8 +806,9 @@ def main(argv=None):
         render=False if args.no_render else (True if args.render else "auto"),
     )
     crawl_info = snapshot["crawl"]
-    eprint("crawled {} pages ({} ok) in {}s -> {}".format(
-        crawl_info["pages_crawled"], crawl_info["pages_ok"], crawl_info["elapsed_s"], args.out))
+    eprint("crawled {} page{} ({} ok) in {}s -> {}".format(
+        crawl_info["pages_crawled"], "" if crawl_info["pages_crawled"] == 1 else "s",
+        crawl_info["pages_ok"], crawl_info["elapsed_s"], args.out))
     return 0
 
 

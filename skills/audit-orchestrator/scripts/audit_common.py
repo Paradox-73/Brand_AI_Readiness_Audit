@@ -874,11 +874,27 @@ def load_snapshot(path):
     return snapshot
 
 
-def pages_of(snapshot, types=None, content_only=False, ok_only=True):
-    """Select pages from a snapshot with the usual filters applied."""
+def pages_of(snapshot, types=None, content_only=False, ok_only=True,
+             include_challenged=False):
+    """Select pages from a snapshot with the usual filters applied.
+
+    Pages where a bot manager served a verification page instead of the content
+    are excluded by default. They answer 2xx and carry almost no text, so to
+    every content check they look like a site that shipped an empty page - and
+    the audit would report a JavaScript shell, absent structured data, no
+    quotable fact and thin content, four confident findings about a homepage
+    that is fine. A challenge is a fact about the crawler's reception, not
+    about the site, which is the same rule that stops a refused link being
+    reported as a dead one.
+
+    `crawl-access-audit` passes `include_challenged=True`, because for that
+    skill the challenge is the finding.
+    """
     out = []
     for page in snapshot.get("pages", []):
         if ok_only and page.get("status") != 200:
+            continue
+        if not include_challenged and page.get("challenge"):
             continue
         if content_only and page.get("page_type") not in CONTENT_TYPES:
             continue

@@ -510,3 +510,31 @@ def test_the_checkout_keeps_one_copy_of_the_shared_library():
     assert len(copies) == 1, (
         "the checkout should hold exactly one audit_common.py; found {}. "
         "package.py vendors the copies at build time.".format(copies))
+
+
+def test_no_check_name_is_registered_by_two_skills():
+    """One check, one owner - the same rule the root causes already follow.
+
+    `sitemap-lastmod-coverage` was registered by both crawl-access-audit and
+    freshness-corroboration-audit. crawl-access even skipped it with the note
+    that the other skill owns it, and registered it anyway. The report then
+    listed 71 check entries for 70 distinct checks, so the README's count and
+    the report's own count disagreed, and there was no way to tell which was
+    wrong from either document alone.
+
+    The existing companion test guards root causes. Check names had no such
+    guard, which is why this survived.
+    """
+    owners = {}
+    for name in sorted(os.listdir(SKILLS_DIR)):
+        script = os.path.join(SKILLS_DIR, name, "scripts", "check.py")
+        if not os.path.isfile(script):
+            continue
+        with open(script, encoding="utf-8") as handle:
+            source = handle.read()
+        for check in set(re.findall(r'result\.check\(\s*"([a-z0-9-]+)"', source)):
+            owners.setdefault(check, []).append(name)
+
+    shared = {c: skills for c, skills in owners.items() if len(skills) > 1}
+    assert not shared, "these checks are registered by more than one skill: " + "; ".join(
+        "{} -> {}".format(c, ", ".join(s)) for c, s in sorted(shared.items()))

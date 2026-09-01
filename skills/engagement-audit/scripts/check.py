@@ -68,12 +68,45 @@ NAV_MIN = 3                   # under 3 top-level items leaves a visitor nowhere
                               # There is deliberately no upper bound: a 29-item megamenu is
                               # normal on real retail sites and costs a machine nothing
 MIN_MAIN_LINKS = 1            # a cul-de-sac is a page with no way onward at all, not a page with few
-BROKEN_LINK_SAMPLE = 20       # enough to establish a rate without hammering the site
+# The five numbers below were measured, not reasoned, across 302 pages on 13
+# real sites (open source, government, health, museum, charity, commerce).
+# Two of them turned out to be unreachable: they sat so far above anything the
+# web actually does that no page could ever have tripped them, which is the
+# same defect as a check with no implementation - present in the report's list,
+# incapable of firing.
+#
+#   quantity                        median      p99        max    fired at old value
+#   page weight (HTML+inline)       37,510   926,112  1,258,775   0 of 302  <- 3 MB
+#   third-party script hosts             1         3         10   0 of 302  <- 25
+#   required form fields                 1         5         21   2 of 346
+#   words per heading (long pages)    83.7       998     18,053  21 of 123
+
+BROKEN_LINK_SAMPLE = 40
+# Forty, not twenty. A site carries a median of 292 internal link targets the
+# crawl does not itself fetch, so twenty was a 7% sample and the resulting
+# "X% of links are broken" rate moved in steps of five points. Forty halves the
+# step and costs 20 more HEAD requests, about 10 seconds of a budget with 140
+# to spare.
 BROKEN_LINK_HIGH = 0.2        # a fifth of links broken is a maintenance failure, not an accident
-PAGE_WEIGHT_BYTES = 3_000_000 # 3 MB of HTML+inline assets is extreme, not merely heavy
-THIRD_PARTY_SCRIPT_LIMIT = 25 # beyond 25 third-party hosts, first paint is not under the site's control
-FORM_FIELD_LIMIT = 8          # more than 8 required fields on a lead form measurably suppresses completion
-WALL_OF_TEXT_WORDS = 300      # a long page with no subheading every ~300 words cannot be skimmed
+
+PAGE_WEIGHT_BYTES = 2_000_000
+# Two megabytes, down from three. The heaviest of 302 real pages was 1.26 MB
+# and the heaviest homepage we have ever measured was 1.38 MB, so 3 MB was
+# 2.4x anything observed and could not fire. Two megabytes is still 1.45x the
+# worst real page - this stays a marker of pathology, not of a heavy page -
+# but it is now reachable. It must also stay below MAX_RESPONSE_BYTES (5 MB),
+# or a page truncated at the read cap would weigh exactly the cap; a test
+# asserts that ordering.
+
+THIRD_PARTY_SCRIPT_LIMIT = 15
+# Fifteen, down from twenty-five. Across 302 pages the median page loads
+# scripts from one third-party host, the 99th percentile from three, and the
+# worst from ten. Twenty-five was unreachable. Fifteen sits half again above
+# the worst page measured, so it still means "this is unusual" rather than
+# "this is a normal amount of tag manager".
+
+FORM_FIELD_LIMIT = 8          # measured: fires on 2 of 346 real forms. Reachable and rare.
+WALL_OF_TEXT_WORDS = 300      # measured: fires on 21 of 123 long pages (17%). Reachable and not noisy.
 LONG_PAGE_WORDS = 700         # below this a page does not need internal subheadings
 
 GENERIC_H1 = frozenset({

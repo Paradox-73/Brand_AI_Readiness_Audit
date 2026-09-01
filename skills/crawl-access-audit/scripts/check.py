@@ -52,6 +52,7 @@ if _SHARED is None:
     ]))
 sys.path.insert(0, _SHARED)
 
+from page_extract import CHALLENGE_TEXT_CEILING  # noqa: E402
 from audit_common import (  # noqa: E402
     CONTENT_TYPES, REFUSED_STATUS, USER_AGENT, FetchError, Fetcher, SkillResult,
     link_verdict, load_snapshot, pages_of, pct, sample, strip_www,
@@ -89,6 +90,9 @@ MAX_EXTRA_REQUESTS = 16
 # Canonical targets the crawl never reached. Capped low: this is a
 # diagnostic, not a link checker, and the site did not ask to be crawled
 # harder than the budget already allows.
+# Measured across 13 real sites: the median site declares zero canonical
+# targets the crawl did not already fetch, and the worst declared one. Three
+# has never been the binding constraint, and raising it would buy nothing.
 CANONICAL_PROBE_LIMIT = 3
 SITEMAP_PROBE_LIMIT = 8
 
@@ -108,6 +112,7 @@ def run(snapshot, allow_network=True):
         except FetchError:
             fetcher = None
 
+    _check_challenge_pages(result, snapshot)
     _check_robots_reachable(result, robots)
     _check_robots_blocks(result, robots, origin)
     _check_sitemaps(result, snapshot, fetcher)
@@ -127,6 +132,68 @@ def run(snapshot, allow_network=True):
 
 
 # --------------------------------------------------------------------------
+
+def _check_challenge_pages(result, snapshot):
+    """Did a bot manager serve a verification page instead of the content?
+
+    A bot manager that answers 403 is easy - the status says so. This is the
+    one that answers 2xx. Measured on real commercial homepages, one returns
+    HTTP 202 with zero characters of readable text and another returns 200 with
+    thirty-two; both are verification pages carrying a vendor's challenge
+    script. Without this the audit reads them as ordinary pages and reports a
+    JavaScript shell, missing structured data, no quotable fact and thin
+    content - four confident findings about a site that is fine.
+    """
+    result.check("bot-manager-challenge-page")
+    challenged = [p for p in snapshot.get("pages") or [] if p.get("challenge")]
+    if not challenged:
+        result.skip("bot-manager-challenge-page",
+                    "no page answered with a bot-manager verification page in place of its "
+                    "content")
+        return
+
+    fetched = [p for p in snapshot.get("pages") or [] if p.get("status") is not None]
+    vendors = sorted({p["challenge"] for p in challenged})
+    share = pct(len(challenged), len(fetched)) if fetched else 100
+    result.signal("challenge_pages", len(challenged))
+    result.signal("challenge_vendors", vendors)
+
+    result.add(
+        id_hint="bot-manager-serves-a-challenge-page",
+        title="{} is served to crawlers instead of the page itself".format(
+            " and ".join(vendors)),
+        # A wall across the whole site makes every other check meaningless; a
+        # wall on part of it hides that part and no more.
+        severity="critical" if share >= 50 else "high",
+        confidence="high",
+        evidence="{} of {} fetched URLs ({}%) returned a verification page rather than "
+                 "content: a 2xx response carrying {} challenge scaffolding and under {} "
+                 "characters of readable text. Examples: {}. Those pages are excluded from "
+                 "every content check in this report, because they describe the crawler's "
+                 "reception and not the site.".format(
+                     len(challenged), len(fetched), share, " and ".join(vendors),
+                     CHALLENGE_TEXT_CEILING,
+                     "; ".join(p["url"] for p in sorted(challenged, key=lambda x: x["url"])[:3])),
+        mechanism="A", root_cause="bot-manager-block",
+        summary="Allow the AI answer crawlers through {} so they receive the page, not the "
+                "challenge.".format(" and ".join(vendors)),
+        how_to_fix=[
+            "Open the bot-management rules in {} and find the rule that serves a JavaScript "
+            "challenge to unrecognised user agents.".format(" and ".join(vendors)),
+            "Add an allow rule for the AI answer crawlers by user agent - OAI-SearchBot, "
+            "PerplexityBot, ClaudeBot and Google-Extended - keeping your rate limits in place. "
+            "These fetch a page to answer a question; they are not the traffic the rule is for.",
+            "Verify with `curl -A OAI-SearchBot https://your-site/` and confirm you get real "
+            "HTML back rather than a challenge page.",
+        ],
+        effort="medium", owner="developer",
+        rationale="Mechanism A: an assistant fetching this page receives a verification screen. "
+                  "It cannot solve the challenge, so it reads nothing and cites nothing. To the "
+                  "site's analytics this looks like a bot being correctly turned away; to every "
+                  "AI answer engine it looks like a site with no content.",
+        affected_pages=[p["url"] for p in sorted(challenged, key=lambda x: x["url"])],
+    )
+
 
 def _check_robots_reachable(result, robots):
     result.check("robots-txt-reachable")
@@ -340,7 +407,11 @@ def _check_robots_blocks(result, robots, origin):
 def _check_sitemaps(result, snapshot, fetcher):
     result.check("sitemap-present")
     result.check("sitemap-parses")
-    result.check("sitemap-lastmod-coverage")
+    # `sitemap-lastmod-coverage` is deliberately NOT registered here.
+    # freshness-corroboration-audit owns date signals and reports it, and
+    # registering it in both places put one check under two skills: the report
+    # listed 71 entries for 70 distinct checks, so the README's count and the
+    # report's count disagreed and both looked wrong.
     result.check("sitemap-urls-resolve")
 
     sitemaps = snapshot.get("sitemaps") or []
@@ -418,10 +489,6 @@ def _check_sitemaps(result, snapshot, fetcher):
     # Whether the sitemap's dates are meaningful is mechanism D, and
     # freshness-corroboration-audit owns it. This skill owns only whether the
     # sitemap exists, parses, and resolves.
-    result.skip("sitemap-lastmod-coverage",
-                "<lastmod> coverage and recency are assessed by "
-                "freshness-corroboration-audit, which owns date signals")
-
     _check_sitemap_urls_resolve(result, snapshot, reachable, fetcher)
 
 

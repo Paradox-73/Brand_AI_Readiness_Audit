@@ -30,16 +30,28 @@ described badly, or when someone reports "our pages exist but nothing ever cites
 
 ## Procedure
 
-1. **Is robots.txt resolvable?** Fetch it. A 404 means no restrictions and is not a
+1. **Was a verification page served instead of the content?** A bot manager that answers
+   403 announces itself in the status line. The one that answers 2xx does not: measured on
+   real commercial homepages, one returns HTTP 202 with zero characters of readable text and
+   another returns 200 with thirty-two, both carrying a vendor's challenge script. Detect the
+   vendor by its own scaffolding - AWS WAF, Akamai Bot Manager, Cloudflare, DataDome,
+   PerimeterX, Imperva or Distil - gated on the page carrying under 800 characters, so an
+   article *about* bot management is never mistaken for one. Name the vendor in the finding:
+   the fix is an allow rule in that specific product. Those pages are then excluded from
+   every content check, because a challenge describes the crawler's reception and not the
+   site. Without this the audit reports a JavaScript shell, absent structured data, no
+   quotable fact and thin content - four confident findings about a homepage that is fine.
+
+2. **Is robots.txt resolvable?** Fetch it. A 404 means no restrictions and is not a
    defect. A 5xx *is* a defect and a non-obvious one: major crawlers treat a persistent
    5xx on robots.txt as "disallow everything" for weeks. An unreachable file is a medium
    finding. Malformed lines are low: rules above the first `User-agent` line apply to
    nobody, so the policy the site believes it has is not the one crawlers see.
 
-2. **Does robots.txt shut everyone out?** `Disallow: /` under `User-agent: *` with no
+3. **Does robots.txt shut everyone out?** `Disallow: /` under `User-agent: *` with no
    `Allow` carve-out is critical, full stop.
 
-3. **Which AI crawlers are named and blocked?** Split them into two groups, because they
+4. **Which AI crawlers are named and blocked?** Split them into two groups, because they
    are not the same decision:
    - **Answer crawlers** fetch live pages to build a cited answer. Blocking them removes
      the brand from answers. Two or more blocked is high; one is medium.
@@ -47,11 +59,11 @@ described badly, or when someone reports "our pages exist but nothing ever cites
      not a discoverability defect. Report as `info` so it never inflates the counts.
    See `references/ai-crawler-user-agents.md` for the list and the group of each.
 
-4. **Which paths are disallowed?** Ignore admin, cart, checkout, account, login and search
+5. **Which paths are disallowed?** Ignore admin, cart, checkout, account, login and search
    paths — blocking those is correct. Report only disallow rules covering what looks like
    real content.
 
-5. **Sitemaps.** Referenced from robots, or present at `/sitemap.xml`? Does it parse? What
+6. **Sitemaps.** Referenced from robots, or present at `/sitemap.xml`? Does it parse? What
    share of entries carry `<lastmod>`? Do the URLs it advertises resolve? Prefer statuses
    the crawl already collected; probe at most 8 more with HEAD, and only where the site
    answers HEAD honestly - a 403, 405 or 429 is recorded as *unchecked*, never as dead,
@@ -59,7 +71,7 @@ described badly, or when someone reports "our pages exist but nothing ever cites
    sitemap full of dead URLs
    teaches crawlers the sitemap is unreliable.
 
-6. **Bot manager probe.** robots.txt permission means nothing if the edge returns a
+7. **Bot manager probe.** robots.txt permission means nothing if the edge returns a
    challenge page. Fetch the homepage once with the user agent of the first answer crawler
    robots.txt does *not* disallow, and compare the status against the crawl's baseline.
    If it differs, fetch once more to confirm; a single differing response is more often a
@@ -67,17 +79,17 @@ described badly, or when someone reports "our pages exist but nothing ever cites
    robots.txt already disallows every answer crawler, because the robots finding covers it.
    Maximum two requests.
 
-7. **Status and indexability across the crawled pages.** Homepage non-200 is critical. A
+8. **Status and indexability across the crawled pages.** Homepage non-200 is critical. A
    non-200 rate at or above 10% is a systemic problem; below that, stay quiet. Redirect
    chains longer than two hops are low. `noindex` in a meta tag or `X-Robots-Tag` on a
    content page is high: the page is fetched and then thrown away. Canonical tags pointing
    off-domain are high; pointing at a non-200 URL is medium.
 
-8. **Transport and hostnames.** Plain HTTP is medium, skipped for localhost and bare IP
+9. **Transport and hostnames.** Plain HTTP is medium, skipped for localhost and bare IP
    origins. Canonical tags split across `www` and non-`www` are medium, because two
    hostnames serving one site split every signal that would otherwise reinforce it.
 
-9. **`/llms.txt`.** Record presence. Absence is never a finding; it feeds a proactive
+10. **`/llms.txt`.** Record presence. Absence is never a finding; it feeds a proactive
    recommendation instead.
 
 ## Output

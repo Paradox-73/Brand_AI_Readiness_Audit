@@ -34,7 +34,7 @@ Do not use it to change a website. This marketplace only reads and recommends.
 
 ## Procedure
 
-Run `python run_audit.py <url>` to do all of this at once, or follow the steps directly.
+Run `python3 run_audit.py <url>` to do all of this at once, or follow the steps directly.
 
 1. **Normalise the target.** Reduce the input to an origin (`https://example.com`).
    Keep any supplied path as an extra seed page.
@@ -58,7 +58,7 @@ Run `python run_audit.py <url>` to do all of this at once, or follow the steps d
    access findings from robots.txt alone and mark everything else not applicable.
 
 3. **Run the six sub-skills in this order**, each as
-   `python skills/<skill>/scripts/check.py --snapshot snapshot.json --out <skill>.findings.json`:
+   `python3 skills/<skill>/scripts/check.py --snapshot snapshot.json --out <skill>.findings.json`:
 
    1. `crawl-access-audit` — is the crawler let in?
    2. `render-readability-audit` — can a machine read what is delivered?

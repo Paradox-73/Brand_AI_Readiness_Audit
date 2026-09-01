@@ -76,8 +76,20 @@ def main(argv=None):
     python = sys.executable
     started = time.monotonic()
 
-    eprint("[1/3] crawling {} (budget {:.0f}s, max {} pages)".format(
-        args.target, args.budget, args.max_pages))
+    # Say up front whether the browser pass will happen. It changes the
+    # confidence of the JavaScript findings, and previously the only way to
+    # learn which mode you got was to read `render_mode` in the finished JSON.
+    if args.no_render:
+        rendering = "rendering off (--no-render)"
+    else:
+        try:
+            import playwright  # noqa: F401
+            rendering = "Playwright found, rendering on"
+        except ImportError:
+            rendering = ("Playwright not installed, static analysis only - a property of this "
+                         "machine, not a defect in the site")
+    eprint("[1/3] crawling {} (budget {:.0f}s, max {} pages; {})".format(
+        args.target, args.budget, args.max_pages, rendering))
     crawl_command = [python, os.path.join(SCRIPTS, "crawl.py"), args.target,
                      "--out", snapshot, "--budget", str(args.budget),
                      "--max-pages", str(args.max_pages)]

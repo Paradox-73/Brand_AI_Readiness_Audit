@@ -2,7 +2,7 @@
 name: engagement-audit
 description: Check whether a visitor who arrives mid-journey from an AI answer actually stays. Audits homepage orientation and calls to action, primary navigation, dead-end pages with no next step, orphan pages, broken internal links, breadcrumbs, title-body drift, missing site chrome, extreme page weight, intrusive interstitials and autoplay, over-long enquiry forms, mobile viewport and skimmability. Use when analytics show high bounce on AI or search referrals, when traffic arrives but never converts, or as the on-site half of a full AI-readiness audit. This covers what happens after the click, which the discoverability gates do not.
 license: MIT
-compatibility: Requires Python 3.10+ with requests, beautifulsoup4 and lxml. Makes up to 20 extra read-only HEAD requests to test internal links; pass --no-network to make none.
+compatibility: Requires Python 3.10+ with requests, beautifulsoup4 and lxml. Makes up to 40 extra read-only HEAD requests to test internal links; pass --no-network to make none.
 allowed-tools: Bash(python3:*) Bash(python:*) Read
 metadata:
   author: brand-ai-readiness-audit
@@ -52,7 +52,7 @@ folded into the discoverability gates.
    Judge only pages actually visited: a sitemap URL never fetched might well be linked from a
    page outside the crawl budget, and guessing would be a false positive.
 
-5. **Broken internal links.** Reuse statuses the crawl already collected, then HEAD up to 20
+5. **Broken internal links.** Reuse statuses the crawl already collected, then HEAD up to 40
    more - but only where HEAD means anything on this site. Three of eight major commercial
    sites we measured answer 403 to HEAD and 200 to GET, so the crawl establishes once per site
    whether HEAD is honoured, and where it is not every unreached target is reported as
@@ -94,7 +94,7 @@ folded into the discoverability gates.
 ## Output
 
 Standard skill JSON: `findings[]`, `checks_run[]`, `not_applicable[]` (each with a reason),
-`extra_requests_made` (at most 20), and signals `newsletter_signup`, `has_site_search`,
+`extra_requests_made` (at most 40), and signals `newsletter_signup`, `has_site_search`,
 `nav_item_count`.
 
 Findings carry mechanism `G` and a `root_cause` of `no-orientation`, `dead-end`,

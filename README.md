@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Agent Skills](https://img.shields.io/badge/Agent%20Skills-agentskills.io-6E56CF?style=flat-square)
 ![Skills](https://img.shields.io/badge/Skills-7%20(1%20entrypoint)-0F9D58?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-383%20passing-2EA043?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-398%20passing-2EA043?style=flat-square)
 ![Read Only](https://img.shields.io/badge/Mode-Read--only-FF6F00?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-4169E1?style=flat-square)
 
@@ -33,7 +33,7 @@ matters if the one before it passed.
 | `freshness-corroboration-audit` | Is it current, and does anywhere else agree? Dates, staleness, off-site profile breadth, name collisions | Trusted |
 | `engagement-audit` | Does the person who clicks through stay? Orientation, dead ends, orphans, broken links, breadcrumbs, interstitials, forms | Visitor stays |
 
-Between them: **70 checks, 76 findings, 55 named root causes.**
+Between them: **71 checks, 77 findings, 55 named root causes.**
 
 Six is the number of gates there are. A test fails the build if any two skills ever claim the
 same root cause, so the separation is enforced rather than asserted.
@@ -115,12 +115,38 @@ missing, not only on what is broken.
 
 ## Running it
 
-```bash
-python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+> **There is nothing to install.** `marketplace.json` at the root is the contest's own
+> manifest convention, not a package format — the brief notes that agentskills.io defines the
+> single-skill `SKILL.md` format and does not define a multi-skill one. So there is no
+> `/plugin marketplace add` step and no `.claude-plugin/` directory. Each of the seven folders
+> is independently valid against the agentskills.io spec; the manifest names which one is the
+> entrypoint. Run it as below, or point an agent at `skills/audit-orchestrator/SKILL.md` and
+> let it follow the procedure there.
 
-python skills/audit-orchestrator/scripts/validate_marketplace.py
-python run_audit.py example.com --out-dir ./out
+If `requests`, `beautifulsoup4` and `lxml` are already installed, skip the virtual
+environment and go straight to the last two commands.
+
+```bash
+# macOS / Linux
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
+```powershell
+# Windows PowerShell
+python -m venv .venv; .\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+```bash
+# Windows Git Bash
+python -m venv .venv && source .venv/Scripts/activate
+pip install -r requirements.txt
+```
+
+Then, on any platform — `python` on Windows, `python3` elsewhere:
+
+```bash
+python3 skills/audit-orchestrator/scripts/validate_marketplace.py
+python3 run_audit.py example.com --out-dir ./out
 ```
 
 `out/report.md` is the one to read. `out/report.json` is the fixed-schema machine version,
@@ -138,8 +164,8 @@ The tests, if you want them:
 
 ```bash
 pip install pytest
-python -m pytest -q                        # 383 tests, about 14 minutes
-python -m pytest -q -m "not mutation"      # 326 tests, about 4 minutes
+python3 -m pytest -q                        # 398 tests, about 14 minutes
+python3 -m pytest -q -m "not mutation"      # 341 tests, about 4 minutes
 ```
 
 > **Windows path limit.** Do not unzip into a deep directory — `pip` cannot install `lxml` if
@@ -161,7 +187,7 @@ This README is deliberately short. Everything below lives where a skill can read
 | `tests/mutations.py` | The shortest honest description of what every check means |
 | `evals/README.md` | Three prompts a judge is likely to type, and what should happen |
 
-**One number, if you read nothing else.** Brands assistants name link to **7.1** other places
+**One number, if you read nothing else.** Brands assistants name link to **7.2** other places
 about themselves; comparable competitors they ignore link **4.6**. The audit also confirms
 those profile links still resolve, on the six platforms that answer that question honestly.
 That separated in all six categories studied — the only measure that did — and it is the

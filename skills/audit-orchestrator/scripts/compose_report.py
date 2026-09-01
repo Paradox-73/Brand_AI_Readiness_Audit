@@ -645,6 +645,20 @@ def render_markdown(report):
         add("")
         add("Three fixes, ranked by how much they change relative to the work involved.")
         add("")
+        # A reader who sees a `high` finding below, absent from this list,
+        # reasonably concludes the report contradicts itself. It does not:
+        # rank is severity x reach / effort, so a high-severity problem on one
+        # page of forty can sit below a medium one on all forty. Said here
+        # because the alternative is the reader inferring a bug.
+        severe = [by_id[i]["id"] for i in report["start_here"]]
+        omitted = [f for f in report["findings"]
+                   if f["severity"] in ("critical", "high") and f["id"] not in severe]
+        if omitted:
+            add("This is not a severity ranking. {} is more severe than some of the above, "
+                "and sits lower because it affects fewer pages or costs more to fix; see the "
+                "severity sections below.".format(
+                    ", ".join(f["id"] for f in omitted[:3])))
+            add("")
         for position, finding_id in enumerate(report["start_here"], start=1):
             finding = by_id[finding_id]
             action = finding["suggested_action"]
