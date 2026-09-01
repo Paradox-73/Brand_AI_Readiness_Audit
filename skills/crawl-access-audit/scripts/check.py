@@ -54,8 +54,9 @@ sys.path.insert(0, _SHARED)
 
 from page_extract import CHALLENGE_TEXT_CEILING  # noqa: E402
 from audit_common import (  # noqa: E402
-    CONTENT_TYPES, REFUSED_STATUS, USER_AGENT, FetchError, Fetcher, SkillResult,
-    link_verdict, load_snapshot, pages_of, pct, sample, strip_www,
+    CONTENT_TYPES, example_urls, explain_fetch_error, Fetcher, FetchError,
+    link_verdict, load_snapshot, pages_of, pct, plural, REFUSED_STATUS,
+    sample, SkillResult, strip_www, USER_AGENT
 )
 from robots_parser import (  # noqa: E402
     blocks_entire_site, group_for, is_disallowed, substantive_disallows,
@@ -187,7 +188,7 @@ def _check_challenge_pages(result, snapshot):
             "HTML back rather than a challenge page.",
         ],
         effort="medium", owner="developer",
-        rationale="Mechanism A: an assistant fetching this page receives a verification screen. "
+        rationale="An assistant fetching this page receives a verification screen. "
                   "It cannot solve the challenge, so it reads nothing and cites nothing. To the "
                   "site's analytics this looks like a bot being correctly turned away; to every "
                   "AI answer engine it looks like a site with no content.",
@@ -215,7 +216,7 @@ def _check_robots_reachable(result, robots):
                 "Check that a firewall or CDN rule is not dropping requests to /robots.txt.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism A: a crawler that cannot resolve robots.txt cannot "
+            rationale="A crawler that cannot resolve robots.txt cannot "
                       "establish it is permitted to fetch, and several major crawlers "
                       "treat an unreachable robots.txt as a signal to back off.",
         )
@@ -239,7 +240,7 @@ def _check_robots_reachable(result, robots):
                 "A clean 404 is safe and means 'no restrictions'; a 5xx is not.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism A: an unresolvable robots.txt fails the first gate for "
+            rationale="An unresolvable robots.txt fails the first gate for "
                       "every crawler, whatever the rest of the site looks like.",
         )
         return
@@ -266,7 +267,7 @@ def _check_robots_reachable(result, robots):
                 "Re-test with a robots.txt tester after the change.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism A: rules that do not parse silently do nothing, so the "
+            rationale="Rules that do not parse silently do nothing, so the "
                       "access policy the site believes it has is not the one crawlers see.",
         )
 
@@ -301,7 +302,7 @@ def _check_robots_blocks(result, robots, origin):
                 "pipeline is not shipping the staging robots.txt to production.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism A, gate 1: a crawler that is not let in never reaches the "
+            rationale="A crawler that is not let in never reaches the "
                       "reading or extraction stages. Nothing else on the site can compensate.",
             snippet="User-agent: *\nAllow: /\nDisallow: /cart\nDisallow: /account\n\n"
                     "Sitemap: {}/sitemap.xml".format(origin.rstrip("/")),
@@ -340,7 +341,7 @@ def _check_robots_blocks(result, robots, origin):
                 "Re-test with a robots.txt checker using each crawler's user-agent string.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism A: these crawlers fetch live pages to build cited answers. "
+            rationale="These crawlers fetch live pages to build cited answers. "
                       "A brand they cannot fetch cannot be quoted, however good the content is.",
             snippet="\n\n".join(
                 "User-agent: {}\nAllow: /".format(name) for name in blocked_answer[:4]
@@ -365,7 +366,7 @@ def _check_robots_blocks(result, robots, origin):
                 "If it is not, remove these user-agent groups from /robots.txt.",
             ],
             effort="low", owner="marketing",
-            rationale="Mechanism A: blocking training collection limits what a model absorbs "
+            rationale="Blocking training collection limits what a model absorbs "
                       "offline, but retrieval-time citation depends on the answer crawlers, "
                       "which are controlled separately. Reported for awareness, not as a defect.",
         )
@@ -381,7 +382,8 @@ def _check_robots_blocks(result, robots, origin):
     if len(content_blocks) >= 2:
         result.add(
             id_hint="robots-blocks-content-paths",
-            title="robots.txt disallows {} path(s) that look like real content".format(len(content_blocks)),
+            title="robots.txt disallows {} that look like real content".format(
+                plural(len(content_blocks), "path")),
             severity="medium", confidence="medium",
             evidence="Disallowed for all crawlers: {}. Admin, cart, checkout, search and "
                      "asset paths were excluded from this list because blocking those is "
@@ -396,7 +398,7 @@ def _check_robots_blocks(result, robots, origin):
                 "Keep rules covering duplicate, paginated or parameterised URLs.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism A: a disallowed path is invisible to every compliant crawler, "
+            rationale="A disallowed path is invisible to every compliant crawler, "
                       "so the content behind it cannot be retrieved or cited.",
         )
     else:
@@ -434,7 +436,7 @@ def _check_sitemaps(result, snapshot, fetcher):
                 "Include a <lastmod> date on every entry and keep it accurate.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism A: without a sitemap a crawler only finds what it can reach by "
+            rationale="Without a sitemap a crawler only finds what it can reach by "
                       "following links, so pages more than a couple of clicks deep, or linked "
                       "only from JavaScript menus, may never be fetched.",
             snippet='<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -460,7 +462,7 @@ def _check_sitemaps(result, snapshot, fetcher):
                 "Confirm there is no HTML error page or BOM prefixed to the XML.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism A: a sitemap that fails to parse is worse than none, because "
+            rationale="A sitemap that fails to parse is worse than none, because "
                       "the site believes its pages are being advertised when they are not.",
         )
 
@@ -482,7 +484,7 @@ def _check_sitemaps(result, snapshot, fetcher):
                 "The line can go anywhere in the file and applies to all user agents.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism A: robots.txt is the first file a crawler reads, so a Sitemap "
+            rationale="Robots.txt is the first file a crawler reads, so a Sitemap "
                       "line is the cheapest way to hand it the full page list.",
         )
 
@@ -572,7 +574,7 @@ def _check_sitemap_urls_resolve(result, snapshot, reachable, fetcher):
             "Set the sitemap to regenerate on publish so deleted pages drop out automatically.",
         ],
         effort="medium", owner="developer",
-        rationale="Mechanism A: a sitemap full of dead links teaches crawlers that this site's "
+        rationale="A sitemap full of dead links teaches crawlers that this site's "
                   "sitemap is unreliable, which reduces how much of it they act on.",
         affected_pages=[u for u, _ in sorted(dead)],
     )
@@ -647,7 +649,7 @@ def _check_bot_manager(result, snapshot, robots, fetcher, allow_network):
             "Keep rate limiting in place; allow-listing does not mean removing throttles.",
         ],
         effort="medium", owner="developer",
-        rationale="Mechanism A: robots.txt permission is irrelevant if the edge returns a "
+        rationale="Robots.txt permission is irrelevant if the edge returns a "
                   "challenge page. The crawler receives no content, so the brand cannot appear "
                   "in an answer even though the site looks open on paper.",
         affected_pages=[home_url],
@@ -678,8 +680,10 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
             title="The homepage refuses this crawler" if looks_like_bot_block
                   else "The homepage does not return HTTP 200",
             severity="critical", confidence="high",
-            evidence="{} returned {}.{}".format(
-                home_url, status or "no response ({})".format(home.get("error")),
+            evidence="{} {}.{}".format(
+                home_url,
+                "returned HTTP {}".format(status) if status
+                else explain_fetch_error(home.get("error")),
                 " The request identified itself as an audit crawler, respected robots.txt and "
                 "was rate limited, so this is a bot-management rule rather than an outage."
                 if looks_like_bot_block else ""),
@@ -699,7 +703,7 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
                 else "Check whether a CDN rule or origin health check is failing.",
             ],
             effort="high", owner="developer",
-            rationale="Mechanism A: the homepage is the entry point almost every crawler and "
+            rationale="The homepage is the entry point almost every crawler and "
                       "assistant tries first. If it fails, most never try anything else.",
             affected_pages=[home_url],
         )
@@ -731,7 +735,7 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
                     "itself as an audit crawler, respected robots.txt and was rate limited, so "
                     "this is a bot-management rule and not an outage.".format(len(refused))
                     if mostly_refused else "",
-                    ", ".join(sample([p["url"] for p in bad], 5))),
+                    ", ".join(example_urls([p["url"] for p in bad]))),
                 mechanism="A", root_cause="bot-manager-block" if mostly_refused else "non-200",
                 summary="Allow identified crawlers to fetch the site, not just the homepage."
                         if mostly_refused
@@ -752,7 +756,7 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
                          "stop re-requesting them.",
                 ],
                 effort="high" if mostly_refused else "medium", owner="developer",
-                rationale="Mechanism A: a page a crawler cannot fetch cannot be read or cited, "
+                rationale="A page a crawler cannot fetch cannot be read or cited, "
                           "and at this rate the site is largely invisible to the systems that "
                           "would quote it." if mostly_refused else
                           "Mechanism A: every failing URL is a page that cannot be read or cited, "
@@ -773,7 +777,7 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
             title="Some URLs redirect more than twice before resolving",
             severity="low", confidence="high",
             evidence="{} crawled URL(s) had a redirect chain longer than 2 hops. Examples: {}.".format(
-                len(long_chains), ", ".join(sample([p["url"] for p in long_chains], 5))),
+                len(long_chains), ", ".join(example_urls([p["url"] for p in long_chains]))),
             mechanism="A", root_cause="redirect-chain",
             summary="Collapse redirect chains so each old URL points straight at the final page.",
             how_to_fix=[
@@ -782,7 +786,7 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
                 "trailing-slash rule. Combine these into one rule.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism A: some crawlers stop following after a small number of hops, "
+            rationale="Some crawlers stop following after a small number of hops, "
                       "and every hop adds latency to a fetch an assistant is doing live.",
             affected_pages=[p["url"] for p in long_chains],
         )
@@ -797,10 +801,11 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
     if noindexed:
         result.add(
             id_hint="noindex-on-content-pages",
-            title="{} content page(s) carry a noindex directive".format(len(noindexed)),
+            title="{} a noindex directive".format(
+            plural(len(noindexed), "content page carries", "content pages carry")),
             severity="high", confidence="high",
             evidence="Pages with `noindex` in a meta robots tag or X-Robots-Tag header: {}.".format(
-                ", ".join(sample([p["url"] for p in noindexed], 5))),
+                ", ".join(example_urls([p["url"] for p in noindexed]))),
             mechanism="A", root_cause="noindex",
             summary="Remove `noindex` from pages you want found and quoted.",
             how_to_fix=[
@@ -811,7 +816,7 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
                 "environment settings rather than editing each page.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism A: `noindex` tells a crawler to read the page and then discard "
+            rationale="`noindex` tells a crawler to read the page and then discard "
                       "it. The content is fetched and then thrown away, so it can never be cited.",
             affected_pages=[p["url"] for p in noindexed],
         )
@@ -842,7 +847,8 @@ def _check_meta_refresh(result, snapshot, ok_pages):
     home_affected = any(p.get("page_type") == "home" for p in stubs)
     result.add(
         id_hint="meta-refresh-instead-of-http-redirect",
-        title="{} page(s) redirect with markup rather than an HTTP status".format(len(stubs)),
+        title="{} with markup rather than an HTTP status".format(
+            plural(len(stubs), "page redirects", "pages redirect")),
         severity="high" if home_affected else "medium",
         confidence="high",
         evidence="; ".join(
@@ -862,7 +868,7 @@ def _check_meta_refresh(result, snapshot, ok_pages):
             "be empty.",
         ],
         effort="low", owner="developer",
-        rationale="Mechanism A: a meta refresh is a redirect only for something that renders "
+        rationale="A meta refresh is a redirect only for something that renders "
                   "HTML. A crawler that reads the first response and stops sees a few hundred "
                   "bytes with no heading, no links and nothing worth quoting, and concludes "
                   "the page is empty rather than that it moved.",
@@ -917,7 +923,8 @@ def _check_canonicals(result, snapshot, ok_pages, fetcher=None):
     if off_domain:
         result.add(
             id_hint="canonical-points-off-domain",
-            title="{} page(s) declare a canonical URL on a different domain".format(len(off_domain)),
+            title="{} a canonical URL on a different domain".format(
+            plural(len(off_domain), "page declares", "pages declare")),
             severity="high", confidence="high",
             evidence="Examples: {}.".format(
                 "; ".join("{} -> {}".format(a, b) for a, b in sorted(off_domain)[:5])),
@@ -930,7 +937,7 @@ def _check_canonicals(result, snapshot, ok_pages, fetcher=None):
                 "Check whether a template or plugin is hard-coding a domain from a previous site.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism A: a canonical tag tells consumers 'the real version is over "
+            rationale="A canonical tag tells consumers 'the real version is over "
                       "there'. Pointing off-domain hands attribution for this content to another site.",
             affected_pages=[a for a, _ in sorted(off_domain)],
         )
@@ -938,7 +945,8 @@ def _check_canonicals(result, snapshot, ok_pages, fetcher=None):
     if broken:
         result.add(
             id_hint="canonical-points-to-broken-url",
-            title="{} page(s) declare a canonical URL that does not return 200".format(len(broken)),
+            title="{} a canonical URL that does not return 200".format(
+            plural(len(broken), "page declares", "pages declare")),
             severity="medium", confidence="high",
             evidence="Examples: {}.".format(
                 "; ".join("{} -> {} ({})".format(a, b, s) for a, b, s in sorted(broken)[:5])),
@@ -950,7 +958,7 @@ def _check_canonicals(result, snapshot, ok_pages, fetcher=None):
                 "Watch for trailing-slash and http/https mismatches, which are the usual cause.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism A: a canonical pointing at a dead URL leaves consumers unsure "
+            rationale="A canonical pointing at a dead URL leaves consumers unsure "
                       "which version of the page is authoritative, so some drop both.",
             affected_pages=[a for a, _, _ in sorted(broken)],
         )
@@ -988,7 +996,7 @@ def _check_transport_and_hosts(result, snapshot, ok_pages):
                 "Update internal links, canonical tags and the sitemap to the https:// form.",
             ],
             effort="medium", owner="developer",
-            rationale="Mechanism A: browsers warn on HTTP pages and several crawlers deprioritise "
+            rationale="Browsers warn on HTTP pages and several crawlers deprioritise "
                       "or refuse them, which suppresses the site before content is ever assessed.",
         )
     else:
@@ -1016,7 +1024,7 @@ def _check_transport_and_hosts(result, snapshot, ok_pages):
                 "Regenerate canonical tags, internal links and the sitemap using that hostname.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism D: two hostnames serving the same content look like two sources "
+            rationale="Two hostnames serving the same content look like two sources "
                       "that half-agree, splitting the signals that would otherwise reinforce one "
                       "authoritative version.",
         )

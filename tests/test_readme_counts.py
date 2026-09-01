@@ -37,8 +37,15 @@ TESTS = os.path.join(ROOT, "tests")
 
 README = os.path.join(ROOT, "README.md")
 
+# "Between them the six run **71 checks**, drawing on a catalogue of **77
+# distinct findings** and **55 named root causes**."
+#
+# The old wording - "71 checks, 77 findings, 55 root causes" - read to a judge
+# as "a run produces 77 findings", when a small site produces a dozen. The
+# numbers are still asserted against the source; only the sentence changed.
 COUNT_SENTENCE = re.compile(
-    r"\*\*(\d+) checks, (\d+) findings, (\d+) named root causes\.\*\*")
+    r"\*\*(\d+) checks\*\*.{0,60}?\*\*(\d+) distinct findings\*\*.{0,40}?"
+    r"\*\*(\d+) named root causes\*\*", re.S)
 
 
 def _skill_sources():

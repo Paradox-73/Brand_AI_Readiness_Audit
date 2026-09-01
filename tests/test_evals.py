@@ -93,7 +93,7 @@ def test_dead_end_site_counts_three_orphans(audit):
     result = audit("dead-end-site")
     orphans = result.findings_with("orphan-pages")
     assert orphans, "orphan pages should be reported"
-    assert "3 page(s)" in orphans[0]["title"], orphans[0]["title"]
+    assert "3 pages" in orphans[0]["title"], orphans[0]["title"]
 
 
 def test_the_email_recommendation_fires_only_where_there_is_an_email_capture(audit):

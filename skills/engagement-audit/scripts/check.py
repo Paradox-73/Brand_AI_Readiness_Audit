@@ -55,9 +55,9 @@ if _SHARED is None:
 sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
-    CONTENT_TYPES, DEEP_TYPES, FetchError, Fetcher, SkillResult, language_of,
-    link_verdict, load_snapshot, normalise_url, pages_of, pct, sample, same_site,
-    truncate, word_count,
+    CONTENT_TYPES, DEEP_TYPES, example_urls, Fetcher, FetchError,
+    language_of, link_verdict, load_snapshot, normalise_url, pages_of, pct,
+    plural, same_site, sample, SkillResult, truncate, word_count
 )
 
 SKILL = "engagement-audit"
@@ -248,7 +248,7 @@ def _check_homepage_orientation(result, home, english=True):
             "Keep one primary action; competing buttons of equal weight split attention.",
         ],
         effort="low", owner="marketing",
-        rationale="Mechanism G: a visitor sent by an assistant already knows roughly what they "
+        rationale="A visitor sent by an assistant already knows roughly what they "
                   "want. They are checking whether this is the right place. A generic heading "
                   "and no obvious next step answers neither question, so they go back.",
         affected_pages=[home["url"]],
@@ -320,7 +320,7 @@ def _check_navigation(result, home, pages):
             "Make sure the navigation is real HTML links, so it works before JavaScript runs.",
         ],
         effort="medium", owner="marketing",
-        rationale="Mechanism G: the navigation is the map. A visitor who cannot see where else "
+        rationale="The navigation is the map. A visitor who cannot see where else "
                   "to go from the page they landed on has one option, which is to leave.",
         affected_pages=[source["url"]],
     )
@@ -352,12 +352,13 @@ def _check_dead_ends(result, pages):
     rate = pct(len(dead_ends), len(pages))
     result.add(
         id_hint="pages-with-no-next-step",
-        title="{} page(s) offer no next step".format(len(dead_ends)),
+        title="{} no next step".format(
+            plural(len(dead_ends), "page offers", "pages offer")),
         severity="medium", confidence="medium",
         evidence="{} of {} content pages ({}%) end without a way onward: no internal link in "
                  "the main content, no call to action and no form. Examples: {}.".format(
                      len(dead_ends), len(pages), rate,
-                     ", ".join(sample([p["url"] for p in dead_ends], 5))),
+                     ", ".join(example_urls([p["url"] for p in dead_ends]))),
         mechanism="G", root_cause="dead-end",
         summary="End every page with a related-content block or a clear next action.",
         how_to_fix=[
@@ -368,7 +369,7 @@ def _check_dead_ends(result, pages):
             "Because these are templates, fixing the template fixes every page using it.",
         ],
         effort="low", owner="content owner",
-        rationale="Mechanism G: a visitor who arrived from an answer landed deep in the site "
+        rationale="A visitor who arrived from an answer landed deep in the site "
                   "with no journey behind them. If the page ends without an onward path, the "
                   "session ends with it.",
         affected_pages=[p["url"] for p in dead_ends],
@@ -416,7 +417,8 @@ def _check_orphans(result, snapshot, pages):
 
     result.add(
         id_hint="orphan-pages-in-sitemap",
-        title="{} page(s) are listed in the sitemap but linked from nowhere".format(len(orphans)),
+        title="{} listed in the sitemap but linked from nowhere".format(
+            plural(len(orphans), "page is", "pages are")),
         severity="medium", confidence="medium",
         evidence="Of {} sitemap URLs that were crawled, {} received no internal link from any "
                  "other crawled page: {}.".format(
@@ -430,7 +432,7 @@ def _check_orphans(result, snapshot, pages):
             "If the page is genuinely obsolete, remove it from the sitemap instead.",
         ],
         effort="low", owner="content owner",
-        rationale="Mechanism G: a page nothing links to sits outside the site's structure. "
+        rationale="A page nothing links to sits outside the site's structure. "
                   "Visitors who land on it cannot see how it relates to anything else, and "
                   "crawlers weigh it as unimportant because the site itself never points at it.",
         affected_pages=orphans,
@@ -518,7 +520,8 @@ def _check_broken_links(result, snapshot, pages, fetcher, allow_network):
     rate = len(broken) / float(checked)
     result.add(
         id_hint="broken-internal-links",
-        title="{} internal link target(s) return an error".format(len(broken)),
+        title="{} an error".format(
+            plural(len(broken), "internal link target returns", "internal link targets return")),
         severity="high" if rate > BROKEN_LINK_HIGH else "medium", confidence="high",
         evidence="{} of {} tested internal link targets ({}%) are gone. Examples: {}.{}".format(
                      len(broken), checked, pct(len(broken), checked),
@@ -533,7 +536,7 @@ def _check_broken_links(result, snapshot, pages, fetcher, allow_network):
             "Run a link check as part of publishing so this does not accumulate again.",
         ],
         effort="medium", owner="developer",
-        rationale="Mechanism G: a broken link is a visitor stopped mid-journey with nothing to "
+        rationale="A broken link is a visitor stopped mid-journey with nothing to "
                   "do but leave. At this rate it is happening often enough to be a pattern "
                   "rather than an accident.",
         affected_pages=[u for u, _ in sorted(broken)],
@@ -568,7 +571,7 @@ def _check_breadcrumbs(result, pages):
         title="Deep pages give visitors no visible sense of where they are",
         severity="medium", confidence="high",
         evidence="{} of {} crawled deep pages show no breadcrumb trail. Examples: {}.".format(
-            len(without), len(deep), ", ".join(sample([p["url"] for p in without], 5))),
+            len(without), len(deep), ", ".join(example_urls([p["url"] for p in without]))),
         mechanism="G", root_cause="no-breadcrumbs",
         summary="Add a visible breadcrumb trail to deep page templates.",
         how_to_fix=[
@@ -578,7 +581,7 @@ def _check_breadcrumbs(result, pages):
             "Mirror it in BreadcrumbList structured data so machines read the same hierarchy.",
         ],
         effort="low", owner="developer",
-        rationale="Mechanism G: someone arriving from an answer lands deep with no history. A "
+        rationale="Someone arriving from an answer lands deep with no history. A "
                   "breadcrumb is the cheapest way to show them what section they are in and "
                   "give them one click upward instead of a click back.",
         affected_pages=[p["url"] for p in without],
@@ -615,7 +618,8 @@ def _check_title_body_drift(result, pages):
 
     result.add(
         id_hint="page-title-does-not-match-page-content",
-        title="{} page(s) do not deliver what their title promises".format(len(drifted)),
+        title="{} not deliver what their title promises".format(
+            plural(len(drifted), "page does", "pages do")),
         severity="medium", confidence="medium",
         evidence="Pages where under a third of the title's own words appear anywhere in the "
                  "body text. Examples: {}.".format(
@@ -632,7 +636,7 @@ def _check_title_body_drift(result, pages):
             "the title is the promise that got them to click.",
         ],
         effort="medium", owner="content owner",
-        rationale="Mechanism G: the title set the expectation. A visitor who does not see it "
+        rationale="The title set the expectation. A visitor who does not see it "
                   "confirmed in the first few lines assumes they are in the wrong place, and "
                   "the fastest way to check is to go back.",
         affected_pages=[p["url"] for p, _, _ in drifted],
@@ -682,12 +686,13 @@ def _check_chrome_consistency(result, pages):
 
     result.add(
         id_hint="pages-missing-site-navigation",
-        title="{} page(s) do not carry the site's normal navigation".format(len(stranded)),
+        title="{} not carry the site's normal navigation".format(
+            plural(len(stranded), "page does", "pages do")),
         severity="medium", confidence="medium",
         evidence="The site's usual header/footer links appear on {} of {} pages. These pages "
                  "share few or none of them: {}.".format(
                      common_count, len(pages),
-                     ", ".join(sample([p["url"] for p in stranded], 5))),
+                     ", ".join(example_urls([p["url"] for p in stranded]))),
         mechanism="G", root_cause="inconsistent-chrome",
         summary="Apply the standard header and footer to every page template.",
         how_to_fix=[
@@ -698,7 +703,7 @@ def _check_chrome_consistency(result, pages):
             "logo linking home.",
         ],
         effort="medium", owner="developer",
-        rationale="Mechanism G: a visitor who arrives on a page with no navigation has no way "
+        rationale="A visitor who arrives on a page with no navigation has no way "
                   "back into the site. The page becomes the whole experience, and when it ends, "
                   "so does the visit.",
         affected_pages=[p["url"] for p in stranded],
@@ -727,7 +732,8 @@ def _check_weight_and_scripts(result, pages):
 
     result.add(
         id_hint="pages-are-extremely-heavy",
-        title="{} page(s) carry an extreme payload before anything is visible".format(len(heavy)),
+        title="{} an extreme payload before anything is visible".format(
+            plural(len(heavy), "page carries", "pages carry")),
         severity="medium", confidence="high",
         evidence="; ".join("{}: {}".format(p["url"], why)
                            for p, why in sorted(heavy, key=lambda x: x[0]["url"])[:5]),
@@ -740,7 +746,7 @@ def _check_weight_and_scripts(result, pages):
             "Defer everything not needed for the first screen.",
         ],
         effort="medium", owner="developer",
-        rationale="Mechanism G: a visitor arriving from an answer is checking whether this page "
+        rationale="A visitor arriving from an answer is checking whether this page "
                   "has what they were promised. Every second before the page is readable is a "
                   "second in which going back is easier than waiting.",
         affected_pages=[p["url"] for p, _ in heavy],
@@ -771,7 +777,8 @@ def _check_interstitials(result, pages):
 
     result.add(
         id_hint="content-covered-on-arrival",
-        title="{} page(s) cover their content the moment a visitor arrives".format(len(offenders)),
+        title="{} their content the moment a visitor arrives".format(
+            plural(len(offenders), "page covers", "pages cover")),
         severity="medium", confidence="medium",
         evidence="; ".join("{}: {}".format(p["url"], why)
                            for p, why in sorted(offenders, key=lambda x: x[0]["url"])[:5]),
@@ -785,7 +792,7 @@ def _check_interstitials(result, pages):
             "cover the H1 and first paragraph.",
         ],
         effort="low", owner="marketing",
-        rationale="Mechanism G: someone who arrived with a specific question and is shown a "
+        rationale="Someone who arrived with a specific question and is shown a "
                   "form before an answer has been given a reason to leave before the page has "
                   "made its case.",
         affected_pages=[p["url"] for p, _ in offenders],
@@ -810,7 +817,7 @@ def _check_forms(result, pages):
 
     result.add(
         id_hint="enquiry-forms-ask-for-too-much",
-        title="{} enquiry form(s) require more than {} fields".format(len(offenders), FORM_FIELD_LIMIT),
+        title="{} require more than {} fields".format(plural(len(offenders), "enquiry form"), FORM_FIELD_LIMIT),
         severity="low", confidence="high",
         evidence="; ".join("{} ({} required fields)".format(p["url"], n)
                            for p, n in sorted(offenders, key=lambda x: x[0]["url"])[:5]),
@@ -822,7 +829,7 @@ def _check_forms(result, pages):
             "Say what happens next and how quickly, directly beside the submit button.",
         ],
         effort="low", owner="marketing",
-        rationale="Mechanism G: a long form is the last step of the journey. A visitor who "
+        rationale="A long form is the last step of the journey. A visitor who "
                   "arrived from an answer has invested one click, not a decision, and will not "
                   "fill in twelve fields to ask a question.",
         affected_pages=[p["url"] for p, _ in offenders],
@@ -851,7 +858,8 @@ def _check_readability(result, pages):
 
     result.add(
         id_hint="pages-are-hard-to-skim",
-        title="{} page(s) are written in blocks too large to skim".format(len(offenders)),
+        title="{} written in blocks too large to skim".format(
+            plural(len(offenders), "page is", "pages are")),
         severity="low", confidence="medium",
         evidence="; ".join("{}: {}".format(p["url"], why)
                            for p, why in sorted(offenders, key=lambda x: x[0]["url"])[:5]),
@@ -863,7 +871,7 @@ def _check_readability(result, pages):
             "Use lists for anything that is genuinely a list.",
         ],
         effort="low", owner="content owner",
-        rationale="Mechanism G: visitors scan before they read. A page with no visual entry "
+        rationale="Visitors scan before they read. A page with no visual entry "
                   "points offers nothing to scan, so a visitor cannot tell in three seconds "
                   "whether their answer is here.",
         affected_pages=[p["url"] for p, _ in offenders],
@@ -878,10 +886,11 @@ def _check_viewport(result, pages):
         return
     result.add(
         id_hint="missing-mobile-viewport",
-        title="{} page(s) have no mobile viewport tag".format(len(without)),
+        title="{} no mobile viewport tag".format(
+            plural(len(without), "page has", "pages have")),
         severity="medium" if len(without) == len(pages) else "low", confidence="high",
         evidence="Pages with no <meta name=\"viewport\"> tag: {}.".format(
-            ", ".join(sample([p["url"] for p in without], 5))),
+            ", ".join(example_urls([p["url"] for p in without]))),
         mechanism="G", root_cause="no-orientation",
         summary="Add the standard viewport meta tag to the site template.",
         how_to_fix=[
@@ -891,7 +900,7 @@ def _check_viewport(result, pages):
             "layout responsive.",
         ],
         effort="low", owner="developer",
-        rationale="Mechanism G: without it, phones render the page at desktop width and zoom "
+        rationale="Without it, phones render the page at desktop width and zoom "
                   "out. Most people arriving from an assistant are on a phone, and a page they "
                   "have to pinch to read is a page they leave.",
         affected_pages=[p["url"] for p in without],

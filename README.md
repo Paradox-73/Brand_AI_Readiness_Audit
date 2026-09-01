@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Agent Skills](https://img.shields.io/badge/Agent%20Skills-agentskills.io-6E56CF?style=flat-square)
 ![Skills](https://img.shields.io/badge/Skills-7%20(1%20entrypoint)-0F9D58?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-398%20passing-2EA043?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-442%20passing-2EA043?style=flat-square)
 ![Read Only](https://img.shields.io/badge/Mode-Read--only-FF6F00?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-4169E1?style=flat-square)
 
@@ -33,7 +33,9 @@ matters if the one before it passed.
 | `freshness-corroboration-audit` | Is it current, and does anywhere else agree? Dates, staleness, off-site profile breadth, name collisions | Trusted |
 | `engagement-audit` | Does the person who clicks through stay? Orientation, dead ends, orphans, broken links, breadcrumbs, interstitials, forms | Visitor stays |
 
-Between them: **71 checks, 77 findings, 55 named root causes.**
+Between them the six run **71 checks**, drawing on a catalogue of **77 distinct findings**
+and **55 named root causes**. A single audit reports only the ones its evidence supports —
+a typical small site produces ten to twenty.
 
 Six is the number of gates there are. A test fails the build if any two skills ever claim the
 same root cause, so the separation is enforced rather than asserted.
@@ -100,9 +102,11 @@ site outranks a rewrite that fixes one page.
 
 Two properties worth naming.
 
-**Silence is explained.** Every check that stays quiet says why, in the report appendix. *"No
-product detail pages were detected on this site, so Product and Offer markup is not expected."*
-That shows the audit considered the check and declined it, rather than not looking.
+**Silence is explained.** Every check is accounted for in the report appendix. The ones that
+declined say why — *"No product detail pages were detected on this site, so Product and Offer
+markup is not expected."* The ones that ran and were clean are listed as having passed, so a
+reader can see that robots.txt was fetched and was fine rather than wondering whether it was
+looked at. A check never simply goes missing.
 
 **A deliberate choice is not a fault.** A site blocking AI *training* crawlers is reported as
 information, not a problem. It is a rights decision, and calling it a defect would impose a
@@ -132,8 +136,15 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 ```powershell
-# Windows PowerShell
+# Windows PowerShell. The first line is needed because Windows blocks
+# script execution by default; it applies to this shell only.
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 python -m venv .venv; .\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+```bat
+:: Windows cmd.exe, if you would rather not change the policy
+python -m venv .venv && .venv\Scripts\activate.bat
 pip install -r requirements.txt
 ```
 ```bash
@@ -142,11 +153,17 @@ python -m venv .venv && source .venv/Scripts/activate
 pip install -r requirements.txt
 ```
 
-Then, on any platform — `python` on Windows, `python3` elsewhere:
+Then run it:
 
 ```bash
+# macOS / Linux
 python3 skills/audit-orchestrator/scripts/validate_marketplace.py
 python3 run_audit.py example.com --out-dir ./out
+```
+```powershell
+# Windows
+python skills\audit-orchestrator\scripts\validate_marketplace.py
+python run_audit.py example.com --out-dir .\out
 ```
 
 `out/report.md` is the one to read. `out/report.json` is the fixed-schema machine version,
@@ -164,8 +181,8 @@ The tests, if you want them:
 
 ```bash
 pip install pytest
-python3 -m pytest -q                        # 398 tests, about 14 minutes
-python3 -m pytest -q -m "not mutation"      # 341 tests, about 4 minutes
+python3 -m pytest -q                        # 442 tests, about 15 minutes
+python3 -m pytest -q -m "not mutation"      # 385 tests, about 4 minutes
 ```
 
 > **Windows path limit.** Do not unzip into a deep directory — `pip` cannot install `lxml` if

@@ -1,0 +1,294 @@
+"""What the person who owns the website actually reads.
+
+The rubric row is "a clear, structured, actionable report a non-expert could
+act on". Every other test in this suite checks the report's *schema*. None
+checked whether it says true things in words a marketing manager can use.
+
+An agent given the marketplace and told to answer "why does ChatGPT never
+mention us", then to explain the result to a business owner who does not know
+what a crawler is, found what those tests could not:
+
+  - The report opened with "The foundations are sound" on a site with no
+    off-site presence, no identity markup, invalid markup where it existed and
+    six of seven pages sharing a title. The verdict was a pure severity-count
+    ladder: no critical, one high, so the tone went reassuring.
+  - Off-site profile breadth is called "the strongest signal we measured" in
+    the README. A site linking to zero profiles was rated `medium`.
+  - "Start here" ranked missing Open Graph tags - which control what a link
+    preview looks like when shared - above fixing structured data that does not
+    parse, because a `low` finding still scores 1 and a cheap site-wide fix has
+    full reach and lowest effort.
+  - Every finding was tagged "mechanism C" with no expansion anywhere the
+    reader could see it.
+  - Paste-ready snippets were pre-filled with the audited address. On a local
+    or staging origin that is a URL nobody else can reach, inside code labelled
+    ready to paste.
+
+None of these is a schema violation. All of them are the report being wrong or
+unusable at the moment somebody relies on it.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+import re
+import sys
+
+import pytest
+
+from conftest import ROOT, SCRIPTS
+
+sys.path.insert(0, SCRIPTS)
+
+from audit_common import MECHANISMS, plural  # noqa: E402
+
+
+def _compose():
+    spec = importlib.util.spec_from_file_location(
+        "compose_for_report_tests", os.path.join(SCRIPTS, "compose_report.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+compose = _compose()
+
+COUNTS = {"critical": 0, "high": 1, "medium": 8, "low": 3, "info": 0}
+
+
+# --------------------------------------------------------------------------
+# The verdict
+# --------------------------------------------------------------------------
+
+def test_a_brand_with_no_identity_and_no_corroboration_is_not_told_it_is_sound():
+    findings = [{"root_cause": "no-org-schema", "severity": "medium"},
+                {"root_cause": "weak-corroboration", "severity": "medium"}]
+    verdict = compose._verdict(COUNTS, findings, {}, {"profile_breadth": 0})
+    assert "foundations are sound" not in verdict
+    assert "who the brand is" in verdict
+
+
+def test_that_verdict_names_the_pattern_rather_than_counting():
+    findings = [{"root_cause": "no-entity-definition", "severity": "medium"},
+                {"root_cause": "weak-corroboration", "severity": "medium"}]
+    verdict = compose._verdict(COUNTS, findings, {}, {"profile_breadth": 1})
+    assert "nothing about this brand to repeat" in verdict
+
+
+def test_a_site_that_does_declare_itself_gets_the_ordinary_verdict():
+    """The guard must not swallow every site into one diagnosis."""
+    findings = [{"root_cause": "meta-hygiene", "severity": "high"}]
+    verdict = compose._verdict(COUNTS, findings, {}, {"profile_breadth": 8})
+    assert "who the brand is" not in verdict
+    assert "high-severity" in verdict
+
+
+def test_a_blocked_site_still_explains_itself_first():
+    verdict = compose._verdict(
+        {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}, [],
+        {"audit_blocked_by_robots": True}, {})
+    assert "robots.txt disallows this auditor" in verdict
+
+
+def test_a_critical_finding_still_outranks_the_diagnosis():
+    counts = dict(COUNTS, critical=1)
+    findings = [{"root_cause": "no-org-schema", "severity": "critical"},
+                {"root_cause": "weak-corroboration", "severity": "medium"}]
+    verdict = compose._verdict(counts, findings, {}, {"profile_breadth": 0})
+    assert "shut out before they read anything" in verdict
+
+
+# --------------------------------------------------------------------------
+# Start here
+# --------------------------------------------------------------------------
+
+def _finding(fid, severity, score):
+    return {"id": fid, "severity": severity, "root_cause": "x",
+            "suggested_action": {"priority_score": score}}
+
+
+def test_start_here_prefers_substantive_findings_over_cheap_low_ones():
+    ranked = [_finding("F-001", "low", 3.0), _finding("F-002", "low", 2.9),
+              _finding("F-003", "low", 2.8), _finding("F-004", "high", 1.0),
+              _finding("F-005", "medium", 0.9)]
+    chosen = compose._start_here_ids(ranked)
+    assert "F-004" in chosen and "F-005" in chosen
+
+
+def test_start_here_falls_back_to_low_when_there_is_nothing_else():
+    ranked = [_finding("F-001", "low", 3.0), _finding("F-002", "low", 2.0)]
+    assert compose._start_here_ids(ranked) == ["F-001", "F-002"]
+
+
+def test_start_here_never_includes_an_info_finding():
+    ranked = [_finding("F-001", "info", 9.0), _finding("F-002", "medium", 1.0)]
+    assert compose._start_here_ids(ranked) == ["F-002"]
+
+
+# --------------------------------------------------------------------------
+# Words the reader can use
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("letter", sorted(MECHANISMS))
+def test_every_mechanism_letter_has_a_plain_english_expansion(letter):
+    """The report tags findings with a letter; the letter must resolve."""
+    assert MECHANISMS[letter] and len(MECHANISMS[letter]) > 20
+
+
+def test_the_markdown_report_never_prints_a_bare_mechanism_letter():
+    source = open(os.path.join(SCRIPTS, "compose_report.py"), encoding="utf-8").read()
+    assert "mechanism {}" not in source, (
+        "report.md and report.html must expand the mechanism letter, not print it")
+
+
+@pytest.mark.parametrize("count,expected", [
+    (0, "0 pages"), (1, "1 page"), (2, "2 pages"),
+])
+def test_plural_reads_like_english(count, expected):
+    assert plural(count, "page") == expected
+
+
+def test_plural_takes_an_irregular_form():
+    assert plural(1, "entity") == "1 entity"
+    assert plural(3, "entity", "entities") == "3 entities"
+
+
+def test_no_finding_title_carries_a_parenthesised_plural():
+    """`report.md` is written for a marketing manager; "(s)" is a note to self."""
+    import glob
+    import re
+    offenders = []
+    for path in sorted(glob.glob(os.path.join(ROOT, "skills", "*", "scripts", "check.py"))):
+        with open(path, encoding="utf-8") as handle:
+            for number, line in enumerate(handle, start=1):
+                if re.search(r'title="[^"]*\(s\)', line):
+                    offenders.append("{}:{}".format(os.path.basename(os.path.dirname(
+                        os.path.dirname(path))), number))
+    assert not offenders, "finding titles still use (s): " + ", ".join(offenders)
+
+
+# --------------------------------------------------------------------------
+# Snippets that would be pasted into a live site
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("snippet", [
+    '{"url": "http://127.0.0.1:8000/"}',
+    '{"logo": "http://localhost:3000/logo.png"}',
+    '{"url": "https://staging.example.local/"}',
+    '{"url": "https://192.168.1.4/"}',
+])
+def test_a_snippet_filled_in_from_a_private_address_is_flagged(snippet):
+    assert compose._non_public_host(snippet) is True
+
+
+@pytest.mark.parametrize("snippet", [
+    '{"url": "https://a-brand.example/"}',
+    '{"url": "https://shop.a-brand.example/products/1"}',
+])
+def test_a_snippet_from_a_public_address_is_not_flagged(snippet):
+    assert compose._non_public_host(snippet) is False
+
+
+# --------------------------------------------------------------------------
+# Raw library text is not a diagnosis
+#
+# Pointing the audit at a homepage that redirects in a loop produced
+# "returned no response (Exceeded 30 redirects.)". Pointing it at one that
+# redirects to a domain which does not exist produced a full urllib3
+# connection-pool message including the class name of the underlying
+# exception. Both went into a document written for a marketing manager.
+# --------------------------------------------------------------------------
+
+from audit_common import explain_fetch_error  # noqa: E402
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("Exceeded 30 redirects.", "redirects in a loop"),
+    ("Too many redirects", "redirects in a loop"),
+    ("HTTPSConnectionPool(host='x.test', port=443): Max retries exceeded with url: "
+     "/landing (Caused by NameResolutionError(...))", "hostname that does not exist"),
+    ("[WinError 10061] No connection could be made because the target machine "
+     "actively refused it", "nothing is listening"),
+    ("Read timed out.", "did not answer in time"),
+    ("certificate verify failed: unable to get local issuer certificate",
+     "certificate a client will not accept"),
+    ("response was still arriving after 30s", "so slowly the audit stopped waiting"),
+])
+def test_a_fetch_failure_is_explained_not_quoted(raw, expected):
+    assert expected in explain_fetch_error(raw)
+
+
+def test_dns_failure_is_not_mistaken_for_a_redirect_loop():
+    """urllib3 wraps a DNS failure in text containing "Max retries exceeded"."""
+    raw = ("HTTPSConnectionPool(host='nowhere.test', port=443): Max retries exceeded "
+           "with url: / (Caused by NameResolutionError('no address'))")
+    assert "hostname that does not exist" in explain_fetch_error(raw)
+    assert "redirects in a loop" not in explain_fetch_error(raw)
+
+
+def test_an_unrecognised_failure_is_still_reported():
+    """Better a raw message than a swallowed one."""
+    assert "something nobody predicted" in explain_fetch_error("something nobody predicted")
+
+
+def test_no_verdict_wording_contains_a_template_placeholder():
+    """`1 high-severity problem(s) are holding back` shipped in the verdict."""
+    findings = [{"root_cause": "meta-hygiene", "severity": "high"}]
+    for counts in ({"critical": 1, "high": 0, "medium": 0, "low": 0, "info": 0},
+                   {"critical": 0, "high": 1, "medium": 0, "low": 0, "info": 0},
+                   {"critical": 0, "high": 4, "medium": 0, "low": 0, "info": 0},
+                   {"critical": 0, "high": 0, "medium": 1, "low": 0, "info": 0},
+                   {"critical": 0, "high": 0, "medium": 3, "low": 0, "info": 0},
+                   {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}):
+        verdict = compose._verdict(counts, findings, {}, {"profile_breadth": 8})
+        assert "(s)" not in verdict, verdict
+        assert "1 " not in verdict or " problem " in verdict or " item " in verdict
+
+
+# --------------------------------------------------------------------------
+# Verbs agree with their counts
+#
+# Removing "(s)" from thirty-five titles introduced "1 page carry no next
+# step" and "1 FAQ page have no FAQPage markup". Fixing one grammar bug by
+# creating another is not progress, so the count and the verb now move
+# together.
+# --------------------------------------------------------------------------
+
+PLURAL_TITLE = re.compile(r'plural\([^,]+, "([^"]+)", "([^"]+)"\)')
+
+
+def test_every_plural_title_form_agrees_with_its_count():
+    import glob
+    offenders = []
+    for path in sorted(glob.glob(os.path.join(ROOT, "skills", "*", "scripts", "check.py"))):
+        with open(path, encoding="utf-8") as handle:
+            source = handle.read()
+        for singular, plural_form in PLURAL_TITLE.findall(source):
+            skill = os.path.basename(os.path.dirname(os.path.dirname(path)))
+            # A bare noun pair is fine; a pair carrying a verb must inflect it.
+            if len(singular.split()) < 2 or len(plural_form.split()) < 2:
+                continue
+            # The real invariant: the two forms must actually differ, and the
+            # singular must not be the plural with an "s" bolted on the wrong
+            # word - "page stills" was a rewrite treating an adverb as a verb.
+            if singular == plural_form:
+                offenders.append("{}: {!r} does not change with the count".format(
+                    skill, singular))
+            if singular.split()[-1].rstrip("s") == plural_form.split()[-1] and                     singular.split()[-1].endswith("s") and                     plural_form.split()[-1] in ("still", "on", "of", "with", "in"):
+                offenders.append("{}: {!r} inflects a non-verb".format(skill, singular))
+    assert not offenders, "\n".join(offenders)
+
+
+@pytest.mark.parametrize("singular,plural_form,expected_one", [
+    ("page carries", "pages carry", "1 page carries"),
+    ("FAQ page has", "FAQ pages have", "1 FAQ page has"),
+    ("content page is", "content pages are", "1 content page is"),
+    ("page does", "pages do", "1 page does"),
+    ("internal link target returns", "internal link targets return",
+     "1 internal link target returns"),
+])
+def test_the_singular_reads_like_english(singular, plural_form, expected_one):
+    assert plural(1, singular, plural_form) == expected_one
+    assert plural(2, singular, plural_form).startswith("2 ")
+    assert plural(2, singular, plural_form).endswith(plural_form)

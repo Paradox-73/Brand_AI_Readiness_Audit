@@ -51,7 +51,8 @@ if _SHARED is None:
 sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
-    CONTENT_TYPES, SkillResult, has_price, load_snapshot, pages_of, pct, sample,
+    CONTENT_TYPES, example_urls, has_price, load_snapshot, pages_of, pct,
+    plural, sample, SkillResult
 )
 
 SKILL = "render-readability-audit"
@@ -204,7 +205,7 @@ def _check_shells(result, snapshot, content_pages, render_mode):
                 "not about abandoning the framework.",
             ],
             effort="high", owner="developer",
-            rationale="Mechanism C: a page that looks complete to a human can be empty to a "
+            rationale="A page that looks complete to a human can be empty to a "
                       "machine. Many crawlers and assistant fetchers read only the first HTML "
                       "response, so an empty shell means the brand has no homepage at all.",
             affected_pages=[home["url"]],
@@ -234,7 +235,7 @@ def _check_shells(result, snapshot, content_pages, render_mode):
                 "the delivered HTML.",
             ],
             effort="high", owner="developer",
-            rationale="Mechanism C: these pages are invisible to any consumer that does not run "
+            rationale="These pages are invisible to any consumer that does not run "
                       "JavaScript, which includes a large share of the crawlers that feed "
                       "AI answers.",
             affected_pages=[p["url"] for p in others],
@@ -271,7 +272,8 @@ def _check_thin_pages(result, content_pages, shells):
     rate = len(thin) / float(len(content_pages))
     result.add(
         id_hint="pages-too-thin-to-quote",
-        title="{} page(s) carry too little text to be quoted".format(len(thin)),
+        title="{} too little text to be quoted".format(
+            plural(len(thin), "page carries", "pages carry")),
         severity="high" if rate >= THIN_SHARE else "medium",
         confidence="high",
         evidence="{} of {} content pages ({}%) hold under {} characters of body text. "
@@ -292,7 +294,7 @@ def _check_thin_pages(result, content_pages, shells):
             "sitemap rather than leaving an empty URL in the index.",
         ],
         effort="medium", owner="content owner",
-        rationale="Mechanism B: assistants quote what is easy to lift. A page with nothing to "
+        rationale="Assistants quote what is easy to lift. A page with nothing to "
                   "lift is crawled, indexed and then never cited, and it dilutes the site's "
                   "average quality in the process.",
         affected_pages=[p["url"] for p in thin],
@@ -343,7 +345,7 @@ def _check_render_gap(result, content_pages, render_mode):
             "Re-measure by comparing View Source against the rendered page.",
         ],
         effort="high", owner="developer",
-        rationale="Mechanism C: the gap is the exact amount of content that disappears for any "
+        rationale="The gap is the exact amount of content that disappears for any "
                   "consumer that does not execute JavaScript.",
         affected_pages=[p["url"] for p, _ in gaps],
     )
@@ -373,7 +375,8 @@ def _check_image_locked(result, content_pages, shells):
 
     result.add(
         id_hint="facts-locked-in-images",
-        title="{} page(s) carry their main content in images rather than text".format(len(locked)),
+        title="{} their main content in images rather than text".format(
+            plural(len(locked), "page carries", "pages carry")),
         severity="medium", confidence="medium",
         evidence="Pages with under {} chars of readable text but substantial imagery: {}.".format(
             IMAGE_DOMINANT_TEXT,
@@ -390,7 +393,7 @@ def _check_image_locked(result, content_pages, shells):
             "at large size to be quotable.",
         ],
         effort="medium", owner="content owner",
-        rationale="Mechanism C: text baked into an image is not text. A machine that fetches the "
+        rationale="Text baked into an image is not text. A machine that fetches the "
                   "page sees markup around a picture and finds no fact it can lift.",
         affected_pages=[p["url"] for p, _ in locked],
     )
@@ -433,7 +436,7 @@ def _check_pdf_locked(result, content_pages):
             "Keep both in sync by generating the PDF from the HTML, not the other way round.",
         ],
         effort="medium", owner="content owner",
-        rationale="Mechanism C: PDFs are fetched inconsistently, parsed unevenly, and rarely "
+        rationale="PDFs are fetched inconsistently, parsed unevenly, and rarely "
                   "quoted with confidence. A number that exists only in a PDF is a number the "
                   "assistant will not state.",
         affected_pages=[p["url"] for p, _ in locked],
@@ -462,12 +465,12 @@ def _check_video_transcripts(result, content_pages):
 
     result.add(
         id_hint="video-without-transcript",
-        title="{} page(s) lead with audio or video and carry little readable text".format(
-            len(thin_video)),
+        title="{} with audio or video and carry little readable text".format(
+            plural(len(thin_video), "page leads", "pages lead")),
         severity="medium", confidence="medium",
         evidence="Pages with an embedded or native video, no caption track, no nearby "
                  "transcript, and under 800 chars of body text: {}.".format(
-                     ", ".join(sample([p["url"] for p in thin_video], 5))),
+                     ", ".join(example_urls([p["url"] for p in thin_video]))),
         mechanism="C", root_cause="no-transcript",
         summary="Publish a transcript or a written summary alongside each video.",
         how_to_fix=[
@@ -477,7 +480,7 @@ def _check_video_transcripts(result, content_pages):
             "Attach a <track kind=\"captions\"> file to native <video> elements.",
         ],
         effort="low", owner="content owner",
-        rationale="Mechanism C: nothing inside a video file is readable text. A page whose "
+        rationale="Nothing inside a video file is readable text. A page whose "
                   "substance is spoken aloud is, to a machine, a page with almost nothing on it.",
         affected_pages=[p["url"] for p in thin_video],
     )
@@ -501,7 +504,8 @@ def _check_iframed_content(result, content_pages, shells):
 
     result.add(
         id_hint="main-content-in-iframe",
-        title="{} page(s) hold their main content inside an iframe".format(len(iframed)),
+        title="{} their main content inside an iframe".format(
+            plural(len(iframed), "page holds", "pages hold")),
         severity="medium", confidence="medium",
         evidence="Pages with under {} chars of own text plus a non-video, non-map iframe: {}.".format(
             MIN_QUOTABLE_TEXT,
@@ -515,7 +519,7 @@ def _check_iframed_content(result, content_pages, shells):
             "core facts as HTML text above or below it.",
         ],
         effort="medium", owner="developer",
-        rationale="Mechanism C: an iframe is a separate document. Consumers that read the parent "
+        rationale="An iframe is a separate document. Consumers that read the parent "
                   "page see the frame element, not the content inside it, so the page reads as empty.",
         affected_pages=[p["url"] for p, _ in iframed],
     )
@@ -535,11 +539,13 @@ def _check_alt_coverage(result, content_pages):
     total_missing = sum((p.get("images") or {}).get("missing_alt_count", 0) for p in heavy)
     result.add(
         id_hint="images-missing-alt-text",
-        title="{} image(s) on content pages have no alt attribute".format(total_missing),
+        title="{} content pages {} no alt attribute".format(
+            plural(total_missing, "image on", "images on"),
+            "has" if total_missing == 1 else "have"),
         severity="low", confidence="high",
         evidence="{} image-heavy page(s) contain images with no alt attribute at all. "
                  "Examples: {}.".format(
-                     len(heavy), ", ".join(sample([p["url"] for p in heavy], 5))),
+                     len(heavy), ", ".join(example_urls([p["url"] for p in heavy]))),
         mechanism="C", root_cause="alt-missing",
         summary="Add descriptive alt text to content images and alt=\"\" to purely decorative ones.",
         how_to_fix=[
@@ -548,7 +554,7 @@ def _check_alt_coverage(result, content_pages):
             "Prioritise product photos, diagrams and any image containing words.",
         ],
         effort="low", owner="content owner",
-        rationale="Mechanism C: alt text is the only readable description of an image. It also "
+        rationale="Alt text is the only readable description of an image. It also "
                   "matters for accessibility, so this fix pays twice.",
         affected_pages=[p["url"] for p in heavy],
     )
@@ -578,11 +584,12 @@ def _check_pagination(result, snapshot, content_pages):
 
     result.add(
         id_hint="load-more-without-crawlable-pagination",
-        title="{} listing page(s) hide their catalogue behind a load-more button".format(len(offenders)),
+        title="{} their catalogue behind a load-more button".format(
+            plural(len(offenders), "listing page hides", "listing pages hide")),
         severity="medium", confidence="medium",
         evidence="Listing pages containing a load-more control with no numbered pagination "
                  "links in the HTML: {}.".format(
-                     ", ".join(sample([p["url"] for p in offenders], 5))),
+                     ", ".join(example_urls([p["url"] for p in offenders]))),
         mechanism="A", root_cause="uncrawlable-pagination",
         summary="Add real paginated links alongside the load-more button.",
         how_to_fix=[
@@ -592,7 +599,7 @@ def _check_pagination(result, snapshot, content_pages):
             "Make sure every item is reachable through those links without JavaScript.",
         ],
         effort="medium", owner="developer",
-        rationale="Mechanism A: a crawler does not press buttons. Items past the first batch have "
+        rationale="A crawler does not press buttons. Items past the first batch have "
                   "no URL a crawler can follow, so most of the catalogue is never fetched.",
         affected_pages=[p["url"] for p in offenders],
     )

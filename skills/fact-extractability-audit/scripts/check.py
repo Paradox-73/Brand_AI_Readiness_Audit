@@ -53,8 +53,9 @@ if _SHARED is None:
 sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
-    SkillResult, has_price, language_of, load_snapshot, name_forms, pages_of,
-    pct, prose_skip_reason, sample, sentences, truncate, word_count,
+    example_urls, has_price, language_of, load_snapshot, name_forms,
+    pages_of, pct, plural, prose_skip_reason, sample, sentences,
+    SkillResult, truncate, word_count
 )
 
 SKILL = "fact-extractability-audit"
@@ -297,7 +298,7 @@ def _check_entity_definition(result, snapshot, pages, brand_name, brand=None):
             "use the same sentence.",
         ],
         effort="low", owner="marketing",
-        rationale="Mechanism B: assistants quote what is easy to lift. Identity is the first "
+        rationale="Assistants quote what is easy to lift. Identity is the first "
                   "thing they need and the hardest thing to infer from marketing copy, so a "
                   "brand with no definition sentence gets described in whatever words a third "
                   "party used instead.",
@@ -340,7 +341,7 @@ def _check_heading_hierarchy(result, pages):
             title="Heading structure does not describe the page reliably",
             severity="medium" if (no_h1 or many_h1) else "low", confidence="high",
             evidence="{}. Examples: {}.".format("; ".join(problems),
-                                                ", ".join(sample(sorted(affected), 5))),
+                                                ", ".join(example_urls(sorted(affected)))),
             mechanism="C", root_cause="heading-structure",
             summary="Give every page exactly one H1 that names its subject, and use H2/H3 in order.",
             how_to_fix=[
@@ -349,7 +350,7 @@ def _check_heading_hierarchy(result, pages):
                 "Do not skip levels: an H4 should follow an H3, not an H2.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism C: headings are how a machine works out which part of a long "
+            rationale="Headings are how a machine works out which part of a long "
                       "page answers which question. Broken structure means the whole page is "
                       "treated as one undifferentiated block.",
             affected_pages=sorted(affected),
@@ -404,7 +405,8 @@ def _check_slogan_headings(result, pages):
 
     result.add(
         id_hint="headings-are-slogans",
-        title="{} page(s) use slogan headings that do not name their topic".format(len(offenders)),
+        title="{} slogan headings that do not name their topic".format(
+            plural(len(offenders), "page uses", "pages use")),
         severity="low", confidence="medium",
         evidence="Pages where over {}% of H2s use vocabulary that appears nowhere else in the "
                  "page text: {}.".format(
@@ -420,7 +422,7 @@ def _check_slogan_headings(result, pages):
             "Keep the slogan as a subheading or in the body copy if it matters to the brand.",
         ],
         effort="low", owner="content owner",
-        rationale="Mechanism B: a heading is a machine's index into a long page. A heading that "
+        rationale="A heading is a machine's index into a long page. A heading that "
                   "does not name its topic means the section beneath it cannot be matched to a "
                   "question.",
         affected_pages=[p["url"] for p, _, _ in offenders],
@@ -478,8 +480,8 @@ def _check_answer_first(result, pages, brand_name):
 
     result.add(
         id_hint="sections-do-not-answer-first",
-        title="{} page(s) open their sections with warm-up prose instead of the answer".format(
-            len(offenders)),
+        title="{} their sections with warm-up prose instead of the answer".format(
+            plural(len(offenders), "page opens", "pages open")),
         severity="medium", confidence="medium",
         evidence="{} of {} sections on pages a buyer visits with a specific question ({}%) begin "
                  "with no number, date, price or definition. {}".format(
@@ -496,7 +498,7 @@ def _check_answer_first(result, pages, brand_name):
             "the facts you most want quoted.",
         ],
         effort="medium", owner="content owner",
-        rationale="Mechanism B: an assistant lifts a short passage, usually the opening of the "
+        rationale="An assistant lifts a short passage, usually the opening of the "
                   "most relevant section. If the opening is throat-clearing, the passage that "
                   "gets quoted contains no facts, and a competitor's page gets used instead.",
         affected_pages=[p["url"] for p, _, _ in offenders],
@@ -598,7 +600,7 @@ def _check_core_facts(result, snapshot, pages, brand_name):
                     "look for it.".format(name),
             how_to_fix=_core_fact_steps(name, brand_name),
             effort="low", owner="content owner",
-            rationale="Mechanism B: an assistant answers with facts it can quote. A fact that "
+            rationale="An assistant answers with facts it can quote. A fact that "
                       "is implied, shown only in an image, or held only in a form nobody fills "
                       "in is a fact it will not state, so the brand loses that question to "
                       "whoever did write it down.",
@@ -648,6 +650,23 @@ def _check_naming_consistency(result, snapshot, pages, brand):
     """
     result.check("brand-naming-consistency")
     variants = [v for v in (brand.get("authoritative_variants") or []) if v]
+
+    # Zero is not one-fewer-than-two. A site that asserts its own name nowhere
+    # a machine reads has not passed this check; it has failed the thing the
+    # check presupposes. Reporting "nothing to disagree with" put that in the
+    # appendix under "run and found nothing to report", beside genuine passes,
+    # where a reader takes it for a clean result. A check declining because its
+    # own prerequisite is missing has to say so in the finding list, not the
+    # exemption list.
+    if not variants:
+        result.skip("brand-naming-consistency",
+                    "the site never asserts its own name in a form a machine reads - no "
+                    "Organization `name` and no og:site_name - so there are no declared "
+                    "variants to compare. That absence is reported as a finding in its own "
+                    "right rather than counted as a pass here")
+        result.signal("authoritative_name_declarations", 0)
+        return
+
     if len(variants) < 2:
         result.skip("brand-naming-consistency",
                     "the site declares its name in {} authoritative place(s) ({}), so there is "
@@ -705,7 +724,7 @@ def _check_naming_consistency(result, snapshot, pages, brand):
             "Update the same string on your off-site profiles.",
         ],
         effort="low", owner="marketing",
-        rationale="Mechanism D: agreement across sources is what makes a fact trustworthy. Two "
+        rationale="Agreement across sources is what makes a fact trustworthy. Two "
                   "spellings halve the evidence for each and make it harder to tell that both "
                   "refer to one company.",
     )
@@ -730,7 +749,8 @@ def _check_long_sentences(result, pages):
 
     result.add(
         id_hint="sentences-too-long-to-quote",
-        title="{} page(s) are written in sentences too long to quote".format(len(offenders)),
+        title="{} written in sentences too long to quote".format(
+            plural(len(offenders), "page is", "pages are")),
         severity="low", confidence="medium",
         evidence="Pages where over {}% of sentences exceed 30 words: {}.".format(
             int(LONG_SENTENCE_SHARE * 100),
@@ -747,7 +767,7 @@ def _check_long_sentences(result, pages):
             "Put each concrete fact in its own short sentence so it can be lifted on its own.",
         ],
         effort="medium", owner="content owner",
-        rationale="Mechanism B: a quotable fact has to survive being taken out of its paragraph. "
+        rationale="A quotable fact has to survive being taken out of its paragraph. "
                   "A 40-word sentence carrying three qualifications cannot be excerpted without "
                   "changing its meaning, so it tends not to be excerpted at all.",
         affected_pages=[p["url"] for p in offenders],

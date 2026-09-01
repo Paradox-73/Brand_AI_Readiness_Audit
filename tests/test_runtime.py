@@ -98,10 +98,21 @@ def test_start_here_points_at_real_findings(audit, name):
 
     actionable = [f for f in report["findings"] if f["severity"] != "info"]
     if actionable:
-        # Top three by priority score, which is what "start here" means.
+        # Top three by priority score, drawn from medium-and-above first.
+        # Ranking on the score alone put a `low` finding - missing Open Graph
+        # tags, which control what a link preview looks like when shared -
+        # above structured data that does not parse, because a cheap site-wide
+        # fix carries full reach and the lowest effort divisor.
         ranked = sorted(actionable,
-                        key=lambda f: -f["suggested_action"]["priority_score"])[:3]
-        assert report["start_here"] == [f["id"] for f in ranked]
+                        key=lambda f: -f["suggested_action"]["priority_score"])
+        substantive = [f for f in ranked if f["severity"] in ("critical", "high", "medium")]
+        expected = [f["id"] for f in
+                    (substantive + [f for f in ranked if f not in substantive])[:3]]
+        assert report["start_here"] == expected
+
+        chosen = [by_id[i] for i in report["start_here"]]
+        if len(substantive) >= 3:
+            assert all(f["severity"] != "low" for f in chosen),                 "a low-severity finding displaced a substantive one in Start here"
 
 
 @pytest.mark.parametrize("name", FIXTURE_NAMES)

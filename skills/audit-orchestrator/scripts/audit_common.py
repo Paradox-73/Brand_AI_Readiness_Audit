@@ -817,8 +817,17 @@ class SkillResult:
         self.not_applicable = []
         self.extra_requests_made = 0
         self.signals = {}
+        self._current_check = None
 
     def check(self, name):
+        # Remembered so `add()` can stamp the finding with the check that
+        # produced it. Without that mapping the report cannot tell a check that
+        # ran and passed from one that ran and fired, so twelve checks - robots
+        # reachable, homepage reachable, sitemap parses and the rest - appeared
+        # in neither the findings nor the not-applicable list. The README
+        # promises every quiet check says why; those said nothing at all, and
+        # they are exactly the reassuring ones a reader wants to see.
+        self._current_check = name
         if name not in self.checks_run:
             self.checks_run.append(name)
 
@@ -827,7 +836,9 @@ class SkillResult:
         self.not_applicable.append({"check": name, "skill": self.skill, "reason": reason})
 
     def add(self, **kwargs):
-        self.findings.append(make_finding(**kwargs))
+        finding = make_finding(**kwargs)
+        finding["check"] = getattr(self, "_current_check", None)
+        self.findings.append(finding)
 
     def signal(self, key, value):
         self.signals[key] = value
@@ -872,6 +883,74 @@ def load_snapshot(path):
     if "pages" not in snapshot:
         raise ValueError("{} is not a crawl snapshot (no `pages` key)".format(path))
     return snapshot
+
+
+# Raw library text is not a diagnosis. A redirect loop reached the report as
+# "returned no response (Exceeded 30 redirects.)", and a homepage redirecting
+# to a domain that does not exist arrived as a full urllib3 connection-pool
+# message, complete with the class name of the underlying exception - in a
+# document written for a marketing manager.
+#
+# Each entry is (substring to look for, what actually happened).
+# Order matters, most specific first. urllib3 wraps a DNS failure in a message
+# that also contains "Max retries exceeded", so a bare "exceeded" test called a
+# homepage redirecting to a non-existent domain a redirect loop.
+FETCH_ERROR_MEANINGS = (
+    ("nameresolutionerror", "points at a hostname that does not exist"),
+    ("failed to resolve", "points at a hostname that does not exist"),
+    ("getaddrinfo", "points at a hostname that does not exist"),
+    ("connection refused", "refused the connection - nothing is listening on that address"),
+    ("actively refused", "refused the connection - nothing is listening on that address"),
+    ("timed out", "did not answer in time"),
+    ("timeout", "did not answer in time"),
+    ("certificate", "has an HTTPS certificate a client will not accept"),
+    ("sslerror", "has an HTTPS certificate a client will not accept"),
+    ("connection reset", "closed the connection part-way through the response"),
+    ("connection aborted", "closed the connection part-way through the response"),
+    ("still arriving", "sent its response so slowly the audit stopped waiting"),
+    ("redirects", "redirects in a loop and never arrives at a page"),
+)
+
+
+def explain_fetch_error(error):
+    """Say what went wrong in words the site's owner can act on.
+
+    Falls back to the raw text, so an error nobody anticipated is still
+    reported rather than swallowed.
+    """
+    text = str(error or "").strip()
+    if not text:
+        return "did not respond"
+    low = text.lower()
+    for needle, meaning in FETCH_ERROR_MEANINGS:
+        if needle in low:
+            return meaning
+    return "could not be fetched ({})".format(truncate(text, 120))
+
+
+def example_urls(urls, limit=5):
+    """The URLs a finding quotes, matching the ones it lists as affected.
+
+    `affected_pages` is `sorted(set(...))[:5]`; the evidence line used a seeded
+    random sample of the same population. Both were five URLs from the same
+    problem and they were different five, so one finding read as two - the
+    evidence naming two product pages while the affected list underneath named
+    an about page and an FAQ.
+    """
+    return sorted(set(u for u in urls if u))[:limit]
+
+
+def plural(count, singular, plural_form=None):
+    """`1 page`, not `1 page(s)`.
+
+    `report.md` is written for a marketing manager and carried "(s)" through
+    every finding title, which is the first thing a reader sees. A parenthesised
+    plural is a note from a programmer to themselves that the reader has to
+    decode.
+    """
+    if plural_form is None:
+        plural_form = singular + "s"
+    return "{} {}".format(count, singular if count == 1 else plural_form)
 
 
 def pages_of(snapshot, types=None, content_only=False, ok_only=True,

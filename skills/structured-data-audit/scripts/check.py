@@ -53,8 +53,8 @@ if _SHARED is None:
 sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
-    CONTENT_TYPES, DEEP_TYPES, SkillResult, find_prices, load_snapshot,
-    name_forms, pages_of, pct, sample, truncate,
+    CONTENT_TYPES, DEEP_TYPES, example_urls, find_prices, load_snapshot,
+    name_forms, pages_of, pct, plural, sample, SkillResult, truncate
 )
 
 SKILL = "structured-data-audit"
@@ -212,7 +212,8 @@ def _check_jsonld_validity(result, pages):
     first = broken[0]["jsonld_errors"][0]
     result.add(
         id_hint="jsonld-does-not-parse",
-        title="{} page(s) contain JSON-LD that does not parse".format(len(broken)),
+        title="{} JSON-LD that does not parse".format(
+            plural(len(broken), "page contains", "pages contain")),
         severity="high", confidence="high",
         evidence="Example: {} -> {}. Excerpt: {}".format(
             broken[0]["url"], first.get("error"), truncate(first.get("excerpt", ""), 120)),
@@ -227,7 +228,7 @@ def _check_jsonld_validity(result, pages):
             "Re-test with Google's Rich Results Test or the schema.org validator.",
         ],
         effort="low", owner="developer",
-        rationale="Mechanism C: invalid JSON-LD is discarded entirely by every consumer. The "
+        rationale="Invalid JSON-LD is discarded entirely by every consumer. The "
                   "site has paid the cost of adding structured data and receives none of the "
                   "benefit, which is worse than having none, because nobody notices.",
         affected_pages=[p["url"] for p in broken],
@@ -265,7 +266,7 @@ def _check_organization(result, snapshot, pages, by_type, brand):
             severity="medium", confidence="high",
             evidence="Checked {} content page(s) including {}. None declares an "
                      "Organization-level JSON-LD type.".format(
-                         len(pages), ", ".join(sample([p["url"] for p in identity_pages], 3))),
+                         len(pages), ", ".join(example_urls([p["url"] for p in identity_pages], 3))),
             mechanism="C", root_cause="no-org-schema",
             summary="Add one Organization JSON-LD block to the site template so it appears on "
                     "every page.",
@@ -278,7 +279,7 @@ def _check_organization(result, snapshot, pages, by_type, brand):
                 "Validate with the schema.org validator, then re-check one page in View Source.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism C: Organization markup is the one place a machine can read the "
+            rationale="Organization markup is the one place a machine can read the "
                       "brand's identity as data rather than inferring it from prose. Without it, "
                       "who you are is a guess.",
             affected_pages=[p["url"] for p in identity_pages],
@@ -306,7 +307,7 @@ def _check_organization(result, snapshot, pages, by_type, brand):
                 "Re-validate after the change.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism D: `sameAs` is how a machine confirms that the company on this "
+            rationale="`sameAs` is how a machine confirms that the company on this "
                       "site is the same company on those profiles. Without it the site is one "
                       "unlinked claim among many.",
             affected_pages=[page["url"]],
@@ -347,13 +348,13 @@ def _check_product(result, by_type):
     if without:
         result.add(
             id_hint="no-product-schema",
-            title="{} of {} product page(s) have no Product markup".format(
-                len(without), len(products)),
+            title="{} of {} have no Product markup".format(
+                len(without), plural(len(products), "product page")),
             # Leans the right way in the study (23% of unnamed brands versus 6%
             # of named ones) but on too few sites to justify `high`.
             severity="medium", confidence="high",
             evidence="Product pages with no Product JSON-LD: {}.".format(
-                ", ".join(sample([p["url"] for p in without], 5))),
+                ", ".join(sample([p["url"] for p in without]))),
             mechanism="C", root_cause="no-product-schema",
             summary="Add Product plus Offer JSON-LD to the product page template.",
             how_to_fix=[
@@ -366,7 +367,7 @@ def _check_product(result, by_type):
                 "Because this is one template, the fix covers every product page at once.",
             ],
             effort="medium", owner="developer",
-            rationale="Mechanism C: price and availability are exactly the facts a shopper asks "
+            rationale="Price and availability are exactly the facts a shopper asks "
                       "an assistant for. Stated only as styled text, they are ambiguous; stated "
                       "as Offer properties, they are unambiguous data.",
             affected_pages=[p["url"] for p in without],
@@ -390,8 +391,8 @@ def _check_product(result, by_type):
     if incomplete:
         result.add(
             id_hint="product-schema-missing-offer-details",
-            title="Product markup is present but the Offer is incomplete on {} page(s)".format(
-                len(incomplete)),
+            title="Product markup is present but the Offer is incomplete on {}".format(
+                plural(len(incomplete), "page")),
             severity="medium", confidence="high",
             evidence="; ".join("{} ({})".format(p["url"], why)
                                for p, why in sorted(incomplete, key=lambda x: x[0]["url"])[:5]),
@@ -403,7 +404,7 @@ def _check_product(result, by_type):
                 "Validate one page with the schema.org validator after the change.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism C: a Product without a priced Offer answers 'what is this' but "
+            rationale="A Product without a priced Offer answers 'what is this' but "
                       "not 'what does it cost', which is the question being asked.",
             affected_pages=[p["url"] for p, _ in incomplete],
             snippet=_product_snippet(products[0]),
@@ -459,11 +460,11 @@ def _check_article(result, by_type):
     if without:
         result.add(
             id_hint="no-article-schema",
-            title="{} of {} article page(s) have no Article markup".format(
-                len(without), len(articles)),
+            title="{} of {} have no Article markup".format(
+                len(without), plural(len(articles), "article page")),
             severity="medium", confidence="high",
             evidence="Article pages with no Article JSON-LD: {}.".format(
-                ", ".join(sample([p["url"] for p in without], 5))),
+                ", ".join(example_urls([p["url"] for p in without]))),
             mechanism="C", root_cause="no-article-schema",
             summary="Add Article JSON-LD with datePublished, dateModified and author to the post template.",
             how_to_fix=[
@@ -473,7 +474,7 @@ def _check_article(result, by_type):
                 "`author` should be a Person with a URL to an author page where possible.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism D: without a machine-readable date, a consumer cannot tell "
+            rationale="Without a machine-readable date, a consumer cannot tell "
                       "whether a post is current, and undated content is discounted against "
                       "dated competitors saying the same thing.",
             affected_pages=[p["url"] for p in without],
@@ -492,7 +493,8 @@ def _check_article(result, by_type):
     if incomplete:
         result.add(
             id_hint="article-schema-missing-properties",
-            title="Article markup is missing dates or author on {} page(s)".format(len(incomplete)),
+            title="Article markup is missing dates or author on {}".format(
+                plural(len(incomplete), "page")),
             severity="medium", confidence="high",
             evidence="; ".join("{} (missing {})".format(p["url"], why)
                                for p, why in sorted(incomplete, key=lambda x: x[0]["url"])[:5]),
@@ -503,7 +505,7 @@ def _check_article(result, by_type):
                 "Add an author object naming a real person, linked to an author page.",
             ],
             effort="low", owner="developer",
-            rationale="Mechanism D: date and author are the two properties that let a consumer "
+            rationale="Date and author are the two properties that let a consumer "
                       "decide whether to trust and quote a piece of writing.",
             affected_pages=[p["url"] for p, _ in incomplete],
             snippet=_article_snippet(articles[0]),
@@ -549,10 +551,11 @@ def _check_faq(result, by_type):
 
     result.add(
         id_hint="no-faq-schema",
-        title="{} FAQ page(s) have no FAQPage markup".format(len(without)),
+        title="{} no FAQPage markup".format(
+            plural(len(without), "FAQ page has", "FAQ pages have")),
         severity="medium", confidence="high",
         evidence="Pages that read as an FAQ but declare no FAQPage type: {}.".format(
-            ", ".join(sample([p["url"] for p in without], 5))),
+            ", ".join(example_urls([p["url"] for p in without]))),
         mechanism="C", root_cause="no-faq-schema",
         summary="Wrap the existing questions and answers in FAQPage JSON-LD.",
         how_to_fix=[
@@ -563,7 +566,7 @@ def _check_faq(result, by_type):
             "product headings.",
         ],
         effort="low", owner="developer",
-        rationale="Mechanism B: an FAQPage block hands over question-and-answer pairs already "
+        rationale="An FAQPage block hands over question-and-answer pairs already "
                   "shaped like the thing an assistant is trying to produce, which makes them "
                   "unusually easy to quote.",
         affected_pages=[p["url"] for p in without],
@@ -609,7 +612,7 @@ def _check_breadcrumbs(result, pages, by_type):
         title="Deep pages have no BreadcrumbList markup",
         severity="low", confidence="high",
         evidence="{} of {} crawled deep pages declare no BreadcrumbList. Examples: {}.".format(
-            len(without), len(deep), ", ".join(sample([p["url"] for p in without], 5))),
+            len(without), len(deep), ", ".join(example_urls([p["url"] for p in without]))),
         mechanism="C", root_cause="no-breadcrumb-markup",
         summary="Add BreadcrumbList JSON-LD to deep page templates.",
         how_to_fix=[
@@ -618,7 +621,7 @@ def _check_breadcrumbs(result, pages, by_type):
             "If there is no visible breadcrumb, add one; it helps visitors as much as machines.",
         ],
         effort="low", owner="developer",
-        rationale="Mechanism C: breadcrumbs state where a page sits in the site's structure, "
+        rationale="Breadcrumbs state where a page sits in the site's structure, "
                   "which tells a consumer what category the content belongs to without having "
                   "to infer it from the URL.",
         affected_pages=[p["url"] for p in without],
@@ -654,7 +657,7 @@ def _check_website_searchaction(result, by_type):
             "Replace the target URL with your real search URL pattern.",
         ],
         effort="low", owner="developer",
-        rationale="Mechanism C: this declares that the site has a searchable index, which lets "
+        rationale="This declares that the site has a searchable index, which lets "
                   "consumers reach content directly instead of only through crawled links.",
         affected_pages=[home["url"]],
         snippet='<script type="application/ld+json">\n' + json.dumps({
@@ -741,7 +744,7 @@ def _check_consistency(result, pages, brand):
             "would actually pay, and use `highPrice`/`lowPrice` on an AggregateOffer for ranges.",
         ],
         effort="medium", owner="developer",
-        rationale="Mechanism C: structured data is treated as an assertion by the site owner. "
+        rationale="Structured data is treated as an assertion by the site owner. "
                   "A wrong assertion is repeated confidently, so a contradiction does more "
                   "damage than an omission.",
         affected_pages=[p["url"] for p, _ in conflicts],
@@ -766,7 +769,20 @@ def _check_titles_and_descriptions(result, pages):
         problems.append("{} of {} page(s) have no meta description".format(
             len(missing_desc), len(pages)))
     if duplicate_titles:
-        problems.append("{} title(s) are reused across pages".format(len(duplicate_titles)))
+        # Count the pages affected, not the number of repeated strings. "2
+        # titles are reused" on a seven-page site where six pages share a title
+        # with another reads as "two pages have a problem", which is wrong by a
+        # factor of three - and it is the number a content owner budgets from.
+        # Name the worst offender too: "faq.html is titled About" is a
+        # thirty-second fix that was invisible inside the aggregate.
+        affected = [p for p in pages if p.get("title") in duplicate_titles]
+        worst = max(duplicate_titles, key=lambda x: titles[x])
+        sharing = sorted(p["url"] for p in pages if p.get("title") == worst)
+        problems.append(
+            "{} of {} page(s) share a <title> with another page ({} distinct title(s) reused); "
+            "the most repeated is \"{}\" on {}".format(
+                len(affected), len(pages), len(duplicate_titles), truncate(worst, 60),
+                ", ".join(sharing[:4])))
     if duplicate_descriptions:
         problems.append("{} meta description(s) are reused".format(len(duplicate_descriptions)))
 
@@ -797,7 +813,7 @@ def _check_titles_and_descriptions(result, pages):
         title="Page titles and meta descriptions need attention",
         severity="medium" if severe else "low", confidence="high",
         evidence="{}. Affected pages include: {}.".format(
-            "; ".join(problems), ", ".join(sample(sorted(affected) or [p["url"] for p in pages], 5))),
+            "; ".join(problems), ", ".join(example_urls(sorted(affected) or [p["url"] for p in pages]))),
         mechanism="B", root_cause="meta-hygiene",
         summary="Give every page a unique title and a meta description that states the page's "
                 "specific fact.",
@@ -810,7 +826,7 @@ def _check_titles_and_descriptions(result, pages):
             "the template rather than each page.",
         ],
         effort="medium", owner="content owner",
-        rationale="Mechanism B: the title and description are the shortest description of a "
+        rationale="The title and description are the shortest description of a "
                   "page a consumer sees, and are often quoted directly. Duplicates make "
                   "different pages look like the same page.",
         affected_pages=sorted(affected),
@@ -835,7 +851,7 @@ def _check_open_graph(result, pages):
         title="Open Graph tags are missing on {} of {} pages".format(len(incomplete), len(pages)),
         severity="low", confidence="high",
         evidence="Pages missing at least one of og:title, og:description or og:image: {}.".format(
-            ", ".join(sample([p["url"] for p in incomplete], 5))),
+            ", ".join(example_urls([p["url"] for p in incomplete]))),
         mechanism="B", root_cause="open-graph-incomplete",
         summary="Add og:title, og:description and og:image to the site template.",
         how_to_fix=[
@@ -844,7 +860,7 @@ def _check_open_graph(result, pages):
             "og:image should be an absolute URL to an image at least 1200x630 pixels.",
         ],
         effort="low", owner="developer",
-        rationale="Mechanism B: Open Graph tags are what every sharing surface and several "
+        rationale="Open Graph tags are what every sharing surface and several "
                   "answer surfaces read to build a preview card, so they decide how the page "
                   "looks wherever it is repeated.",
         affected_pages=[p["url"] for p in incomplete],
@@ -859,10 +875,11 @@ def _check_lang(result, pages):
         return
     result.add(
         id_hint="missing-html-lang",
-        title="{} page(s) do not declare a language".format(len(without)),
+        title="{} not declare a language".format(
+            plural(len(without), "page does", "pages do")),
         severity="low", confidence="high",
         evidence="Pages with no lang attribute on <html>: {}.".format(
-            ", ".join(sample([p["url"] for p in without], 5))),
+            ", ".join(example_urls([p["url"] for p in without]))),
         mechanism="C", root_cause="missing-lang",
         summary='Add lang to the <html> element, for example <html lang="en">.',
         how_to_fix=[
@@ -870,7 +887,7 @@ def _check_lang(result, pages):
             "Use a regional subtag where it matters, such as en-GB or pt-BR.",
         ],
         effort="low", owner="developer",
-        rationale="Mechanism C: without a declared language a consumer has to guess, which "
+        rationale="Without a declared language a consumer has to guess, which "
                   "affects whether the page is surfaced for a given audience at all.",
         affected_pages=[p["url"] for p in without],
     )
@@ -886,10 +903,11 @@ def _check_microdata_only(result, pages):
         return
     result.add(
         id_hint="markup-uses-microdata-not-jsonld",
-        title="{} page(s) use inline microdata instead of JSON-LD".format(len(microdata_only)),
+        title="{} inline microdata instead of JSON-LD".format(
+            plural(len(microdata_only), "page uses", "pages use")),
         severity="low", confidence="medium",
         evidence="Pages with microdata attributes but no JSON-LD block: {}.".format(
-            ", ".join(sample([p["url"] for p in microdata_only], 5))),
+            ", ".join(example_urls([p["url"] for p in microdata_only]))),
         mechanism="C", root_cause="microdata-only",
         summary="Migrate the markup to JSON-LD, which is the format consumers support most consistently.",
         how_to_fix=[
@@ -897,7 +915,7 @@ def _check_microdata_only(result, pages):
             "Microdata can stay in place during the transition; the two do not conflict.",
         ],
         effort="medium", owner="developer",
-        rationale="Mechanism C: microdata is valid but sits inside the markup, so it breaks "
+        rationale="Microdata is valid but sits inside the markup, so it breaks "
                   "whenever the template changes. JSON-LD is a single self-contained block and "
                   "survives redesigns.",
         affected_pages=[p["url"] for p in microdata_only],

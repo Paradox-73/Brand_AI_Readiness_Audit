@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from audit_common import (  # noqa: E402
     EFFORT_DIVISOR, MECHANISMS, SEVERITY_RANK, SEVERITY_WEIGHT, VERSION,
-    load_snapshot, pages_of, read_json, sentences, truncate, write_json,
+    load_snapshot, pages_of, plural, read_json, sentences, truncate, write_json,
 )
 
 # Sub-skill order. Earlier skills own overlapping observations, so when two
@@ -135,11 +135,27 @@ def score(finding, pages_crawled):
     return round(weight * reach / effort, 3), round(reach, 3)
 
 
-def priority_label(value):
-    for threshold, label in PRIORITY_BANDS:
+# However cheap and however narrow, a severe problem is not a "when
+# convenient". The score decides the ordering; the label is an instruction to a
+# person, and reach was overwhelming severity in it. A `high` finding on one
+# page of seven scores 0.5 and read as "schedule", while a `low` one on every
+# page scores 1.0 and read as "do soon" - so the report told the owner to do
+# the small thing before the serious one, directly under headings that said the
+# opposite.
+PRIORITY_FLOOR = {"critical": "do first", "high": "do soon", "medium": "schedule"}
+_LABEL_ORDER = ["do first", "do soon", "schedule", "when convenient"]
+
+
+def priority_label(value, severity=None):
+    label = "when convenient"
+    for threshold, candidate in PRIORITY_BANDS:
         if value >= threshold:
-            return label
-    return "low"
+            label = candidate
+            break
+    floor = PRIORITY_FLOOR.get(severity)
+    if floor and _LABEL_ORDER.index(label) > _LABEL_ORDER.index(floor):
+        return floor
+    return label
 
 
 def assign_ids(findings):
@@ -275,10 +291,7 @@ def build_recommendations(snapshot, signals, findings):
         "It hands a machine the exact summary you want quoted, instead of leaving it to "
         "assemble one from whichever page it happened to fetch.",
         "low", "marketing",
-        "# {brand}\n\n> {brand} is a <category> that <does what> for <whom>.\n\n"
-        "## Key pages\n\n- [Pricing]({origin}/pricing): <one line with the actual numbers>\n"
-        "- [About]({origin}/about): founding facts, team, location\n".format(
-            brand=brand, origin=origin))
+        _llms_txt_template(snapshot, brand))
 
     add("R-ANSWER-FIRST", "Add an answer-first summary block to every key page",
         signals.get("fluff_first"),
@@ -291,8 +304,14 @@ def build_recommendations(snapshot, signals, findings):
         "lifted is the passage they find.",
         "low", "content owner")
 
+    # Only when there is no FAQ content at all. A site that has an FAQ page and
+    # has not marked it up already gets `no-faq-schema` as a finding, with the
+    # page named and a snippet carrying its real questions - and this told the
+    # same owner to "add a page of real questions" they had already written.
+    # Two sections of one report, disagreeing about whether a page exists.
+    has_faq_page = bool(pages_of(snapshot, types=("faq",)))
     add("R-FAQ-SCHEMA", "Publish FAQ content with FAQPage schema",
-        not signals.get("has_faq_schema"),
+        not signals.get("has_faq_schema") and not has_faq_page,
         "Add a page of real questions, phrased the way people ask assistants, marked up as FAQPage.",
         ["Collect the ten questions your sales or support team answers most often.",
          'Phrase each heading as the customer asks it ("How much does X cost?"), not as an '
@@ -495,7 +514,7 @@ def compose(snapshot, skill_results, audited_at=None):
     findings, duplicates = dedupe(skill_results)
     for finding in findings:
         value, reach = score(finding, pages_crawled)
-        finding["suggested_action"]["priority"] = priority_label(value)
+        finding["suggested_action"]["priority"] = priority_label(value, finding["severity"])
         finding["suggested_action"]["priority_score"] = value
         finding["reach"] = reach
     findings = assign_ids(findings)
@@ -503,8 +522,7 @@ def compose(snapshot, skill_results, audited_at=None):
     ranked = sorted(findings,
                     key=lambda f: (-f["suggested_action"]["priority_score"],
                                    SEVERITY_RANK[f["severity"]], f["id"]))
-    actionable = [f for f in ranked if f["severity"] != "info"]
-    start_here = [f["id"] for f in actionable[:3]]
+    start_here = _start_here_ids(ranked)
 
     counts = {level: sum(1 for f in findings if f["severity"] == level)
               for level in ("critical", "high", "medium", "low", "info")}
@@ -519,7 +537,7 @@ def compose(snapshot, skill_results, audited_at=None):
             "medium": counts["medium"],
             "low": counts["low"],
             "info": counts["info"],
-            "verdict": _verdict(counts, findings, crawl),
+            "verdict": _verdict(counts, findings, crawl, signals),
         },
         "findings": [_public_finding(f) for f in findings],
         "start_here": start_here,
@@ -539,6 +557,12 @@ def compose(snapshot, skill_results, audited_at=None):
             "notes": crawl.get("notes") or [],
         },
         "checks_run": sorted(checks_run, key=lambda c: (c["skill"], c["check"])),
+        # Every check now lands in exactly one of three buckets: it fired, it
+        # declined and said why, or it ran and was clean. Twelve used to fall
+        # through all three and appear nowhere - the ones that confirm robots.txt
+        # was fetched and the homepage answered, which are precisely what a
+        # worried reader is looking for.
+        "checks_passed": _checks_passed(checks_run, not_applicable, findings),
         "not_applicable": sorted(not_applicable, key=lambda n: (n.get("skill", ""), n["check"])),
         "merged_duplicates": duplicates,
         "auditor": {"name": "brand-ai-readiness-audit", "version": VERSION},
@@ -579,7 +603,94 @@ def _public_finding(finding):
     return out
 
 
-def _verdict(counts, findings, crawl=None):
+NON_PUBLIC_HOST_RE = re.compile(
+    r"https?://(?:localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0"
+    r"|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+"
+    r"|[^/\s]*\.(?:local|test|localhost|invalid|internal))", re.I)
+
+
+def _non_public_host(text):
+    """Is this snippet filled in with an address nobody else can reach?"""
+    return bool(NON_PUBLIC_HOST_RE.search(text or ""))
+
+
+def _checks_passed(checks_run, not_applicable, findings):
+    """Checks that ran, produced no finding, and had no reason to decline.
+
+    The README promises that every check which stays quiet says why. That was
+    true of the checks which declined and false of the ones that simply passed:
+    they appeared in neither list, so a reader could not tell that robots.txt
+    had been fetched at all.
+    """
+    declined = {(n.get("skill"), n["check"]) for n in not_applicable}
+    fired = {(f.get("detected_by"), f.get("check")) for f in findings}
+    passed = [c for c in checks_run
+              if (c["skill"], c["check"]) not in declined
+              and (c["skill"], c["check"]) not in fired]
+    return sorted(passed, key=lambda c: (c["skill"], c["check"]))
+
+
+def _llms_txt_template(snapshot, brand):
+    """A starter /llms.txt listing pages that actually exist on this site.
+
+    It used to hard-code `<origin>/pricing` and `<origin>/about`. On a site
+    with neither - which is most small sites - the file labelled paste-ready
+    told the owner to publish two links that 404 on their own domain, guessed
+    from a naming convention the crawl had already disproved.
+    """
+    wanted = ("about", "pricing", "product", "service", "faq", "contact")
+    seen, lines = set(), []
+    for page_type in wanted:
+        for page in pages_of(snapshot, types=(page_type,)):
+            if page["url"] in seen:
+                continue
+            seen.add(page["url"])
+            label = (page.get("title") or page_type).strip()
+            lines.append("- [{}]({}): <one line saying what is on this page>".format(
+                truncate(label, 60), page["url"]))
+            break
+    if not lines:
+        lines.append("- [<page name>](<url>): <one line saying what is on this page>")
+
+    header = ("# {0}\n\n> {0} is a <category> that <does what> for <whom>.\n\n"
+              "## Key pages\n\n")
+    return header.format(brand) + "\n".join(lines) + "\n"
+
+
+def _start_here_ids(ranked, limit=3):
+    """The first three things to do, drawn from findings that are worth doing.
+
+    "Start here" answers "what should I do first", and a `low` finding is by
+    definition not that. Ranking on the priority score alone put missing Open
+    Graph tags - which control what a link preview looks like when shared -
+    third, above fixing structured data that does not parse, because a `low`
+    finding still scores 1 and a cheap site-wide fix carries full reach and the
+    lowest effort divisor.
+
+    So the list is drawn from medium and above first, falling back to the low
+    findings only when there are not enough. Ordering inside each tier is still
+    severity x reach / effort, which is the part that earns its keep.
+    """
+    actionable = [f for f in ranked if f["severity"] != "info"]
+    substantive = [f for f in actionable
+                   if f["severity"] in ("critical", "high", "medium")]
+    remainder = [f for f in actionable if f not in substantive]
+    return [f["id"] for f in (substantive + remainder)[:limit]]
+
+
+def _verdict(counts, findings, crawl=None, signals=None):
+    """One paragraph naming what is actually wrong, not how many things are.
+
+    This used to be a pure severity ladder, and on a site with no off-site
+    presence, no identity markup, invalid markup where it existed and six of
+    seven pages sharing a title, it opened with "The foundations are sound"
+    because no finding happened to be `critical`. A summary that contradicts
+    the report beneath it is the one sentence most likely to be the only
+    sentence read.
+
+    The counts still decide how loud to be. What the site is failing at now
+    decides what to say.
+    """
     # A robots-blocked run reports almost nothing, and without saying why that
     # looks like a broken audit rather than a respected instruction.
     if (crawl or {}).get("audit_blocked_by_robots"):
@@ -587,19 +698,43 @@ def _verdict(counts, findings, crawl=None):
                 "the findings below come from robots.txt alone. That is the file working as "
                 "intended; it also means any crawler that respects it sees exactly as little.")
     if counts["critical"]:
-        return ("Machines are being shut out before they read anything. {} critical problem(s) "
-                "block access or delivery, and nothing else on the site can compensate until "
-                "they are fixed.".format(counts["critical"]))
+        return ("Machines are being shut out before they read anything. {} access or "
+                "delivery, and nothing else on the site can compensate until it is "
+                "fixed.".format(plural(counts["critical"], "critical problem blocks",
+                                       "critical problems block")))
+    # The Round-2 "invisible" diagnosis, and it outranks the severity ladder.
+    # A brand that declares no identity a machine can read, and links to nothing
+    # that would corroborate one, is unquotable however few findings are severe:
+    # there is no fact to repeat and nothing to check it against.
+    signals = signals or {}
+    causes = {f["root_cause"] for f in findings}
+    breadth = signals.get("profile_breadth")
+    undeclared = bool(causes & {"no-org-schema", "no-entity-definition"})
+    uncorroborated = ("weak-corroboration" in causes
+                      or (breadth is not None and breadth <= 1))
+    if undeclared and uncorroborated:
+        return ("A machine can reach this site and read it. What it cannot do is work out who "
+                "the brand is. The pages never state an identity in a form a machine reads, "
+                "and no independent source is linked that would agree with one if they did. "
+                "That single pattern is behind most of the findings below, and it is why an "
+                "assistant asked about this category has nothing about this brand to repeat. "
+                "{} finding(s) follow, ordered by how much each changes relative to the work "
+                "involved.".format(len(findings)))
+
     if counts["high"] >= 3:
         return ("The site is reachable, but {} high-severity problems mean a machine fetching "
                 "it struggles to work out who this brand is or to find a fact worth "
                 "quoting.".format(counts["high"]))
     if counts["high"]:
-        return ("The foundations are sound. {} high-severity problem(s) are holding back how "
-                "confidently the brand can be described and cited.".format(counts["high"]))
+        return ("Access and delivery are sound - a machine can fetch these pages and read "
+                "them. {} back how confidently the brand can be described and "
+                "cited.".format(plural(counts["high"], "high-severity problem then holds",
+                                       "high-severity problems then hold")))
     if counts["medium"]:
-        return ("No blocking problems. {} medium-severity items are worth fixing to improve how "
-                "often and how accurately the brand gets quoted.".format(counts["medium"]))
+        return ("No blocking problems. {} worth fixing to improve how often and how "
+                "accurately the brand gets quoted.".format(
+                    plural(counts["medium"], "medium-severity item is",
+                           "medium-severity items are")))
     return ("No blocking or significant problems were found. The proactive recommendations below "
             "are where the remaining upside is.")
 
@@ -654,10 +789,22 @@ def render_markdown(report):
         omitted = [f for f in report["findings"]
                    if f["severity"] in ("critical", "high") and f["id"] not in severe]
         if omitted:
-            add("This is not a severity ranking. {} is more severe than some of the above, "
-                "and sits lower because it affects fewer pages or costs more to fix; see the "
-                "severity sections below.".format(
-                    ", ".join(f["id"] for f in omitted[:3])))
+            # Name the reason rather than offering the reader a choice of two.
+            # The score is severity x reach / effort and we computed it, so we
+            # know which term pushed the finding down.
+            explained = []
+            for f in omitted[:3]:
+                reason = ("it affects {} of the {} pages crawled".format(
+                    f["affected_page_count"], report["crawl"]["pages_crawled"])
+                    if f.get("affected_page_count") else "it needs development time")
+                if f["suggested_action"]["effort"] == "high":
+                    reason = "it needs several days of development time"
+                explained.append("{} ({}, {})".format(f["id"], f["severity"], reason))
+            add("These are ranked by how much each changes relative to the work involved, not "
+                "by severity alone. {} rank{} lower for that reason and {} listed in full "
+                "below.".format(
+                    "; ".join(explained), "s" if len(explained) == 1 else "",
+                    "is" if len(explained) == 1 else "are"))
             add("")
         for position, finding_id in enumerate(report["start_here"], start=1):
             finding = by_id[finding_id]
@@ -693,7 +840,8 @@ def render_markdown(report):
             add("")
             add(rec["summary"])
             add("")
-            add("**Why this works** (mechanism {}): {}".format(rec["mechanism"], rec["why_this_works"]))
+            add("**Why this works.** {} — {}".format(
+                MECHANISMS[rec["mechanism"]].rstrip("."), rec["why_this_works"]))
             add("")
             add("**How to do it** — {}, roughly {}:".format(rec["owner"], EFFORT_TIME[rec["effort"]]))
             for step in rec["how_to_do_it"]:
@@ -744,6 +892,16 @@ def render_markdown(report):
             add("- **{}** ({}): {}".format(item["check"], item.get("skill", ""), item["reason"]))
         add("")
 
+    if report.get("checks_passed"):
+        add("### Checks that ran and found nothing wrong")
+        add("")
+        add("Listed so that silence is never ambiguous. These ran against this site and were "
+            "clean - they are not omissions:")
+        add("")
+        for item in report["checks_passed"]:
+            add("- **{}** ({})".format(item["check"], item.get("skill", "")))
+        add("")
+
     if report["merged_duplicates"]:
         add("### Observations merged")
         add("")
@@ -765,9 +923,15 @@ def _render_finding(finding):
     out = []
     out.append("### {} — {}".format(finding["id"], finding["title"]))
     out.append("")
-    out.append("**Priority {}** · confidence {} · mechanism {} · found by {}{}".format(
-        action["priority"], finding["confidence"], finding["mechanism"], finding["detected_by"],
+    # The letter alone is an unexplained code, and this document is written for
+    # a marketing manager. The expansion lives in report.json and in a
+    # reference file, neither of which the person reading report.md has.
+    out.append("**Priority: {}** · confidence {} · found by {}{}".format(
+        action["priority"], finding["confidence"], finding["detected_by"],
         " and " + ", ".join(finding["also_detected_by"]) if finding.get("also_detected_by") else ""))
+    out.append("")
+    out.append("*Why this class of problem matters: {}.*".format(
+        MECHANISMS[finding["mechanism"]].rstrip(".")))
     out.append("")
     out.append("**What we found.** {}".format(finding["evidence"]))
     out.append("")
@@ -781,6 +945,16 @@ def _render_finding(finding):
         out.append("- {}".format(step))
     if action.get("snippet"):
         out.append("")
+        # The snippet is pre-filled with values found on the site, and on a
+        # staging or local origin that means a non-public URL inside code
+        # labelled paste-ready. Somebody pastes it into a live template and
+        # publishes a localhost logo path, so say so above the block.
+        if _non_public_host(action["snippet"]):
+            out.append("> **Change the URLs before you use this.** It is filled in with the "
+                       "address that was audited, which is not a public one, so the `url`, "
+                       "`logo` and any `offers.url` values below point somewhere nobody else "
+                       "can reach.")
+            out.append("")
         out.append("```")
         out.append(action["snippet"])
         out.append("```")
@@ -851,11 +1025,11 @@ def render_html(report):
             parts.append('<div class="finding">')
             parts.append('<h3><span class="badge" style="background:{}">{}</span> {} — {}</h3>'.format(
                 SEVERITY_COLOURS[key], esc(key), esc(finding["id"]), esc(finding["title"])))
-            parts.append('<p class="meta">Priority {} · confidence {} · mechanism {} · '
-                         "{} · {}</p>".format(
-                             esc(action["priority"]), esc(finding["confidence"]),
-                             esc(finding["mechanism"]), esc(action["owner"]),
-                             esc(EFFORT_TIME[action["effort"]])))
+            parts.append('<p class="meta">Priority: {} · confidence {} · {} · {}</p>'.format(
+                esc(action["priority"]), esc(finding["confidence"]),
+                esc(action["owner"]), esc(EFFORT_TIME[action["effort"]])))
+            parts.append('<p class="meta"><em>Why this class of problem matters: {}.</em></p>'
+                         .format(esc(MECHANISMS[finding["mechanism"]].rstrip("."))))
             parts.append("<p><strong>What we found.</strong> {}</p>".format(esc(finding["evidence"])))
             parts.append("<p><strong>Why it matters.</strong> {}</p>".format(esc(action["rationale"])))
             parts.append("<p><strong>What to do.</strong> {}</p><ul>".format(esc(action["summary"])))
@@ -871,8 +1045,8 @@ def render_html(report):
         for rec in report["recommendations"]:
             parts.append('<div class="finding"><h3>{}</h3><p>{}</p>'.format(
                 esc(rec["title"]), esc(rec["summary"])))
-            parts.append("<p><strong>Why this works</strong> (mechanism {}): {}</p><ul>".format(
-                esc(rec["mechanism"]), esc(rec["why_this_works"])))
+            parts.append("<p><strong>Why this works.</strong> {} — {}</p><ul>".format(
+                esc(MECHANISMS[rec["mechanism"]].rstrip(".")), esc(rec["why_this_works"])))
             for step in rec["how_to_do_it"]:
                 parts.append("<li>{}</li>".format(esc(step)))
             parts.append("</ul></div>")

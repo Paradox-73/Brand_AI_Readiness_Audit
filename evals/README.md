@@ -9,12 +9,12 @@ by hand against a site you control, or against any of the local fixtures.
 Serve a fixture and audit it:
 
 ```bash
-# Terminal 1 - serve a fixture. Works on Windows, macOS and Linux.
+# Terminal 1 - serve a fixture. Use `python` on Windows, `python3` elsewhere.
 python3 tests/serve_fixture.py js-shell-site
 # prints e.g. http://127.0.0.1:54321 and stays up until you press Ctrl-C
 
 # Terminal 2 - audit the URL it printed
-python3 run_audit.py http://127.0.0.1:54321
+python3 run_audit.py http://127.0.0.1:54321 --no-network
 ```
 
 ---
@@ -114,5 +114,5 @@ only one with an email capture.
 | **Fixes a non-expert can act on** | Every finding names an owner and a rough duration, and carries paste-ready code where code is the fix. |
 | **Silence is explained** | `not_applicable[]` is populated and each entry gives a reason. |
 | **Determinism** | Run twice on one site. `findings[]` must be byte-identical; only `audited_at` moves. |
-| **No false positives** | Audit `tests/fixtures/good-site`. It must report **zero** findings and still offer `R-BOILERPLATE`. |
+| **No false positives** | Audit `tests/fixtures/good-site` **with `--no-network`**. It must report **zero** findings and still offer `R-BOILERPLATE`. Without the flag it reports one, correctly: the fixture's profile URLs use reserved `.example` names, so the profile-link check asks the real internet about them and is told they do not exist. That is the check working. |
 | **Read-only** | Nothing is written to the target. Check the server log if you control the site. |

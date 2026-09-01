@@ -9,7 +9,8 @@
     "meta-hygiene",
     "uncrawlable-pagination",
     "weak-corroboration",
-    "no-date-signal"
+    "no-date-signal",
+    "no-faq-schema"
   ],
   "must_not_find": [
     "robots-block",
@@ -22,6 +23,10 @@
     "stale-content",
     "broken-links"
   ],
-  "must_recommend": ["R-FAQ-SCHEMA", "R-SAMEAS-WIKIDATA", "R-BOILERPLATE"],
-  "note": "must_not_find includes missing-core-fact deliberately. The prose states price, address and contact clearly, so the extractability skill must stay quiet even though the structured data is absent. A skill that conflates the two would fire here."
+  "must_recommend": [
+    "R-SAMEAS-WIKIDATA",
+    "R-BOILERPLATE"
+  ],
+  "note": "must_not_find includes missing-core-fact deliberately. The prose states price, address and contact clearly, so the extractability skill must stay quiet even though the structured data is absent. A skill that conflates the two would fire here.",
+  "why_no_faq_recommendation": "This fixture has an faq.html with real questions and no FAQPage markup, so the finding `no-faq-schema` names that page and ships a snippet carrying its actual questions. R-FAQ-SCHEMA says 'add a page of real questions', which told the owner to create a page they had already written. The recommendation now fires only where there is no FAQ page at all."
 }
