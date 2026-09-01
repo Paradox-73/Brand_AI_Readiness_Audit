@@ -23,7 +23,10 @@ from urllib.parse import urlparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from audit_common import (  # noqa: E402
-    MAX_DEPTH, MAX_PAGES, MAX_SITEMAP_SAMPLE, REQUEST_DELAY, REQUEST_TIMEOUT,
+    DEEP_TYPES, MAX_DEPTH, MAX_PAGES, MAX_RESPONSE_BYTES, MAX_SITEMAP_SAMPLE,
+    REFUSED_STATUS,
+    REQUEST_DELAY,
+    REQUEST_TIMEOUT,
     SEED, USER_AGENT, WALL_CLOCK_BUDGET, FetchError, Fetcher, detect_page_type,
     detect_site_language, eprint, is_forbidden_path, normalise_url, origin_of,
     response_text, same_site,
@@ -277,6 +280,7 @@ def fetch_page(fetcher, url, depth, source, origin):
             "content_type": content_type, "skipped": "non-HTML content type",
             "page_type": "other", "links": {"internal": [], "external": []},
             "text": "", "text_len": 0, "html_len": len(response.content or b""),
+            "truncated": bool(getattr(response, "truncated", False)),
             "headers": headers,
         }
 
@@ -286,6 +290,10 @@ def fetch_page(fetcher, url, depth, source, origin):
         html=html, redirect_chain=chain, elapsed_ms=getattr(response, "elapsed_ms", 0),
         depth=depth, source=source, origin=origin,
     )
+    # A page we stopped reading at the size cap is a limit of ours. Recorded
+    # here so the crawl notes can say so, rather than letting a half-read
+    # document look like a site that omitted the second half.
+    record["truncated"] = bool(getattr(response, "truncated", False))
     return record
 
 
@@ -540,6 +548,15 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
         else:
             notes.append("homepage unreachable after two attempts: {}".format(retry.get("error")))
 
+    head_supported = _probe_head_support(fetcher, home_url, home_record, notes)
+
+    oversized = [p["url"] for p in pages if p.get("truncated")]
+    if oversized:
+        notes.append(
+            "{} page(s) exceeded the {:,}-byte read cap and were analysed up to that point: "
+            "{}. Anything the audit says about what those pages lack is limited to the part "
+            "it read".format(len(oversized), MAX_RESPONSE_BYTES, ", ".join(sorted(oversized)[:3])))
+
     render_mode = "static"
     if render:
         # The rendered pass shares the crawl's wall-clock budget rather than
@@ -573,6 +590,12 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
             "seed": SEED,
             "user_agent": USER_AGENT,
             "render_mode": render_mode,
+            # Whether this site answers HEAD the same way it answers GET.
+            # Measured once here rather than rediscovered by three checks,
+            # because it is a property of the site and this crawl is the only
+            # place allowed to establish those. `None` means it could not be
+            # determined and the checks say so rather than guessing.
+            "head_supported": head_supported,
             "requests_made": fetcher.count,
             "respect_robots": respect_robots,
             "audit_blocked_by_robots": audit_blocked,
@@ -587,6 +610,33 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
     }
     write_json(out_path, snapshot)
     return snapshot
+
+
+def _probe_head_support(fetcher, home_url, home_record, notes):
+    """One HEAD to the homepage, to learn whether HEAD means anything here.
+
+    Three checks - broken internal links, sitemap URLs and canonical targets -
+    confirm a URL exists with HEAD and used to file any non-200 as dead.
+    Measured across eight major retail and banking homepages, three answer 403
+    to HEAD and 200 to GET, so on those sites every probed link was a false
+    positive waiting to happen.
+
+    Probing per link would double the request count. Probing once does not: a
+    site either honours HEAD or it does not, and the homepage has already been
+    fetched with GET so there is a baseline to compare against. One request.
+    """
+    if home_record is None or home_record.get("status") != 200:
+        return None
+    response = fetcher.try_get(home_url, method="HEAD")
+    if response is None:
+        return None
+    if response.status_code in REFUSED_STATUS:
+        notes.append(
+            "the site answers HEAD requests with HTTP {} while answering GET with 200, so link "
+            "targets the crawl did not reach could not be verified; they are reported as "
+            "unchecked rather than as broken".format(response.status_code))
+        return False
+    return 200 <= response.status_code < 400
 
 
 # The rendered pass. It runs by default when Playwright is importable and is
@@ -610,6 +660,59 @@ RENDER_SETTLE_MS = 500       # a moment for hydration to write to the DOM
 RENDER_MIN_SECONDS = 10      # below this there is no time to render even one page honestly
 
 
+def _render_targets(pages):
+    """The pages to render: a spread across page types, not the first five.
+
+    This was `pages[:RENDER_PAGES]`. The crawl is breadth-first from the
+    homepage, so those five were the homepage plus the first four top-nav
+    pages - which on a hybrid site are exactly the pages rendered on the
+    server. The JavaScript shells this pass exists to measure live on product,
+    article and location detail pages one level down, and could never be in
+    the sample. A site-wide share was being computed from a sample chosen by
+    position, which is the one thing a sample must not be.
+
+    Deterministic: every ordering here is by page type then URL, so two runs
+    against the same site render the same five pages.
+    """
+    ok = [p for p in pages if p.get("status") == 200]
+    if not ok:
+        return []
+
+    chosen, chosen_urls, seen_types = [], set(), set()
+
+    def take(page):
+        chosen.append(page)
+        chosen_urls.add(page["url"])
+        seen_types.add(page.get("page_type"))
+
+    home = next((p for p in ok if p.get("page_type") == "home"), None)
+    if home is not None:
+        take(home)
+
+    # One page of each type we have not seen yet, deepest types first: a
+    # product or article page tells us more about rendering than another
+    # listing page does.
+    def type_rank(page):
+        ptype = page.get("page_type")
+        return (0 if ptype in DEEP_TYPES else 1, ptype or "", page["url"])
+
+    for page in sorted(ok, key=type_rank):
+        if len(chosen) >= RENDER_PAGES:
+            break
+        if page["url"] in chosen_urls or page.get("page_type") in seen_types:
+            continue
+        take(page)
+
+    # Still short - a small site with two page types - so fill by URL order.
+    for page in sorted(ok, key=lambda p: p["url"]):
+        if len(chosen) >= RENDER_PAGES:
+            break
+        if page["url"] not in chosen_urls:
+            take(page)
+
+    return chosen[:RENDER_PAGES]
+
+
 def _render_pass(pages, notes, crawl_deadline=None, required=False):
     """Playwright pass: measure how much text JavaScript adds.
 
@@ -631,7 +734,7 @@ def _render_pass(pages, notes, crawl_deadline=None, required=False):
             "property of the auditing machine, not a defect in the site")
         return "static"
 
-    targets = [p for p in pages if p.get("status") == 200][:RENDER_PAGES]
+    targets = _render_targets(pages)
     if not targets:
         return "static"
 

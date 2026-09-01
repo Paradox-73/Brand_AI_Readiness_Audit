@@ -56,8 +56,8 @@ sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
     CONTENT_TYPES, DEEP_TYPES, FetchError, Fetcher, SkillResult, language_of,
-    load_snapshot, normalise_url, pages_of, pct, sample, same_site, truncate,
-    word_count,
+    link_verdict, load_snapshot, normalise_url, pages_of, pct, sample, same_site,
+    truncate, word_count,
 )
 
 SKILL = "engagement-audit"
@@ -418,24 +418,68 @@ def _check_broken_links(result, snapshot, pages, fetcher, allow_network):
             if link["url"] not in known:
                 candidates.add(link["url"])
 
-    broken = [(url, status) for url, status in known.items()
-              if status is not None and status >= 400]
-    checked = len([s for s in known.values() if s is not None])
+    # Pages the crawl fetched with GET: a verdict on those needs no probe.
+    broken, checked, unchecked = [], 0, 0
+    for url, status in known.items():
+        verdict = link_verdict(status)
+        if verdict == "dead":
+            broken.append((url, status))
+            checked += 1
+        elif verdict == "alive":
+            checked += 1
+        elif status is not None:
+            unchecked += 1
 
-    for url in sample(sorted(candidates), BROKEN_LINK_SAMPLE):
-        response = fetcher.try_get(url, method="HEAD")
-        if response is None:
-            continue
-        checked += 1
-        if response.status_code >= 400:
-            broken.append((url, response.status_code))
+    # Links the crawl never reached. HEAD is the polite way to ask, but only
+    # where HEAD means anything: three of eight major commercial sites answer
+    # 403 to HEAD and 200 to GET, and probing them would manufacture broken
+    # links that are not broken. The crawl establishes this once per site.
+    head_supported = (snapshot.get("crawl") or {}).get("head_supported")
+    if head_supported is False:
+        # Only ever as many as we would have sampled. Counting every candidate
+        # would report hundreds of "unchecked" targets on a large site, when
+        # the check would have probed twenty of them at most - true in the
+        # letter and misleading in the reading.
+        unchecked += min(len(candidates), BROKEN_LINK_SAMPLE)
+    else:
+        for url in sample(sorted(candidates), BROKEN_LINK_SAMPLE):
+            response = fetcher.try_get(url, method="HEAD")
+            verdict = link_verdict(response.status_code if response is not None else None)
+            if verdict == "dead":
+                broken.append((url, response.status_code))
+                checked += 1
+            elif verdict == "alive":
+                checked += 1
+            else:
+                unchecked += 1
+
+    result.signal("link_targets_checked", checked)
+    result.signal("link_targets_unchecked", unchecked)
+
+    # Why anything is unchecked, said once and reused, because a check that
+    # goes quiet without explaining itself is the thing this marketplace
+    # promises not to do.
+    if head_supported is False:
+        why_unchecked = (
+            "; {} further target(s) are unchecked because this site refuses HEAD requests "
+            "while answering GET normally, and verifying them would mean fetching every one "
+            "in full".format(unchecked))
+    elif unchecked:
+        why_unchecked = ("; {} further target(s) could not be verified - the server refused "
+                         "or errored rather than answering - and are counted neither way"
+                         .format(unchecked))
+    else:
+        why_unchecked = ""
 
     if not checked:
-        result.skip("broken-internal-links", "no internal links were available to test")
+        result.skip("broken-internal-links",
+                    ("no internal link target could be verified" + why_unchecked)
+                    if unchecked else "no internal links were available to test")
         return
     if not broken:
         result.skip("broken-internal-links",
-                    "all {} internal link target(s) tested resolved successfully".format(checked))
+                    "all {} internal link target(s) tested resolved successfully{}".format(
+                        checked, why_unchecked))
         return
 
     rate = len(broken) / float(checked)
@@ -443,10 +487,11 @@ def _check_broken_links(result, snapshot, pages, fetcher, allow_network):
         id_hint="broken-internal-links",
         title="{} internal link target(s) return an error".format(len(broken)),
         severity="high" if rate > BROKEN_LINK_HIGH else "medium", confidence="high",
-        evidence="{} of {} tested internal link targets ({}%) returned 4xx or 5xx. "
-                 "Examples: {}.".format(
+        evidence="{} of {} tested internal link targets ({}%) are gone. Examples: {}.{}".format(
                      len(broken), checked, pct(len(broken), checked),
-                     "; ".join("{} -> {}".format(u, s) for u, s in sorted(broken)[:5])),
+                     "; ".join("{} -> {}".format(u, s) for u, s in sorted(broken)[:5]),
+                     " A further {} target(s) could not be verified and are excluded from "
+                     "the rate.".format(unchecked) if unchecked else ""),
         mechanism="G", root_cause="broken-links",
         summary="Fix or remove the internal links that lead nowhere.",
         how_to_fix=[

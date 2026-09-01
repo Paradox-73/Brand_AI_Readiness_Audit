@@ -55,11 +55,44 @@ RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 # 240 s budget, so a slow site still finishes.
 SEED = 42
 MAX_PAGES = 60
-MAX_SITEMAP_SAMPLE = 8
+MAX_SITEMAP_SAMPLE = 8      # tried 16, identical findings, reverted
+# Two, and re-measured after the page ceiling doubled - because the first
+# experiment compared depth 3 against depth 2 at 30 pages, where depth 3 has no
+# budget left to reach depth 3, so it could only ever have found nothing. Run
+# again at 60: identical findings, and the page distribution says why. Sixty
+# pages on a large site is 1 at depth 0, 29 at depth 1 and 30 at depth 2, so
+# the budget is exhausted before the third level is reached at all. Depth is
+# not the limit here; the page count is.
 MAX_DEPTH = 2
 REQUEST_TIMEOUT = 10.0
 REQUEST_DELAY = 0.5
 WALL_CLOCK_BUDGET = 240.0
+
+# Two caps on a single response. Both were measured, and both close a hole that
+# a green test suite had nothing to say about.
+#
+# MAX_RESPONSE_BYTES. Nothing limited how much the crawler would read. Pointed
+# at a 125 MB response it downloaded all 125 MB into memory and only then threw
+# the page away for having the wrong content type. The cap is derived, not
+# picked: sixteen real homepages, including the heaviest news and retail sites,
+# ran 837 bytes to 1.38 MB with a median of 443 KB, so 5 MB is 3.6x the
+# heaviest page we could find. It must also stay *above* engagement-audit's
+# PAGE_WEIGHT_BYTES (3 MB), or every oversized page would weigh exactly the cap
+# and the "extreme payload" finding could never fire again - the same shape of
+# bug as `thin-html`, a check present in the vocabulary that nothing could
+# reach. `test_budgets.py` asserts that ordering so the two cannot drift.
+#
+# REQUEST_TOTAL_TIMEOUT. `requests` counts silence between bytes, not elapsed
+# time, so REQUEST_TIMEOUT above is not the bound it reads as. Measured: a
+# server sending one byte every nine seconds held a single fetch open past 260
+# seconds - against an audit that promises to finish in 300. This is the wall
+# clock for one request, and 30 s is 27x the 1.1 s a page averaged on a real
+# sixty-page crawl. The deadline can only be tested between chunks, so the
+# true worst case is REQUEST_TOTAL_TIMEOUT + REQUEST_TIMEOUT: a stall that
+# measured over 260 s now ends in 36 s, bounded by 40.
+MAX_RESPONSE_BYTES = 5_000_000
+REQUEST_TOTAL_TIMEOUT = 30.0
+RESPONSE_CHUNK_BYTES = 65536
 
 # Paths we never touch: they mutate state, cost the owner money, or are
 # private. This list is enforced in `Fetcher`, not just documented.
@@ -144,6 +177,44 @@ VERIFIABLE_PROFILE_PLATFORMS = ("LinkedIn", "Wikipedia", "Wikidata", "GitHub", "
 
 # Statuses that mean the profile is genuinely not there.
 PROFILE_GONE_STATUS = frozenset({404, 410})
+
+# A status that means "the crawler was refused", never "the page is gone".
+#
+# Three checks confirmed a URL existed by sending HEAD - a request that asks
+# whether a page is there without downloading it - and filed anything that was
+# not 200 as broken. Measured across eight major retail and banking homepages,
+# three answered 403 to HEAD while answering 200 to GET. All three would have
+# been reported as dead links, one of them at high severity, on the exact class
+# of bot-managed commercial site this marketplace exists to audit.
+#
+# crawl-access-audit had already worked this out for the bot-block check and
+# listed these five codes there. The link checks never got the lesson. It lives
+# here now so one marketplace cannot mean two things by one status code.
+REFUSED_STATUS = frozenset({401, 403, 405, 406, 429})
+
+
+def link_verdict(status):
+    """`alive`, `dead` or `unchecked` for a probed URL.
+
+    `unchecked` is the whole point. A refusal is a fact about the crawler's
+    reception, not about whether the page exists, and reporting it as a defect
+    in the site would be the same mistake as treating a bot block as evidence -
+    which this marketplace refuses to do everywhere else.
+    """
+    if status is None:
+        return "unchecked"
+    if status in PROFILE_GONE_STATUS:
+        return "dead"
+    if status in REFUSED_STATUS:
+        return "unchecked"
+    if 200 <= status < 400:
+        return "alive"
+    if status >= 500:
+        # The server is having a bad moment. That is not the same as the page
+        # having been deleted, and a 503 during a deploy would otherwise fill a
+        # report with links that work again ten minutes later.
+        return "unchecked"
+    return "dead"
 
 # Page types. Detection drives every applicability guard in the marketplace:
 # we never expect Product schema on a site that has no product pages.
@@ -903,16 +974,30 @@ class Fetcher:
             if attempt:
                 time.sleep(RETRY_BACKOFF_SECONDS * attempt)
                 self.count += 1
+            if not self.time_left:
+                last_error = FetchError("wall-clock budget exhausted")
+                break
             try:
+                # `stream=True` so nothing is downloaded until `_read_body`
+                # says so. Both caps are then enforced before the bytes arrive
+                # rather than discovered after they have already cost us.
                 response = self.session.request(
                     method, url, timeout=self.timeout, allow_redirects=allow_redirects,
-                    headers=headers, stream=False,
+                    headers=headers, stream=True,
                 )
             except self._requests.RequestException as exc:
                 last_error = FetchError(str(exc))
                 continue
             if response.status_code in RETRYABLE_STATUS and attempt + 1 < RETRY_ATTEMPTS:
+                response.close()
                 last_error = FetchError("HTTP {}".format(response.status_code))
+                continue
+            try:
+                self._read_body(response, method, started)
+            except FetchError as exc:
+                last_error = exc
+                if getattr(exc, "stalled", False):
+                    break
                 continue
             self._last_request = time.monotonic()
             response.elapsed_ms = int((self._last_request - started) * 1000)
@@ -920,6 +1005,47 @@ class Fetcher:
 
         self._last_request = time.monotonic()
         raise last_error or FetchError("request failed")
+
+    def _read_body(self, response, method, started):
+        """Read the body under a size cap and a total-time cap.
+
+        Sets `response.truncated`, which the crawl records on the page and the
+        report states, because analysing half a document and saying nothing
+        about it would turn a limit of ours into a claim about the site.
+        """
+        response.truncated = False
+        if method == "HEAD":
+            response._content = b""
+            response._content_consumed = True
+            return
+
+        chunks, total = [], 0
+        try:
+            # `iter_content` decodes Content-Encoding as it goes, so the cap
+            # counts decompressed bytes and a compression bomb is bounded too.
+            for chunk in response.iter_content(RESPONSE_CHUNK_BYTES):
+                if time.monotonic() - started > REQUEST_TOTAL_TIMEOUT:
+                    response.close()
+                    stall = FetchError(
+                        "response was still arriving after {:.0f}s".format(
+                            REQUEST_TOTAL_TIMEOUT))
+                    # Not weather. A dropped connection is worth one more try;
+                    # a server dribbling bytes will dribble them again, and
+                    # retrying doubles the worst case one URL can cost the
+                    # crawl from 40 seconds to 80.
+                    stall.stalled = True
+                    raise stall
+                chunks.append(chunk)
+                total += len(chunk)
+                if total >= MAX_RESPONSE_BYTES:
+                    response.truncated = True
+                    response.close()
+                    break
+        except self._requests.RequestException as exc:
+            raise FetchError(str(exc))
+
+        response._content = b"".join(chunks)[:MAX_RESPONSE_BYTES]
+        response._content_consumed = True
 
     def try_get(self, url, **kwargs):
         """Fetch, returning `None` instead of raising. For optional probes."""

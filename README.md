@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Agent Skills](https://img.shields.io/badge/Agent%20Skills-agentskills.io-6E56CF?style=flat-square)
 ![Skills](https://img.shields.io/badge/Skills-7%20(1%20entrypoint)-0F9D58?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-298%20passing-2EA043?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-364%20passing-2EA043?style=flat-square)
 ![Read Only](https://img.shields.io/badge/Mode-Read--only-FF6F00?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-4169E1?style=flat-square)
 
@@ -138,8 +138,8 @@ The tests, if you want them:
 
 ```bash
 pip install pytest
-python -m pytest -q                        # 298 tests, about 15 minutes
-python -m pytest -q -m "not mutation"      # 241 tests, about 4 minutes
+python -m pytest -q                        # 364 tests, about 13 minutes
+python -m pytest -q -m "not mutation"      # 307 tests, about 4 minutes
 ```
 
 > **Windows path limit.** Do not unzip into a deep directory — `pip` cannot install `lxml` if
@@ -172,6 +172,13 @@ and put the same sentence on all of them.
 
 ## Limits, stated rather than found
 
+- **A response is read to 5 MB and no further.** Above that the page is analysed up to the
+  cap, recorded as truncated, and the report says so. The heaviest real homepage we
+  measured was 1.38 MB, so nothing ordinary comes near it.
+- **On a site that refuses HEAD requests, unreached link targets are unchecked.** Three
+  of eight major commercial sites we measured answer 403 to a HEAD request and 200 to a
+  GET. Verifying those links would mean fetching every one in full. The report says how
+  many went unchecked rather than calling them broken.
 - **Sixty pages is still a sample** on a large site. The report says how many it read, and
   every finding describes only those pages. Sixty was measured, not picked: on a large real
   site thirty pages found 16 problems in 84 s, sixty found 19 in 99 s, and a hundred added

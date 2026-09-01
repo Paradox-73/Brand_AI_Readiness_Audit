@@ -18,20 +18,24 @@ from audit_common import ROOT_CAUSES
 from conftest import GOLDEN, all_fixture_names
 from mutations import MUTATIONS
 
-# Two causes cannot be staged against a local fixture server, with the reason
-# each one is exempt. Keep this list short and keep the reasons specific: it is
-# the only way a check escapes proof, so anything added here needs to be
-# genuinely unreachable rather than merely inconvenient.
-UNSTAGEABLE = {
-    # Needs a TLS certificate and an https origin. The fixture server is plain
-    # HTTP on a loopback port, so there is no insecure-transport to detect and
-    # no secure one to contrast it against.
-    "insecure-transport",
-    # Needs a real Wikidata name collision. The fixture brand is invented
-    # precisely so it collides with nothing, and hard-coding a real entity's
-    # identifier would put a real organisation's name in the test corpus.
-    "entity-ambiguity",
-}
+# Empty, and it should stay empty. This was the escape hatch: two causes sat
+# on it as "cannot be staged against a local fixture server". Re-reading the
+# reasons found neither survived contact with the code.
+#
+#   insecure-transport   was recorded as needing a TLS certificate. It needs no
+#                        such thing - the check reads whether the origin string
+#                        starts with `http://`. What the fixture server cannot
+#                        be is a non-loopback host, which is a different fact
+#                        and takes one dict to supply.
+#   entity-ambiguity     was recorded as needing a real Wikidata collision. It
+#                        needs a response *shaped like* one, which a stub gives
+#                        it with invented labels.
+#
+# An exemption is a claim that something is unprovable. Both claims were wrong,
+# and each had been sitting in this file being read as settled. Anything added
+# here needs to be genuinely unreachable rather than merely inconvenient - and
+# on this evidence, check twice.
+UNSTAGEABLE = set()
 
 # Causes proved by a unit test instead of a fixture, and the file that proves
 # them. This is not an exemption: the guarantee still holds, it is just met
@@ -43,6 +47,15 @@ PROVED_BY_UNIT_TEST = {
     # suite at LinkedIn on every run would make it slow, rude and dependent on
     # somebody else's uptime.
     "dead-profile-link": "test_profile_links.py",
+    # Needs an origin on a real hostname served over plain HTTP. The fixture
+    # server is loopback, and the check correctly treats loopback as a
+    # deployment detail rather than a defect, so a snapshot supplies the origin
+    # directly.
+    "insecure-transport": "test_unstageable_causes.py",
+    # Needs a Wikidata response listing several entities with one name. A stub
+    # supplies it with invented labels, so no real organisation enters the
+    # test corpus.
+    "entity-ambiguity": "test_unstageable_causes.py",
 }
 
 

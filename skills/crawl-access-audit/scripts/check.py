@@ -53,8 +53,8 @@ if _SHARED is None:
 sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
-    CONTENT_TYPES, USER_AGENT, FetchError, Fetcher, SkillResult, load_snapshot,
-    pages_of, pct, sample, strip_www,
+    CONTENT_TYPES, REFUSED_STATUS, USER_AGENT, FetchError, Fetcher, SkillResult,
+    link_verdict, load_snapshot, pages_of, pct, sample, strip_www,
 )
 from robots_parser import (  # noqa: E402
     blocks_entire_site, group_for, is_disallowed, substantive_disallows,
@@ -80,7 +80,12 @@ TRAINING_CRAWLERS = (
     "Meta-ExternalFetcher",
 )
 
-MAX_EXTRA_REQUESTS = 10
+# Demand, counted rather than assumed: the sitemap probe asks for up to 8, the
+# bot-manager comparison for 2, the canonical probe for 3. Thirteen against a
+# ceiling of ten meant the canonical probe was starved by running last, so on
+# any site with a sitemap it silently never ran. The ceiling now covers what
+# the checks actually ask for, with three spare.
+MAX_EXTRA_REQUESTS = 16
 # Canonical targets the crawl never reached. Capped low: this is a
 # diagnostic, not a link checker, and the site did not ask to be crawled
 # harder than the budget already allows.
@@ -431,29 +436,51 @@ def _check_sitemap_urls_resolve(result, snapshot, reachable, fetcher):
         result.skip("sitemap-urls-resolve", "no URLs listed in the sitemap")
         return
 
-    dead = []
-    checked = 0
+    # A refusal is not a dead URL. `link_verdict` is shared with the two other
+    # checks in this marketplace that probe a link, so all three mean the same
+    # thing by a 403.
+    dead, checked, unchecked = [], 0, 0
     for url in listed:
         if url in known:
-            checked += 1
-            if known[url] is not None and known[url] != 200:
+            verdict = link_verdict(known[url])
+            if verdict == "dead":
                 dead.append((url, known[url]))
+                checked += 1
+            elif verdict == "alive":
+                checked += 1
+            elif known[url] is not None:
+                unchecked += 1
 
+    head_supported = (snapshot.get("crawl") or {}).get("head_supported")
     to_probe = [u for u in sample(listed, SITEMAP_PROBE_LIMIT) if u not in known]
+    if head_supported is False:
+        unchecked += len(to_probe)
+        to_probe = []
     if fetcher is not None:
         for url in to_probe:
             response = fetcher.try_get(url, method="HEAD")
-            if response is None:
-                continue
-            checked += 1
-            if response.status_code != 200:
+            verdict = link_verdict(response.status_code if response is not None else None)
+            if verdict == "dead":
                 dead.append((url, response.status_code))
+                checked += 1
+            elif verdict == "alive":
+                checked += 1
+            else:
+                unchecked += 1
     elif to_probe:
         result.skip("sitemap-urls-resolve",
                     "network probes disabled; only the {} sitemap URL(s) already crawled "
                     "were checked".format(checked))
 
+    result.signal("sitemap_urls_checked", checked)
+    result.signal("sitemap_urls_unchecked", unchecked)
+
     if not checked:
+        if head_supported is False:
+            result.skip("sitemap-urls-resolve",
+                        "this site refuses HEAD requests while answering GET normally, so the "
+                        "{} sitemap URL(s) the crawl did not reach are unchecked rather than "
+                        "assumed dead".format(unchecked))
         return
     if not dead:
         return
@@ -463,10 +490,13 @@ def _check_sitemap_urls_resolve(result, snapshot, reachable, fetcher):
         id_hint="sitemap-lists-dead-urls",
         title="The sitemap lists URLs that do not return 200",
         severity="high" if rate >= 25 else "medium", confidence="high",
-        evidence="{} of {} checked sitemap entries ({}%) returned a non-200 status. "
-                 "Examples: {}.".format(
+        evidence="{} of {} checked sitemap entries ({}%) are gone. Examples: {}.{}".format(
                      len(dead), checked, rate,
-                     "; ".join("{} -> {}".format(u, s) for u, s in sorted(dead)[:5])),
+                     "; ".join("{} -> {}".format(u, s) for u, s in sorted(dead)[:5]),
+                     " A further {} entry could not be verified and is excluded from the "
+                     "rate.".format(unchecked) if unchecked == 1 else
+                     " A further {} entries could not be verified and are excluded from the "
+                     "rate.".format(unchecked) if unchecked else ""),
         mechanism="A", root_cause="sitemap-broken",
         summary="Remove dead URLs from the sitemap, or restore the pages they point to.",
         how_to_fix=[
@@ -613,24 +643,52 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
         rate = pct(len(bad), len(fetched))
         if rate >= 10:
             counts = Counter(p["status"] for p in bad)
+            # A refusal and a dead page are both "not 200" and need opposite
+            # fixes. The homepage branch above has distinguished them since it
+            # was written; this one did not, so on a bot-managed site it told
+            # the owner to add redirects for 42 pages that work perfectly in a
+            # browser. Measured on a real retail site: 42 of 44 URLs answered
+            # 403 to an identified, robots-respecting crawler.
+            refused = [p for p in bad if p["status"] in REFUSED_STATUS]
+            mostly_refused = len(refused) > len(bad) / 2
             result.add(
                 id_hint="high-non-200-rate",
-                title="{}% of crawled pages do not return HTTP 200".format(rate),
+                title="{}% of crawled pages refuse this crawler".format(rate)
+                      if mostly_refused
+                      else "{}% of crawled pages do not return HTTP 200".format(rate),
                 severity="high" if rate >= 25 else "medium", confidence="high",
-                evidence="{} of {} fetched URLs returned a non-200 status ({}). Examples: {}.".format(
+                evidence="{} of {} fetched URLs returned a non-200 status ({}).{} Examples: {}.".format(
                     len(bad), len(fetched),
                     ", ".join("{}x{}".format(v, k) for k, v in sorted(counts.items())),
+                    " {} of them are refusals rather than missing pages: the request identified "
+                    "itself as an audit crawler, respected robots.txt and was rate limited, so "
+                    "this is a bot-management rule and not an outage.".format(len(refused))
+                    if mostly_refused else "",
                     ", ".join(sample([p["url"] for p in bad], 5))),
-                mechanism="A", root_cause="non-200",
-                summary="Fix or redirect the URLs that are still linked but no longer resolve.",
+                mechanism="A", root_cause="bot-manager-block" if mostly_refused else "non-200",
+                summary="Allow identified crawlers to fetch the site, not just the homepage."
+                        if mostly_refused
+                        else "Fix or redirect the URLs that are still linked but no longer resolve.",
                 how_to_fix=[
-                    "Export the failing URLs and check each against the current site structure.",
-                    "301 anything that moved; remove links to anything that is genuinely gone.",
-                    "Return 410 rather than 404 for pages deliberately retired, so crawlers stop "
-                    "re-requesting them.",
+                    "Open your CDN or WAF bot-management rules. A blanket challenge on "
+                    "unrecognised user agents also blocks every AI answer crawler."
+                    if mostly_refused
+                    else "Export the failing URLs and check each against the current site structure.",
+                    "Allow-list the AI answer crawlers by user agent, keeping rate limits in place."
+                    if mostly_refused
+                    else "301 anything that moved; remove links to anything that is genuinely gone.",
+                    "Verify by requesting several of the listed URLs with each crawler's "
+                    "user-agent string and confirming a 200 with real HTML rather than a "
+                    "challenge page."
+                    if mostly_refused
+                    else "Return 410 rather than 404 for pages deliberately retired, so crawlers "
+                         "stop re-requesting them.",
                 ],
-                effort="medium", owner="developer",
-                rationale="Mechanism A: every failing URL is a page that cannot be read or cited, "
+                effort="high" if mostly_refused else "medium", owner="developer",
+                rationale="Mechanism A: a page a crawler cannot fetch cannot be read or cited, "
+                          "and at this rate the site is largely invisible to the systems that "
+                          "would quote it." if mostly_refused else
+                          "Mechanism A: every failing URL is a page that cannot be read or cited, "
                           "and a high failure rate reduces how deeply crawlers explore the site.",
                 affected_pages=[p["url"] for p in bad],
             )
@@ -768,19 +826,25 @@ def _check_canonicals(result, snapshot, ok_pages, fetcher=None):
             continue
         if canonical not in known_status and canonical not in unknown:
             unknown.append(canonical)
-    for target in unknown[:CANONICAL_PROBE_LIMIT]:
-        if fetcher is None or not fetcher.budget_left:
-            break
-        response = fetcher.try_get(target, method="HEAD")
-        if response is not None:
-            known_status[target] = response.status_code
+    # Same rule again: only probe with HEAD where HEAD is answered honestly.
+    head_supported = (snapshot.get("crawl") or {}).get("head_supported")
+    if head_supported is not False:
+        for target in unknown[:CANONICAL_PROBE_LIMIT]:
+            if fetcher is None or not fetcher.budget_left:
+                break
+            response = fetcher.try_get(target, method="HEAD")
+            if response is not None:
+                known_status[target] = response.status_code
 
     for page in with_canonical:
         canonical = page["canonical"]
         host = strip_www(urlparse(canonical).netloc.lower())
         if host and host != origin_host:
             off_domain.append((page["url"], canonical))
-        elif canonical in known_status and known_status[canonical] not in (None, 200):
+        elif (canonical in known_status
+                and link_verdict(known_status[canonical]) == "dead"):
+            # Was `not in (None, 200)`, which filed a 403 refusal and a 503
+            # deploy blip as a broken canonical at high severity.
             broken.append((page["url"], canonical, known_status[canonical]))
 
     if off_domain:

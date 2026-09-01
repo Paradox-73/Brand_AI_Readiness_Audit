@@ -168,3 +168,60 @@ def test_rendered_run_reports_no_findings_on_the_clean_site(rendered_clean):
     assert findings["findings"] == [], (
         "the rendered pass introduced findings on the clean fixture: {}".format(
             [f["root_cause"] for f in findings["findings"]]))
+
+# --------------------------------------------------------------------------
+# Which pages get rendered
+#
+# This was `pages[:RENDER_PAGES]`. The crawl is breadth-first from the
+# homepage, so those five were the homepage plus the first four top-nav pages
+# - on a hybrid site, precisely the pages rendered on the server. The
+# JavaScript shells this pass exists to measure live on product and article
+# pages one level down, and could never be in the sample.
+# --------------------------------------------------------------------------
+
+def _page(url, page_type, status=200):
+    return {"url": url, "status": status, "page_type": page_type}
+
+
+def test_the_render_sample_reaches_deep_page_types():
+    from crawl import _render_targets
+    pages = [_page("https://h.test/", "home")]
+    pages += [_page("https://h.test/list{}".format(i), "listing") for i in range(6)]
+    pages += [_page("https://h.test/p1", "product"), _page("https://h.test/a1", "article")]
+    chosen = {p["page_type"] for p in _render_targets(pages)}
+    assert "product" in chosen and "article" in chosen
+
+
+def test_the_render_sample_still_starts_at_the_homepage():
+    from crawl import _render_targets
+    pages = [_page("https://h.test/", "home"),
+             _page("https://h.test/p1", "product"),
+             _page("https://h.test/a1", "article")]
+    assert _render_targets(pages)[0]["page_type"] == "home"
+
+
+def test_the_render_sample_is_the_same_two_runs_running():
+    from crawl import _render_targets
+    pages = [_page("https://h.test/", "home")]
+    pages += [_page("https://h.test/x{}".format(i), "listing") for i in range(10)]
+    first = [p["url"] for p in _render_targets(pages)]
+    second = [p["url"] for p in _render_targets(list(reversed(pages)))]
+    assert first == second
+
+
+def test_the_render_sample_never_exceeds_its_budget():
+    from crawl import RENDER_PAGES, _render_targets
+    pages = [_page("https://h.test/p{}".format(i), "product") for i in range(40)]
+    assert len(_render_targets(pages)) == RENDER_PAGES
+
+
+def test_only_pages_that_answered_200_are_rendered():
+    from crawl import _render_targets
+    pages = [_page("https://h.test/", "home"),
+             _page("https://h.test/gone", "article", status=404)]
+    assert all(p["status"] == 200 for p in _render_targets(pages))
+
+
+def test_no_pages_means_no_render_targets():
+    from crawl import _render_targets
+    assert _render_targets([_page("https://h.test/x", "other", status=500)]) == []

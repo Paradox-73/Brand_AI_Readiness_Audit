@@ -42,8 +42,16 @@ Run `python run_audit.py <url>` to do all of this at once, or follow the steps d
 2. **Crawl once.** Run `scripts/crawl.py <origin> --out snapshot.json`. It fetches
    robots.txt, the sitemaps, `/llms.txt`, the homepage, up to 8 sitemap URLs sampled with
    seed 42 and spread across detected page types, and then breadth-first from the homepage
-   to depth 2. Hard caps: 60 pages, 240 s wall clock, 10 s per request, 0.5 s between
-   requests, single threaded.
+   to depth 2. Hard caps: 60 pages, 240 s wall clock, 10 s per request, 30 s total per
+   request, 5 MB read per response, 0.5 s between requests, single threaded. The two
+   per-response caps exist because `requests`' own timeout counts silence between bytes
+   rather than elapsed time: measured, one slow server held a single fetch open past 260 s,
+   and one large asset had 125 MB read into memory before its content type was looked at.
+   A response stopped at the size cap is recorded as truncated and the report says so.
+   The crawl also sends one HEAD request to the homepage, to establish whether this site
+   answers HEAD the same way it answers GET; three of eight major commercial sites do not,
+   and the three checks that verify links read that one measurement rather than each
+   rediscovering it.
    If the homepage does not respond after two attempts, stop and report one critical
    finding: an unreachable homepage makes every other check meaningless.
    If robots.txt disallows this auditor at `/`, no pages are fetched at all. Report the

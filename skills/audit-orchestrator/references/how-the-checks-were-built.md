@@ -39,7 +39,7 @@ It moved two thresholds and got nine checks deleted for firing on everything.
 
 **We break one thing at a time to prove each check is specific.** `tests/mutations.py` takes
 the clean fixture, breaks exactly one named property, and asserts the audit reports that
-property **and nothing else**. Thirty-seven cases. Site samples cannot do this: on a real
+property **and nothing else**. Forty-six cases. Site samples cannot do this: on a real
 broken site twenty things are wrong at once, so a check can look correct by coincidence.
 Controlling the cause is the only way to tell detection from correlation, and it found eight
 defects the fixture suite had never touched — including one check that was documented,
@@ -47,15 +47,28 @@ listed in every report, and had no implementation behind it.
 
 **We check that our own advice works.** `tests/test_fixes_work.py` breaks the site, reads the
 finding, pastes the code the report handed the user into the exact pages it named, runs again,
-and requires the finding to be gone. Ten cases, covering Organization, Article, FAQPage and
+and requires the finding to be gone. Eight cases, covering Organization, Article, FAQPage and
 WebSite markup, `robots.txt` and `sitemap.xml`. Five fixes are prose — "write one sentence
 saying what your brand is" — and the file lists them as un-machine-checkable rather than
 letting their absence imply coverage.
 
 **We refuse to ship a claim we have not tested.** `tests/test_coverage.py` requires every root
 cause in the vocabulary to have a case that produces it, and a companion test fails if any
-finding hands out code with nothing proving the code works. Two causes are exempt with the
-reason recorded: one needs a TLS origin, one needs a real Wikidata name collision.
+finding hands out code with nothing proving the code works. **No cause is exempt.** Two were,
+each with a recorded reason, and re-reading the reasons found neither survived: the one said to
+need a TLS certificate reads a single string, and the one said to need a real Wikidata
+collision needs a response *shaped* like one, which a stub supplies with invented labels. An
+exemption is a claim that something is unprovable, and it sits in a file being read as settled
+by everyone who comes after.
+
+**We test the tool against inputs no site would send on purpose.** A crawler is a network
+program, and the failure modes that matter are not in the HTML. Measured against a deliberately
+hostile local server: an unbounded response had 125 MB read into memory before its content type
+was looked at, and a server sending one byte every nine seconds held a fetch open past 260
+seconds, because `requests`' timeout counts silence between bytes rather than elapsed time. Both
+are now capped, and `tests/test_budgets.py` keeps them capped. Separately, comparing `HEAD`
+against `GET` on real bot-managed sites showed three in eight answering 403 to one and 200 to
+the other - which three link checks were reporting as dead pages.
 
 **We held out three samples and wrote the prediction down first.** The 36 study sites are
 training data: every threshold moved after looking at them. So we drew fresh samples in

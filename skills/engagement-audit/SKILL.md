@@ -53,7 +53,10 @@ folded into the discoverability gates.
    page outside the crawl budget, and guessing would be a false positive.
 
 5. **Broken internal links.** Reuse statuses the crawl already collected, then HEAD up to 20
-   more. Over 20% broken is **high**, below that **medium**. At that rate it is a maintenance
+   more - but only where HEAD means anything on this site. Three of eight major commercial
+   sites we measured answer 403 to HEAD and 200 to GET, so the crawl establishes once per site
+   whether HEAD is honoured, and where it is not every unreached target is reported as
+   *unchecked* rather than broken. Only 404 and 410 count as gone. Over 20% broken is **high**, below that **medium**. At that rate it is a maintenance
    failure, not an accident.
 
 6. **Context retention.**

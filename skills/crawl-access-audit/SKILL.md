@@ -2,7 +2,7 @@
 name: crawl-access-audit
 description: Check whether crawlers and AI answer engines are allowed to fetch a site at all. Audits robots.txt (including which named AI crawlers are blocked and whether the block affects answer engines or only training corpora), sitemap presence and validity, WAF and bot-manager blocks that robots.txt cannot show, HTTP status codes, redirect chains, noindex directives, canonical targets and transport security. Use when a brand is completely absent from AI answers and search, when pages are known to exist but are never cited, or as the first gate of a full AI-readiness audit. A block here makes every other improvement irrelevant.
 license: MIT
-compatibility: Requires Python 3.10+ with requests. Makes up to 10 extra read-only requests; pass --no-network to make none.
+compatibility: Requires Python 3.10+ with requests. Makes up to 16 extra read-only requests; pass --no-network to make none.
 allowed-tools: Bash(python3:*) Bash(python:*) Read
 metadata:
   author: brand-ai-readiness-audit
@@ -53,7 +53,10 @@ described badly, or when someone reports "our pages exist but nothing ever cites
 
 5. **Sitemaps.** Referenced from robots, or present at `/sitemap.xml`? Does it parse? What
    share of entries carry `<lastmod>`? Do the URLs it advertises resolve? Prefer statuses
-   the crawl already collected; probe at most 8 more with HEAD. A sitemap full of dead URLs
+   the crawl already collected; probe at most 8 more with HEAD, and only where the site
+   answers HEAD honestly - a 403, 405 or 429 is recorded as *unchecked*, never as dead,
+   because a refusal is a fact about the crawler's reception and not about the page. A
+   sitemap full of dead URLs
    teaches crawlers the sitemap is unreliable.
 
 6. **Bot manager probe.** robots.txt permission means nothing if the edge returns a

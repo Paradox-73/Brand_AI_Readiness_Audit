@@ -54,7 +54,11 @@ as thin or title-only.
    site-wide template failure (high); fewer is medium. Name the pages, not the count alone.
 
 4. **Measure the render gap where you can.** With Playwright, compare rendered text length
-   against static text length on up to 5 sampled pages. A gap of 60% or more is the exact
+   against static text length on up to 5 sampled pages. The five are spread across page
+   types rather than taken in crawl order: the crawl is breadth-first, so the first five are
+   the homepage and the top-nav pages, which on a hybrid site are exactly the ones rendered
+   on the server, while the shells this check exists to find live on product and article
+   pages one level down. A gap of 60% or more is the exact
    amount of content that disappears for any consumer that does not run JavaScript.
    **Playwright's absence is a property of the auditing machine. Never report it as a site
    problem** — record it in `checks_run` and move on.
