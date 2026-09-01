@@ -504,10 +504,13 @@ def compose(snapshot, skill_results, audited_at=None):
     signals = {}
     checks_run, not_applicable = [], []
     extra_requests = 0
+    fired_checks = set()
     for result in skill_results:
         signals.update(result.get("signals") or {})
         for check in result.get("checks_run", []):
             checks_run.append({"skill": result.get("skill"), "check": check})
+        for check in result.get("fired_checks", []):
+            fired_checks.add((result.get("skill"), check))
         not_applicable.extend(result.get("not_applicable", []))
         extra_requests += result.get("extra_requests_made", 0)
 
@@ -576,7 +579,7 @@ def compose(snapshot, skill_results, audited_at=None):
         # through all three and appear nowhere - the ones that confirm robots.txt
         # was fetched and the homepage answered, which are precisely what a
         # worried reader is looking for.
-        "checks_passed": _checks_passed(checks_run, not_applicable, findings),
+        "checks_passed": _checks_passed(checks_run, not_applicable, fired_checks),
         "not_applicable": sorted(not_applicable, key=lambda n: (n.get("skill", ""), n["check"])),
         "merged_duplicates": duplicates,
         "auditor": {"name": "brand-ai-readiness-audit", "version": VERSION},
@@ -635,7 +638,7 @@ def _non_public_host(text):
     return bool(NON_PUBLIC_HOST_RE.search(text or ""))
 
 
-def _checks_passed(checks_run, not_applicable, findings):
+def _checks_passed(checks_run, not_applicable, fired):
     """Checks that ran, produced no finding, and had no reason to decline.
 
     The README promises that every check which stays quiet says why. That was
@@ -644,7 +647,6 @@ def _checks_passed(checks_run, not_applicable, findings):
     had been fetched at all.
     """
     declined = {(n.get("skill"), n["check"]) for n in not_applicable}
-    fired = {(f.get("detected_by"), f.get("check")) for f in findings}
     passed = [c for c in checks_run
               if (c["skill"], c["check"]) not in declined
               and (c["skill"], c["check"]) not in fired]

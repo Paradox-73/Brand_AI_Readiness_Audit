@@ -12,11 +12,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gzip
 import os
 import re
 import sys
 import time
 import xml.etree.ElementTree as ET
+import zlib
 from collections import defaultdict, deque
 from urllib.parse import urlparse
 
@@ -39,6 +41,12 @@ from robots_parser import (  # noqa: E402
 )
 
 SNAPSHOT_SCHEMA_VERSION = 1
+
+# The first two bytes of every gzip stream.
+GZIP_MAGIC = bytes([0x1F, 0x8B])
+
+# Longer than this and a separator-free <title> is a sentence, not a name.
+TITLE_AS_BRAND_MAX = 40
 
 # A meta refresh with a delay this short is a redirect, not a courtesy pause on a
 # page someone is meant to read. Longer ones stay where they are.
@@ -151,8 +159,22 @@ def fetch_sitemaps(fetcher, origin, robots_record, deadline):
         if response.status_code != 200:
             results.append(record)
             continue
+        payload = response.content
+        # A .xml.gz sitemap is not a broken sitemap. The sitemaps.org protocol
+        # names gzip explicitly and large sites use it as a matter of course.
+        # Without this, a national government's sitemap of 706 URLs was
+        # reported as "does not parse", quoting the Python parser choking on
+        # gzip magic bytes, and ranked second in what to fix first.
+        if payload[:2] == GZIP_MAGIC or url.endswith(".gz"):
+            try:
+                payload = gzip.decompress(payload)
+                record["gzipped"] = True
+            except (OSError, EOFError, zlib.error) as exc:
+                record["parse_error"] = "gzip could not be read: {}".format(exc)
+                results.append(record)
+                continue
         try:
-            root = ET.fromstring(response.content)
+            root = ET.fromstring(payload)
         except ET.ParseError as exc:
             record["parse_error"] = "XML parse error: {}".format(exc)
             results.append(record)
@@ -273,6 +295,27 @@ def fetch_page(fetcher, url, depth, source, origin):
     content_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
     headers = {k.lower(): v for k, v in response.headers.items()}
 
+    # A redirect that leaves the origin leaves the audit. A standards body's
+    # site keeps a `/go/<id>` route that answers 302 into a different
+    # organisation's document tracker; following it filed seventeen of that
+    # other organisation's pages as pages of the audited site - 28% of the
+    # crawl budget - and then took the brand name from one of them. The report
+    # opened "A machine can reach <the other organisation> and read it" under a
+    # heading naming the audited site, and asked the audited site to publish a
+    # sentence defining a company it has nothing to do with.
+    #
+    # The redirect itself is worth recording: an internal link that leaves the
+    # site is a fact about this site. Its destination is not.
+    if not same_site(response.url, origin):
+        return {
+            "url": url, "final_url": response.url, "status": response.status_code,
+            "depth": depth, "source": source, "redirect_chain": chain,
+            "skipped": "redirects off this origin",
+            "offsite_redirect": True,
+            "page_type": "other", "links": {"internal": [], "external": []},
+            "text": "", "text_len": 0, "html_len": 0, "headers": headers,
+        }
+
     if content_type and "html" not in content_type and "xml" not in content_type:
         return {
             "url": url, "final_url": response.url, "status": response.status_code,
@@ -298,6 +341,8 @@ def fetch_page(fetcher, url, depth, source, origin):
 
 
 # Words a title carries around the brand rather than as part of it.
+_NOT_A_BRAND = frozenset({"our", "the", "my", "your", "this", "welcome", "home"})
+
 TITLE_BOILERPLATE_LEAD = ("welcome to ", "the official ", "official ")
 TITLE_BOILERPLATE_TAIL = (
     " home page", " homepage", " home", " official site", " official website",
@@ -323,6 +368,11 @@ def _strip_title_boilerplate(title):
                 lowered = value.lower()
                 changed = True
                 break
+    # Refuse to strip a name down to nothing meaningful. "SQLite Home Page"
+    # losing "Home Page" is the point; "Our Site" losing "Site" and becoming
+    # "Our" is the same rule eating the brand.
+    if len(value) < 4 or value.lower() in _NOT_A_BRAND:
+        return title.strip()
     return value
 
 
@@ -368,6 +418,14 @@ def detect_brand(pages, origin):
                     alternates.add(cleaned)
         site_name = clean(page.get("og", {}).get("og:site_name"))
         if site_name:
+            # Plenty of sites set og:site_name to the whole page title,
+            # separator and all: "Die Bundesregierung informiert | Startseite"
+            # became the brand, and then appeared inside generated fix text as
+            # if it were a company name.
+            pieces = [clean(x) for x in re.split(r"\s[|\-–—:·•]\s", site_name)]
+            pieces = [x for x in pieces if x]
+            if len(pieces) > 1:
+                site_name = min(pieces, key=len)
             authoritative.append({"name": site_name, "source": "og:site_name"})
 
     if home:
@@ -391,7 +449,16 @@ def detect_brand(pages, origin):
             stripped = _strip_title_boilerplate(parts[0])
             if stripped and stripped != parts[0]:
                 fallback.append({"name": stripped, "source": "title-part-0"})
-            fallback.append({"name": parts[0], "source": "title"})
+            # A long title with no separator is a sentence, not a name. One
+            # site's became "The GNU Operating System and the Free Software
+            # Movement", and the definition check then hunted the homepage for
+            # a sentence beginning with all 54 characters of it - while "GNU is
+            # an operating system that is free software" sat in the second
+            # line. The domain is a better guess than a headline.
+            if len(parts[0]) <= TITLE_AS_BRAND_MAX:
+                fallback.append({"name": parts[0], "source": "title"})
+            else:
+                fallback.append({"name": parts[0], "source": "title-long"})
 
     host = urlparse(origin).netloc.lower()
     host_brand = re.sub(r"^www\.", "", host).split(".")[0].replace("-", " ").strip()
@@ -399,7 +466,9 @@ def detect_brand(pages, origin):
         fallback.append({"name": host_brand.title(), "source": "domain"})
 
     priority = {"jsonld:Organization": 0, "og:site_name": 1,
-                "title-part-0": 2, "title-part-1": 3, "title": 4, "domain": 5}
+                "title-part-0": 2, "title-part-1": 3, "title": 4, "domain": 5,
+                # Below the domain: a headline is not a brand name.
+                "title-long": 6}
     ranked = sorted(authoritative + fallback,
                     key=lambda c: (priority.get(c["source"], 9), c["name"].lower()))
     chosen = ranked[0] if ranked else {"name": host_brand.title() or origin, "source": "domain"}
@@ -588,6 +657,7 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
         else:
             notes.append("homepage unreachable after two attempts: {}".format(retry.get("error")))
 
+    _mark_edge_refusals(pages, notes)
     head_supported = _probe_head_support(fetcher, home_url, home_record, notes)
 
     oversized = [p["url"] for p in pages if p.get("truncated")]
@@ -650,6 +720,49 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
     }
     write_json(out_path, snapshot)
     return snapshot
+
+
+# A real error page is branded and long. An edge refusing a crawler answers in
+# a few bytes, identically, many times over.
+EDGE_REFUSAL_MAX_BYTES = 400
+EDGE_REFUSAL_MIN_REPEATS = 3
+
+
+def _mark_edge_refusals(pages, notes):
+    """Non-200s that are one edge saying no, not many pages being deleted.
+
+    A retailer's crawl returned thirteen URLs with a ten-byte body reading
+    "Not found", served by a static edge - for every user agent, including a
+    browser's. Its genuine missing-page response is a 300 KB branded page under
+    a different status. The thirteen were live shop categories: one of them was
+    named as the canonical by a 962 KB page in the same crawl.
+
+    Reported as thirteen dead pages, they produced three high-severity findings
+    and all three "start here" slots, and the recommended fix was to delete
+    live categories from the sitemap.
+
+    Identical tiny bodies repeated across several URLs are one refusal.
+    """
+    groups = {}
+    for page in pages:
+        status = page.get("status")
+        if status is None or status == 200:
+            continue
+        length = page.get("html_len", 0)
+        if length > EDGE_REFUSAL_MAX_BYTES:
+            continue
+        groups.setdefault((status, length), []).append(page)
+
+    for (status, _length), group in sorted(groups.items()):
+        if len(group) < EDGE_REFUSAL_MIN_REPEATS:
+            continue
+        for page in group:
+            page["edge_refusal"] = True
+        notes.append(
+            "{} URLs answered HTTP {} with an identical body of under {} bytes. That is one "
+            "edge refusing this crawler, not {} deleted pages, so they are reported as "
+            "unverified rather than as broken links".format(
+                len(group), status, EDGE_REFUSAL_MAX_BYTES, len(group)))
 
 
 def _probe_head_support(fetcher, home_url, home_record, notes):

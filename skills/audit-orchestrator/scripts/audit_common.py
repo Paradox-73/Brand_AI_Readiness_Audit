@@ -193,7 +193,7 @@ PROFILE_GONE_STATUS = frozenset({404, 410})
 REFUSED_STATUS = frozenset({401, 403, 405, 406, 429})
 
 
-def link_verdict(status):
+def link_verdict(status, edge_refusal=False):
     """`alive`, `dead` or `unchecked` for a probed URL.
 
     `unchecked` is the whole point. A refusal is a fact about the crawler's
@@ -202,6 +202,10 @@ def link_verdict(status):
     which this marketplace refuses to do everywhere else.
     """
     if status is None:
+        return "unchecked"
+    # An identical few-byte body repeated across many URLs is an edge saying
+    # no. The crawl marks those; they are not deleted pages.
+    if edge_refusal:
         return "unchecked"
     if status in PROFILE_GONE_STATUS:
         return "dead"
@@ -818,6 +822,8 @@ class SkillResult:
         self.extra_requests_made = 0
         self.signals = {}
         self._current_check = None
+        self._group = []
+        self.fired_checks = set()
 
     def check(self, name):
         # Remembered so `add()` can stamp the finding with the check that
@@ -828,16 +834,29 @@ class SkillResult:
         # promises every quiet check says why; those said nothing at all, and
         # they are exactly the reassuring ones a reader wants to see.
         self._current_check = name
+        # Several checks are often registered together at the top of one
+        # function, and any finding it produces belongs to that group. Stamping
+        # only the last one registered left the others looking untouched, so a
+        # report listed `sitemap-present` under "ran and found nothing wrong"
+        # on a site whose findings section said "No XML sitemap is available".
+        #
+        # A check that might have fired is never claimed as clean.
+        if name not in self._group:
+            self._group.append(name)
         if name not in self.checks_run:
             self.checks_run.append(name)
 
     def skip(self, name, reason):
         self.check(name)
+        # An explicit decline is a definite answer about this one check, so it
+        # leaves the group rather than being tarred by a sibling that fired.
+        self._group = [c for c in self._group if c != name]
         self.not_applicable.append({"check": name, "skill": self.skill, "reason": reason})
 
     def add(self, **kwargs):
         finding = make_finding(**kwargs)
         finding["check"] = getattr(self, "_current_check", None)
+        self.fired_checks.update(self._group)
         self.findings.append(finding)
 
     def signal(self, key, value):
@@ -848,6 +867,7 @@ class SkillResult:
             "skill": self.skill,
             "findings": sort_findings(self.findings),
             "checks_run": sorted(self.checks_run),
+            "fired_checks": sorted(self.fired_checks),
             "not_applicable": sorted(
                 self.not_applicable, key=lambda n: (n["check"], n["reason"])
             ),
@@ -968,7 +988,15 @@ def example_urls(urls, limit=5):
 CHALLENGE_MARKERS = {
     "AWS WAF": ("awswafcookiedomainlist", "reportchallengeerror", "__challenge_"),
     "Akamai Bot Manager": ("sec-if-cpt-container", "sec-bc-tile-container",
-                           "scf-akamai-logo", "behavioral-content"),
+                           "scf-akamai-logo", "behavioral-content",
+                           # The plain edge refusal, which is what a retailer's
+                           # product pages actually returned: a 403 reading
+                           # "Access Denied ... Reference #18.71cc517...".
+                           # Without it the audit concluded the retailer had no
+                           # products and filed the check as legitimately
+                           # declined.
+                           "errors.edgesuite", "reference&#32;#",
+                           "you don't have permission to access"),
     "Cloudflare": ("__cf_chl", "cf_chl_opt", "cf-chl-", "just a moment...",
                    "attention required! | cloudflare"),
     "DataDome": ("captcha-delivery", "datadome-", "dd_cookie"),

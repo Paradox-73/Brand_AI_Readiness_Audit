@@ -233,11 +233,37 @@ def _check_homepage_orientation(result, home, english=True):
         return
 
 
+    # A missing H1 is a markup fact, not proof that a visitor is lost. Three
+    # real sites - a database engine, an operating system and a JavaScript
+    # library - each drew the only high-severity finding in their whole report
+    # from "the homepage has no h1", while their first screen read "SQLite is a
+    # C-language library that implements a small, fast ... SQL database engine"
+    # with a Download button beside it. All three were wrong, and all three led
+    # the report.
+    #
+    # So: if the opening screen carries a sentence that says what this is, the
+    # visitor is oriented whatever the heading level. The finding drops to
+    # `low` and says what is actually missing.
+    opening = (home.get("above_fold_text") or home.get("body_text", ""))[:1200]
+    orients_in_prose = bool(re.search(
+        r"\b(is|are)\s+(a|an|the)\b", opening)) and len(opening.split()) >= 12
+
     no_cta = english and not cta.get("found")
+    if orients_in_prose and not no_cta:
+        severity = "low"
+        problems.append("the opening text does explain what this is, so this is a headings "
+                        "and markup problem rather than a visitor who cannot tell where they are")
+    elif no_cta or not h1s:
+        severity = "high" if no_cta else "medium"
+    else:
+        severity = "medium"
+
     result.add(
         id_hint="homepage-does-not-orient-visitors",
-        title="The homepage does not tell an arriving visitor where they are or what to do next",
-        severity="high" if (no_cta or not h1s) else "medium", confidence="high",
+        title="The homepage does not tell an arriving visitor where they are or what to do next"
+              if severity != "low" else
+              "The homepage explains itself in prose but not in its headings",
+        severity=severity, confidence="high",
         evidence="{}.".format("; ".join(problems).capitalize()),
         mechanism="G", root_cause="no-orientation",
         summary="Lead with a specific H1 and put one obvious next step in the first screen.",
@@ -447,6 +473,8 @@ def _check_broken_links(result, snapshot, pages, fetcher, allow_network):
         return
 
     known = {p["url"]: p.get("status") for p in snapshot.get("pages") or []}
+    known_refusals = {p["url"]: bool(p.get("edge_refusal"))
+                      for p in snapshot.get("pages") or []}
     candidates = set()
     for page in pages:
         for link in (page.get("links", {}).get("internal") or []):
@@ -456,7 +484,7 @@ def _check_broken_links(result, snapshot, pages, fetcher, allow_network):
     # Pages the crawl fetched with GET: a verdict on those needs no probe.
     broken, checked, unchecked = [], 0, 0
     for url, status in known.items():
-        verdict = link_verdict(status)
+        verdict = link_verdict(status, known_refusals.get(url, False))
         if verdict == "dead":
             broken.append((url, status))
             checked += 1
@@ -607,9 +635,16 @@ def _check_title_body_drift(result, pages):
         if len(tokens) < 2:
             continue
         body = page.get("body_text", "").lower()
-        matched = sum(1 for t in tokens if t[:6] in body)
-        if matched / float(len(tokens)) < 0.34:
-            drifted.append((page, title, sorted(tokens)[:4]))
+        # Report the words that are actually absent. This used to print
+        # `sorted(tokens)[:4]` - the first four title words alphabetically -
+        # under the label "missing", whether or not they appeared. On a German
+        # government page it printed "missing bereich, bundesregierung,
+        # service, webseite" about a page whose body text contains
+        # "Bundesregierung" five times. The evidence was not merely weak; it
+        # was false, and a reader who checked would have caught us.
+        absent = [token for token in tokens if token[:6] not in body]
+        if len(tokens) - len(absent) < 0.34 * len(tokens):
+            drifted.append((page, title, sorted(absent)[:4]))
 
     if not drifted:
         result.skip("title-body-alignment",

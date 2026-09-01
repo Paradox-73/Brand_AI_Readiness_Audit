@@ -519,6 +519,8 @@ def _check_sitemap_urls_resolve(result, snapshot, reachable, fetcher):
     """Find sitemap entries that 404, preferring statuses the crawl already has."""
     result.check("sitemap-urls-resolve")
     known = {p["url"]: p.get("status") for p in snapshot.get("pages") or []}
+    refusals = {p["url"]: bool(p.get("edge_refusal"))
+                for p in snapshot.get("pages") or []}
     listed = []
     for record in reachable:
         for entry in record["urls"]:
@@ -533,7 +535,7 @@ def _check_sitemap_urls_resolve(result, snapshot, reachable, fetcher):
     dead, checked, unchecked = [], 0, 0
     for url in listed:
         if url in known:
-            verdict = link_verdict(known[url])
+            verdict = link_verdict(known[url], refusals.get(url, False))
             if verdict == "dead":
                 dead.append((url, known[url]))
                 checked += 1

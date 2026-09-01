@@ -154,7 +154,17 @@ def run(snapshot):
             result.skip(name, reason)
 
     _check_heading_hierarchy(result, pages)
-    _check_core_facts(result, snapshot, pages, brand_name)
+    # Every page the crawl read, not only the ones the classifier recognised.
+    #
+    # This check asks "does the site state its price / contact / location
+    # anywhere". It was reading only pages typed home, about, faq or article -
+    # so on a site with sixty crawled pages and four classified, it reported
+    # "no price appears anywhere on the crawled pages" while a support page in
+    # the same snapshot carried five prices the crawler had already extracted.
+    # The evidence sentence claimed the whole site from a sample it never
+    # disclosed. Four of five confirmed false positives on real sites came from
+    # this one line.
+    _check_core_facts(result, snapshot, pages_of(snapshot), brand_name)
     _check_naming_consistency(result, snapshot, pages, brand)
     return result
 
@@ -594,7 +604,12 @@ def _check_core_facts(result, snapshot, pages, brand_name):
             id_hint="core-fact-missing-{}".format(re.sub(r"[^a-z]+", "-", name.lower()).strip("-")),
             title="The site never states its {} in plain text".format(name),
             severity=severity, confidence="medium",
-            evidence="Across {} crawled content page(s), {}.".format(len(pages), why),
+            # Say what was searched. "anywhere on the crawled pages" read as a
+            # whole-site claim built from a sample the reader could not see.
+            evidence="Across the {} of {} page(s) this audit read, {}. A crawl is a "
+                     "sample: a page it did not reach may say it.".format(
+                         len(pages), (snapshot.get("crawl") or {}).get("pages_crawled", len(pages)),
+                         why),
             mechanism="B", root_cause="missing-core-fact",
             summary="State the {} explicitly, in a sentence, on the page where a visitor would "
                     "look for it.".format(name),
