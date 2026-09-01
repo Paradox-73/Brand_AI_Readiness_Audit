@@ -220,12 +220,31 @@ def simulate_citations(snapshot, brand_name):
 # Proactive recommendations
 # --------------------------------------------------------------------------
 
+def _plural(count, singular, plural):
+    """`1 page crawled`, not `1 pages crawled`.
+
+    It is the first line of the report a person reads.
+    """
+    return "{} {}".format(count, singular if count == 1 else plural)
+
+
 def build_recommendations(snapshot, signals, findings):
     """Recommendations beyond the defects found, included only when relevant.
 
     Every entry states its condition, so nothing generic is ever appended just
     to make the report look longer.
     """
+    # Every condition below is the absence of a signal, so on a site we never
+    # managed to read, every signal is absent and almost every recommendation
+    # fires. Audit a domain that does not resolve and the report offered six
+    # improvements for it, including publishing a file at its root.
+    #
+    # Absence of evidence is not evidence of absence, and the entrypoint's own
+    # procedure already says an unreachable homepage makes every other check
+    # meaningless. That rule was honoured by the findings and not by these.
+    if not pages_of(snapshot):
+        return []
+
     root_causes = {f["root_cause"] for f in findings}
     page_types = {p["page_type"] for p in pages_of(snapshot, content_only=True)}
     origin = snapshot["origin"].rstrip("/")
@@ -604,9 +623,11 @@ def render_markdown(report):
 
     add("# AI readiness audit: {}".format(report["site"]))
     add("")
-    add("Audited {} · {} pages crawled · {} findings · {} recommendations".format(
-        report["audited_at"], report["crawl"]["pages_crawled"],
-        report["summary"]["total_findings"], len(report["recommendations"])))
+    add("Audited {} · {} · {} · {}".format(
+        report["audited_at"],
+        _plural(report["crawl"]["pages_crawled"], "page crawled", "pages crawled"),
+        _plural(report["summary"]["total_findings"], "finding", "findings"),
+        _plural(len(report["recommendations"]), "recommendation", "recommendations")))
     add("")
     add("## The short version")
     add("")

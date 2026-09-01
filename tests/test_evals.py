@@ -17,7 +17,11 @@ discovery.
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+from conftest import SCRIPTS
 
 
 # --------------------------------------------------------------------------
@@ -142,3 +146,51 @@ def test_every_finding_names_an_owner_and_a_duration(audit):
             assert action.get("owner"), finding["id"]
             assert action.get("effort") in ("low", "medium", "high"), finding["id"]
             assert action.get("how_to_fix"), finding["id"]
+
+
+# --------------------------------------------------------------------------
+# A site we could not read gets no advice about its content
+#
+# Every proactive recommendation's condition is the absence of a signal. On a
+# site the crawl never reached, every signal is absent, so almost all of them
+# fired: auditing a domain that does not resolve produced six improvements for
+# it, including publishing a file at its root. The entrypoint's own procedure
+# already says an unreachable homepage makes every other check meaningless -
+# the findings honoured that and the recommendations did not.
+# --------------------------------------------------------------------------
+
+def _compose_for(snapshot):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "compose_for_test", os.path.join(SCRIPTS, "compose_report.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_a_site_that_was_never_read_gets_no_proactive_recommendations():
+    compose = _compose_for(None)
+    snapshot = {"origin": "https://an-invented-host.test", "site": "audited site",
+                "pages": [{"url": "https://an-invented-host.test/", "status": None,
+                           "page_type": "home", "error": "no response"}],
+                "crawl": {"pages_crawled": 1}}
+    assert compose.build_recommendations(snapshot, {}, []) == []
+
+
+def test_a_site_that_was_read_still_gets_them():
+    """The guard must not silence advice on a site that simply has few signals."""
+    compose = _compose_for(None)
+    snapshot = {"origin": "https://an-invented-host.test", "site": "audited site",
+                "pages": [{"url": "https://an-invented-host.test/", "status": 200,
+                           "page_type": "home", "text": "hello", "text_len": 5,
+                           "links": {"internal": [], "external": []}, "jsonld": []}],
+                "crawl": {"pages_crawled": 1}}
+    assert compose.build_recommendations(snapshot, {}, []) != []
+
+
+def test_the_verdict_line_counts_one_page_as_a_page():
+    """It is the first line a person reads."""
+    compose = _compose_for(None)
+    assert compose._plural(1, "page crawled", "pages crawled") == "1 page crawled"
+    assert compose._plural(0, "finding", "findings") == "0 findings"
+    assert compose._plural(2, "finding", "findings") == "2 findings"
