@@ -69,12 +69,10 @@ same root cause, so the separation is enforced rather than asserted.
 The six sub-skills **never fetch the site themselves**. They read fields off `snapshot.json`.
 That is what makes this one crawl rather than six.
 
-**Measured, not estimated.** The crawl is capped at 60 page requests. Four sub-skills then make
-a bounded number of extra read-only requests — link and sitemap targets the crawl did not
-reach, and one Wikidata lookup — declared in each skill's `compatibility` line and capped at 40,
-16, 10 and 2. On two large public sites the totals were **117 and 103 requests, in 223 s and
-195 s** of the 300 allowed; a small site finishes in about 20 s. `--no-network` reduces it to
-the 60.
+**Measured, not estimated.** The crawl is capped at 60 page requests, and four sub-skills then
+make a bounded number of extra read-only requests, declared in each skill's `compatibility`
+line and capped at 40, 16, 10 and 2. On two large public sites the totals were **117 and 103
+requests, in 223 s and 195 s** of the 300 allowed; `--no-network` reduces it to the 60.
 
 `compose_report.py` merges the six result files. It deduplicates **across** skills — while
 deliberately keeping several findings from one skill that share a cause, because those are
@@ -105,20 +103,21 @@ site outranks a rewrite that fixes one page.
 | **Owner** | developer / content owner / marketing |
 | **Effort** | low / medium / high |
 
-Two properties worth naming.
+Three properties worth naming.
 
-**Silence is explained.** Every check is accounted for in the report appendix. The ones that
-declined say why — *"No product detail pages were detected on this site, so Product and Offer
-markup is not expected."* The ones that ran and were clean are listed as having passed, so a
-reader can see that robots.txt was fetched and was fine rather than wondering whether it was
-looked at. A check never simply goes missing.
+**A refused request is never an absence.** Shown very little of a site, findings that would
+assert something is missing move to *Questions this audit could not answer*. And nothing in a
+snippet is invented: a value appearing nowhere in the crawl becomes a placeholder.
 
-**A deliberate choice is not a fault.** A site blocking AI *training* crawlers is reported as
-information, not a problem. It is a rights decision, and calling it a defect would impose a
-view the brand never asked for.
+**Silence is explained.** Every check is accounted for in the appendix. The ones that declined
+say why — *"No product detail pages were detected, so Product markup is not expected."* The
+ones that ran clean are listed as passed, so a reader can see robots.txt was fetched and was
+fine rather than wonder whether it was looked at. A check never simply goes missing.
 
-Suggested actions go beyond defects: the recommendation catalogue fires on what a site is
-missing, not only on what is broken.
+**A deliberate choice is not a fault.** Blocking AI *training* crawlers is information, not a
+problem: it is a rights decision, and calling it a defect imposes a view the brand never asked
+for. Suggested actions also go beyond defects — the recommendation catalogue fires on what a
+site is missing, not only on what is broken.
 
 ---
 

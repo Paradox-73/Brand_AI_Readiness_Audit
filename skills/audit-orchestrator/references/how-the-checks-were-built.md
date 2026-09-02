@@ -130,12 +130,60 @@ Round 3 also re-tested the twenty named bugs from round 2 on the same four sites
 were gone**, three remained and are fixed here, one could not be told because the page had
 dropped out of the crawl sample.
 
-The rate is not zero and this file will not pretend it is heading there quickly. Every round
-has found new failure modes, because every site breaks a different assumption, and the curve
-is flattening rather than falling off a cliff: 78, 48, 43. What has changed most is not the
-count but the kind. Round 1 had the crawler adopting another organisation's identity and
-filing 17 of their pages as this brand's; round 3's worst finding is a report telling a
-restaurant chain to unify per-branch phone numbers that are correctly different.
+The rate did not fall the way it should have: 78%, then 48%, then 54%. Round 3 was a harder
+sample - four of its sites sit behind Akamai or Cloudflare - and a crash shipped that morning
+cost three of the four agents a working report. But the honest reading is that fixing findings
+one at a time was fixing one site at a time, and the next site broke a different check the
+same way.
+
+### What changed: four rules instead of sixty patches
+
+Sorted by which function emitted them, the wrong findings were sixty unrelated bugs. Sorted by
+what they violate, almost all of them are four:
+
+**1. "We could not look" is not "it is not there."** The largest class by a distance. It
+reached reports as "No XML sitemap is available" on a sitemap that answered 429; as "no rules
+to evaluate, which means nothing is disallowed" about a robots.txt answering 403 that contains
+a crawl delay and real rules; as "the site never states its founding facts", drawn from four
+pages of sixty, while the page that states them sat in the same report's own crawl table
+marked 403. Four skills, four separate fixes made, and the next blocked site would have found
+a fifth. `compose_report` now holds every absence-claiming finding back when the crawl could
+read under half of what it reached, and prints them under **Questions this audit could not
+answer** with the reason. Access findings are exempt: they *are* the block, and the only thing
+to act on.
+
+**2. A count carries the scale it was drawn from.** "3 page(s) have no H1" on a site where
+fifteen did; "2 pages do not declare a language" where fifty-seven did not. The observation was
+right; the number was of whatever the check happened to look at, and nothing said so. Every
+finding that names pages and no denominator now gets one.
+
+**3. Text that repeats across the site is furniture.** Every selector-based attempt at this
+failed identically - the list holds the shapes we have already been burned by, and the next
+site uses one nobody wrote down. Stripping `header`, `nav`, `footer` and `aside` missed a
+cosmetics retailer's `<div class="promo-bar__text">`, so four locales' worth of free-shipping
+thresholds were read as the prices on a product page, and the page's own correct price was
+reported as contradicting them. Repetition is what actually defines chrome and needs no
+knowledge of any site's conventions: a block on half the crawled pages is removed from all of
+them. Measured - footers, cookie lines and banners sit at or near 1.0, the most-repeated
+genuine content block observed sat at 0.34, and nothing falls between.
+
+**4. A snippet may only contain what the audit observed.** This is the class that does real
+damage, because a snippet is the part of a report people copy rather than read. What reached
+real reports: a `streetAddress` of "1 million row" taken from a sentence about database rows,
+a postal code taken from the price "$0.00005 / event", another from a cosmetic colour-index
+code, a $90 price on a $10 product, and a `sameAs` list claiming a co-founder's personal
+account and the encyclopedia article on ACID transactions. Each was fixed at its own source;
+they violate one property, now enforced over every snippet any check produces. A value not
+found anywhere in the crawl becomes a placeholder, and the reader is told something guessed it.
+
+Each rule lives in one place that sees the whole run, so a check written next month inherits
+it. `tests/test_structural_rules.py` pins the rules rather than the sites.
+
+The rules caught a bug in themselves on their first live run. A medical charity is called
+Doctors Without Borders, so every finding naming it contained the word "without" and the whole
+report was withheld as unverifiable. Quoted names and the brand name now come out of the
+sentence before it is read - which is the point of testing a general rule against sites it was
+not derived from.
 
 **We held out three samples and wrote the prediction down first.** The 36 study sites are
 training data: every threshold moved after looking at them. So we drew fresh samples in
