@@ -151,7 +151,21 @@ _BENIGN_DISALLOW = re.compile(
     # back no sentence anyone would quote. Reporting `/icons/` and `/images/`
     # as "paths that look like real content" was true of neither.
     r"icons?|images?|img|assets|static|media|files|uploads|css|js|"
-    r"javascript|fonts?|styles?|scripts?|dist|build|vendor|node_modules)",
+    r"javascript|fonts?|styles?|scripts?|dist|build|vendor|node_modules|"
+    # Files that exist for machines, not readers. Two shop reports opened
+    # with "robots.txt disallows N paths that look like real content" and
+    # named `/apple-app-site-association` - an Apple deep-linking manifest,
+    # 89 bytes of JSON, not a page - as the number one thing to fix.
+    r"apple-app-site-association|apple-touch-icon|humans\.txt|ads\.txt|"
+    r"app-ads\.txt|security\.txt|browserconfig\.xml|crossdomain\.xml|"
+    r"manifest\.json|sw\.js|service-worker|serviceworker|\.well-known|"
+    # Framework and build directories, which hold code rather than prose.
+    r"app_themes|app_data|app_code|app_start|controls|_next|_nuxt|_astro|"
+    r"_app|_layouts|web-inf|meta-inf|bin|obj|\.git|\.svn|cgi|"
+    # Error, maintenance and utility pages. A site is right to keep these
+    # out of an index, and none of them is content anyone would quote.
+    r"pageerror|error|errors|404|500|not-found|notfound|maintenance|"
+    r"addtocart|internationaladdress)",
     re.I,
 )
 
@@ -174,7 +188,17 @@ def benign_disallow(rule):
         return False
     # A rule that is only a parameter or wildcard filter blocks duplicates,
     # not content.
-    if rule.startswith(("/*?", "/?", "*?")) or rule.count("*") >= 2:
+    #
+    # "two or more wildcards" used to be enough on its own, and it is not a
+    # statement about what the rule blocks. It swallowed `/*/newsletter/existing/`
+    # - a live page on a real site - and the report then told the reader the
+    # only disallowed paths were "standard admin/cart/account/search routes",
+    # which was not true of what had actually been excluded. A wildcard rule is
+    # plumbing when it filters a query string or a file extension; when it has
+    # real path segments in it, it blocks whatever is at those segments.
+    if rule.startswith(("/*?", "/?", "*?")) or "?" in rule or "=" in rule:
+        return True
+    if rule.count("*") >= 2 and not re.search(r"[a-z]{3}", rule.replace("*", ""), re.I):
         return True
     return bool(_BENIGN_DISALLOW.match(rule) or _BENIGN_ANYWHERE.search(rule))
 

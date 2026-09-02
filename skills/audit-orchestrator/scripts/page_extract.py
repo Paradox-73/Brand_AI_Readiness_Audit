@@ -110,10 +110,10 @@ PHONE_RE = re.compile(
 EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]{2,}\b")
 
 # Alphanumeric formats first. A bare five- or six-digit run is also what a
-# phone number looks like, and searching left to right on "…YO1 9TT. 01904 555
-# 812." with the US branch first returned the area code as the postcode. The
-# numeric branches now refuse to match anything sitting inside a longer run of
-# digits and spaces, which is what a phone number is.
+# phone number looks like, and searching left to right on "YO1 9TT. 01904 555
+# 812." with the US branch first returned the area code as the postcode, so the
+# numeric branches refuse a run sitting inside a longer run of digits.
+#
 # A decimal fraction is also a run of five or six digits. A pricing page
 # reading "$0.00005 / event" handed back postal code "00005", the audit then
 # reported the site as contradicting its own address, and the generated
@@ -139,12 +139,11 @@ POSTCODE_HINT_RE = re.compile(
 ADDRESS_REGION_SELECTORS = ("address", "[itemtype*=PostalAddress]",
                             "[class*=address]", "[id*=address]", "footer")
 
-# The original required a street-type word, so "41 Walmgate, York" matched
-# nothing - and neither does most of the UK, where the street type is often
-# part of the name (gate, row, mews, close) or absent entirely. The second
-# branch accepts a number followed by capitalised words when a postcode follows
-# close behind, which is what an address looks like when the word "Street" is
-# not in it.
+# The street-type word is optional: "41 Walmgate, York" has none, and neither
+# does most of the UK, where the type is part of the name (gate, row, mews,
+# close) or absent. The second branch accepts a number followed by capitalised
+# words when a postcode follows close behind.
+#
 # Two patterns, and they must not share a flag.
 #
 # The second branch says "a number, then capitalised words, then a postcode",
@@ -186,6 +185,23 @@ reserve sign register talk speak ask enquire inquire compare choose select plan
 build create send email message visit check claim take open configure estimate
 quote hire arrange play listen search play tour
 """.split())
+
+# Link labels whose first word is in CTA_VERBS but is not being used as a verb.
+#
+# "Open source" is the one that mattered: on a free software project's
+# homepage, a link reading "open source" inside a sentence about licensing was
+# reported as the page's primary call to action, while the "Download" link in
+# the main navigation was ignored - and the recommended replacements were "See
+# pricing" and "Book a table", offered to a command-line tool that costs
+# nothing. Each of these is the word being used as an adjective or a noun, in a
+# phrase common enough on the open web to be worth naming.
+_VERB_IS_AN_ADJECTIVE_HERE = re.compile(
+    r"^(?:open source|open standards?|open data|open access|open government|"
+    r"start(?:ing|er)s? (?:guide|kit|page)|get(?:ting)? started guide|"
+    r"read(?:ing)? (?:list|time)|watch(?:es|list)|plan(?:s|ning)? (?:and|&)|"
+    r"build(?:ing)?s?\b(?! )|create(?:s|d)|find(?:ing)?s|check(?:s|list)|"
+    r"take(?:s|away)|order(?:s|ing)? (?:of|form)|"
+    r"see (?:also|more) below)\b", re.I)
 
 # Not a position. Sorts a call to action whose label is not in the body copy
 # (an aria-label, or text inside an image) behind every located one.
@@ -641,7 +657,11 @@ def _images(soup, base):
     return {
         "count": len(all_images),
         "missing_alt_count": len(missing_alt),
-        "missing_alt_sample": [u for u in missing_alt if u][:5],
+        # Twenty, not five. The site-wide check counts distinct image URLs
+        # from these samples, because one shared header icon repeated on
+        # sixty pages is one fix, not sixty images. Five per page was too
+        # few for that count to mean anything.
+        "missing_alt_sample": [u for u in missing_alt if u][:20],
         "large_image_count": content_images,
         "svg_text_nodes": len(soup.select("svg text")),
         "canvas_count": len(soup.find_all("canvas")),
@@ -821,7 +841,8 @@ def _cta(soup, body_text, origin, base):
             " ".join(anchor.get("class") or []), anchor.get("id") or "",
             anchor.get("role") or "",
         ]))
-        is_cta = first_word in CTA_VERBS or bool(CTA_MARKUP_RE.search(marker))
+        is_cta = ((first_word in CTA_VERBS and not _VERB_IS_AN_ADJECTIVE_HERE.match(low))
+                  or bool(CTA_MARKUP_RE.search(marker)))
         if is_cta:
             offset = lowered.find(low[:40])
             located = offset >= 0

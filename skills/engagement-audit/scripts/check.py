@@ -283,8 +283,14 @@ def _check_homepage_orientation(result, home, english=True):
         summary="Lead with a specific H1 and put one obvious next step in the first screen.",
         how_to_fix=[
             "Replace the H1 with a line naming what the business does and for whom.",
+            # The examples used to be "See pricing" and "Book a table", offered
+            # to a free command-line tool with no purchase funnel and to a
+            # charity. Naming the shape rather than the sector makes the advice
+            # usable by whoever is reading it.
             "Put one primary call to action within the first screen of content, worded as the "
-            "action the visitor wants (\"See pricing\", \"Book a table\"), not \"Learn more\".",
+            "specific thing the visitor came to do - whatever that is on this site, whether it "
+            "is downloading, booking, donating, reading the documentation or seeing the prices "
+            "- rather than \"Learn more\".",
             "Keep one primary action; competing buttons of equal weight split attention.",
         ],
         effort="low", owner="marketing",

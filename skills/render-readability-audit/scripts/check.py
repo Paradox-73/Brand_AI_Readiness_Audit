@@ -86,10 +86,30 @@ def run(snapshot):
     if render_mode == "rendered":
         result.check("static-vs-rendered-text-gap")
     else:
+        # Why it did not run, rather than one stock reason for every case.
+        # A museum's report said "Playwright was not available on the auditing
+        # machine" on a run whose own startup line read "Playwright found,
+        # rendering on" - the pass had not run because the crawl was blocked
+        # before there was anything to render. An explanation that is wrong is
+        # worse than no explanation, because a reader acts on it: this one
+        # would send someone to install a browser they already had.
+        notes = " ".join((snapshot.get("crawl") or {}).get("notes") or [])
+        if not [p for p in pages_of(snapshot) if p.get("status") == 200]:
+            reason = ("no page returned HTTP 200, so there was nothing to render. Whether "
+                      "JavaScript supplies the text on this site is unknown")
+        elif "budget" in notes and "render" in notes:
+            reason = ("the crawl used its wall-clock budget before the rendered pass could "
+                      "run, so the JavaScript gap is inferred from the static HTML rather "
+                      "than measured")
+        elif "Playwright" in notes:
+            reason = next((n for n in ((snapshot.get("crawl") or {}).get("notes") or [])
+                           if "Playwright" in n), "the rendered pass did not run")
+        else:
+            reason = ("the rendered pass did not run, so only the delivered HTML was "
+                      "analysed")
         result.skip("static-vs-rendered-text-gap",
-                    "Playwright was not available on the auditing machine, so only the "
-                    "delivered HTML was analysed. This is a property of the audit run, "
-                    "not a defect on the site.")
+                    "{}. This is a property of the audit run, not a defect on the "
+                    "site.".format(reason[0].upper() + reason[1:]))
 
     if not content_pages:
         for name in ("thin-html", "spa-shell-detection", "facts-locked-in-images",
@@ -214,17 +234,49 @@ def _check_shells(result, snapshot, content_pages, render_mode):
     others = [p for p in shells if p is not home]
     if others:
         rate = len(shells) / float(len(content_pages))
+        # What the rendered sample actually showed about pages of this shape.
+        #
+        # This finding is a claim about every page in the list, drawn from
+        # static HTML, while at most five of them were rendered. On a shop
+        # built with a JavaScript framework it said 30 of 33 pages ship empty
+        # and asked for "several days of development time" re-architecting
+        # rendering - and the pages were not empty; the browser had simply
+        # been given four and a half seconds to hydrate them. The settle wait
+        # is fixed in the crawl, but the shape of the claim was wrong too: if
+        # the sample that was measured recovered its text, that is evidence
+        # about the unmeasured pages, and the finding has to carry it.
+        measured = [p for p in shells if p.get("rendered_text_len") is not None]
+        recovered_sample = [p for p in measured
+                            if p["rendered_text_len"] >= MIN_QUOTABLE_TEXT
+                            and p["rendered_text_len"] > max(p.get("body_text_len", 0), 1) * 3]
+        if measured and len(recovered_sample) == len(measured):
+            severity, confidence = "medium", "medium"
+            sample_note = (" A browser pass rendered {} of these and JavaScript supplied "
+                           "readable text on all {}, so the content exists for consumers "
+                           "that execute JavaScript. The remaining {} were not rendered, "
+                           "and this finding assumes they behave the same way."
+                           .format(len(measured), len(measured),
+                                   len(shells) - len(measured)))
+        else:
+            severity = "high" if rate > SHELL_SHARE_HIGH else "medium"
+            confidence = "high" if measured else "medium"
+            sample_note = (
+                " {} of these were rendered in a browser and the text did not appear."
+                .format(len(measured)) if measured else
+                " None of these were rendered in a browser, so whether JavaScript recovers "
+                "the text is inferred from the static HTML rather than measured.")
         result.add(
             id_hint="content-pages-are-javascript-shells",
             title="{} of {} content pages are delivered as JavaScript shells".format(
                 len(shells), len(content_pages)),
-            severity="high" if rate > SHELL_SHARE_HIGH else "medium",
-            confidence="high",
+            severity=severity,
+            confidence=confidence,
             evidence="{}% of crawled content pages carry two or more shell signals. "
-                     "Examples: {}.".format(
+                     "Examples: {}.{}".format(
                          pct(len(shells), len(content_pages)),
                          "; ".join("{} ({})".format(p["url"], _shell_reasons(p)[0])
-                                   for p in sorted(others, key=lambda x: x["url"])[:3])),
+                                   for p in sorted(others, key=lambda x: x["url"])[:3]),
+                         sample_note),
             mechanism="C", root_cause="js-shell",
             summary="Server-render or pre-render the page templates that currently ship empty.",
             how_to_fix=[
@@ -539,15 +591,26 @@ def _check_alt_coverage(result, content_pages):
         return
 
     total_missing = sum((p.get("images") or {}).get("missing_alt_count", 0) for p in heavy)
+    # How many images, rather than how many times an image appears. A site's
+    # two decorative header textures, present on all sixty crawled pages, were
+    # reported as "189 images with no alt attribute" - a number that reads as a
+    # content-photo problem across the library and is in fact two lines in one
+    # shared template. Distinct source URLs is the count that matches the
+    # number of edits the fix takes.
+    distinct = sorted({url for page in heavy
+                       for url in (page.get("images") or {}).get("missing_alt_sample") or []})
+    repeated = len(distinct) and total_missing >= len(distinct) * 2
     result.add(
         id_hint="images-missing-alt-text",
-        title="{} content pages {} no alt attribute".format(
-            plural(total_missing, "image on", "images on"),
-            "has" if total_missing == 1 else "have"),
+        title="{} no alt attribute".format(
+            plural(len(distinct) or total_missing, "image has", "images have")),
         severity="low", confidence="high",
-        evidence="{} image-heavy page(s) contain images with no alt attribute at all. "
-                 "Examples: {}.".format(
-                     len(heavy), ", ".join(example_urls([p["url"] for p in heavy]))),
+        evidence="{} distinct image URL(s) with no alt attribute at all, appearing {} times "
+                 "across {} image-heavy page(s).{} Examples: {}.".format(
+                     len(distinct) or total_missing, total_missing, len(heavy),
+                     " Most are repeated on every page, so they live in a shared template and "
+                     "are one edit each rather than one per page." if repeated else "",
+                     ", ".join(example_urls([p["url"] for p in heavy]))),
         mechanism="C", root_cause="alt-missing",
         summary="Add descriptive alt text to content images and alt=\"\" to purely decorative ones.",
         how_to_fix=[

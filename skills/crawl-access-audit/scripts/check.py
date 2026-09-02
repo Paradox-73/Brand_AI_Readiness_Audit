@@ -429,9 +429,16 @@ def _check_robots_blocks(result, robots, origin):
             title="robots.txt disallows {} that look like real content".format(
                 plural(len(content_blocks), "path")),
             severity="medium", confidence="medium",
-            evidence="Disallowed for all crawlers: {}. Admin, cart, checkout, search and "
-                     "asset paths were excluded from this list because blocking those is "
-                     "normal.".format(
+            # The old wording named only one of the three exclusions, so a
+            # reader checking the robots.txt against the report found rules
+            # missing from the list for a reason the report had not given.
+            evidence="Disallowed for all crawlers: {}. Three kinds of rule were excluded "
+                     "before this list was drawn up: admin, cart, checkout, search, asset "
+                     "and machine-file paths, because blocking those is normal; any rule "
+                     "containing a wildcard, because it usually filters query strings rather "
+                     "than blocking a section; and any path more than one segment deep. The "
+                     "paths above were not fetched - robots.txt disallows them and this audit "
+                     "respects that - so what is behind them is unverified.".format(
                          ", ".join(content_blocks[:5])),
             mechanism="A", root_cause="robots-block",
             summary="Review these disallow rules and remove any that cover pages you want quoted.",

@@ -720,7 +720,16 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
             # Two queued URLs that redirect to the same destination are one
             # page; keeping both would double-count every finding on it.
             landed = normalise_url(record.get("final_url") or url) or url
-            if landed != url and landed in fetched_final:
+            # `landed != url` was part of this condition, and it let the other
+            # half of every redirect pair through. A shop's `/` redirects to
+            # `/us/eng`, so `/` was recorded under the landing URL; `/us/eng`
+            # was then fetched in its own right, did not redirect, and so
+            # never reached the check at all. The same page appeared twice,
+            # was reported as a duplicate title against itself, and inflated
+            # the counts in the autoplay and page-weight findings. The
+            # question is only ever "have we already read what is at this
+            # address", and where the request started does not change it.
+            if landed in fetched_final:
                 skipped.append({"url": url, "reason": "redirects to an already-crawled page"})
                 continue
             fetched_final.add(landed)
@@ -913,11 +922,30 @@ def _probe_head_support(fetcher, home_url, home_record, notes):
 # the static audit promises: a browser waiting for an idle state a page never
 # reaches will happily spend the whole of it.
 RENDER_PAGES = 5             # a sample, not a second crawl
-RENDER_BUDGET_SECONDS = 60   # hard ceiling for the whole pass
-RENDER_GOTO_MS = 15000       # per page, to first paint
-RENDER_IDLE_MS = 4000        # best-effort wait for the network to settle
-RENDER_SETTLE_MS = 500       # a moment for hydration to write to the DOM
+RENDER_BUDGET_SECONDS = 75   # hard ceiling for the whole pass
+RENDER_GOTO_MS = 12000       # per page, to first paint
+RENDER_IDLE_MS = 3000        # best-effort wait for the network to settle
 RENDER_MIN_SECONDS = 10      # below this there is no time to render even one page honestly
+
+# How long to wait for hydration to finish writing to the DOM.
+#
+# This was a flat 500 ms, and 500 ms is not enough for a commerce site built
+# on a JavaScript framework. Re-running the same browser against one such shop
+# with about eleven seconds instead of the four and a half it was given
+# returned 6,500 to 10,300 characters of real text, real titles and real
+# headings on pages the audit had just called empty shells - and the report's
+# first recommendation was to spend "several days of development time"
+# re-architecting rendering on a site that renders correctly. The tool gave up
+# before the page finished, then described what it saw as a property of the
+# site.
+#
+# A flat, longer wait would spend the whole budget on pages that were ready
+# immediately. So the text is polled instead, and the wait ends as soon as it
+# stops growing: a static page settles in one round, and a slow one gets the
+# time it needs up to the ceiling.
+RENDER_POLL_MS = 500          # how often to re-read the rendered text
+RENDER_SETTLE_MAX_MS = 9000   # stop waiting for growth after this
+RENDER_SETTLE_STABLE = 2      # unchanged this many polls in a row means settled
 
 
 def _render_targets(pages):
@@ -971,6 +999,26 @@ def _render_targets(pages):
             take(page)
 
     return chosen[:RENDER_PAGES]
+
+
+def _settled_text(tab):
+    """Read the rendered text once it stops growing. Returns (text, ms waited).
+
+    Polling beats a fixed pause in both directions: a server-rendered page is
+    stable on the first read and costs one poll, while a page still hydrating
+    keeps its time up to the ceiling instead of being measured half-built and
+    reported as empty.
+    """
+    read = "document.body ? document.body.innerText : ''"
+    text = tab.evaluate(read)
+    waited, stable = 0, 0
+    while waited < RENDER_SETTLE_MAX_MS and stable < RENDER_SETTLE_STABLE:
+        tab.wait_for_timeout(RENDER_POLL_MS)
+        waited += RENDER_POLL_MS
+        current = tab.evaluate(read)
+        stable = stable + 1 if len(current) == len(text) else 0
+        text = current
+    return text, waited
 
 
 def _render_pass(pages, notes, crawl_deadline=None, required=False):
@@ -1029,9 +1077,9 @@ def _render_pass(pages, notes, crawl_deadline=None, required=False):
                         tab.wait_for_load_state("networkidle", timeout=RENDER_IDLE_MS)
                     except Exception:  # noqa: BLE001 - never going idle is normal
                         pass
-                    tab.wait_for_timeout(RENDER_SETTLE_MS)
-                    rendered = tab.evaluate("document.body ? document.body.innerText : ''")
+                    rendered, waited_ms = _settled_text(tab)
                     page_record["rendered_text_len"] = len(re.sub(r"\s+", " ", rendered).strip())
+                    page_record["render_settle_ms"] = waited_ms
                 except Exception as exc:  # noqa: BLE001 - a render failure is not a site defect
                     page_record["render_error"] = truncate(str(exc), 200)
                 finally:

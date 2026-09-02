@@ -112,6 +112,15 @@ def _format_price(value):
 def run(snapshot):
     result = SkillResult(SKILL)
     pages = pages_of(snapshot, content_only=True)
+    # Markup expectations are keyed to page type, so those checks read content
+    # pages. HTML hygiene is not: a `lang` attribute, a <title>, a meta
+    # description and Open Graph tags are expected on every page a machine can
+    # fetch, and reading only the content pages made these checks describe a
+    # site from a handful of it. One report said "2 pages do not declare a
+    # language" about a site where 57 of the 60 crawled pages had no `lang`,
+    # because the check had silently looked at three of them and the finding
+    # never said so. Someone fixing the two named would have left 55 behind.
+    all_pages = pages_of(snapshot)
     brand = snapshot.get("brand") or {}
 
     if not pages:
@@ -134,10 +143,10 @@ def run(snapshot):
     _check_breadcrumbs(result, pages, by_type)
     _check_website_searchaction(result, by_type)
     _check_consistency(result, pages, brand)
-    _check_titles_and_descriptions(result, pages)
-    _check_open_graph(result, pages)
-    _check_lang(result, pages)
-    _check_microdata_only(result, pages)
+    _check_titles_and_descriptions(result, all_pages)
+    _check_open_graph(result, all_pages)
+    _check_lang(result, all_pages)
+    _check_microdata_only(result, all_pages)
 
     result.signal("has_faq_schema", any(_types_on(p) & FAQ_TYPES for p in pages))
     result.signal("has_org_schema", any(_types_on(p) & ORG_TYPES for p in pages))
