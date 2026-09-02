@@ -117,3 +117,52 @@ def test_an_adjective_is_not_a_call_to_action(label):
 ])
 def test_a_real_call_to_action_still_counts(label):
     assert not _VERB_IS_AN_ADJECTIVE_HERE.match(label)
+
+
+# --------------------------------------------------------------------------
+# Text the page has hidden is not the page's content
+# --------------------------------------------------------------------------
+
+def test_an_aria_hidden_modal_is_not_page_content():
+    """A restaurant chain's "you are leaving our site" modal became the
+    opening prose of twelve pages, and the sentence the citation table said an
+    assistant would quote from each of them.
+    """
+    from audit_common import main_text
+    soup = make_soup(
+        '<html><body>'
+        '<div aria-hidden="true"><p>You are now leaving our website. '
+        'We are not responsible for the content of external sites.</p></div>'
+        '<main><p>' + ("Wheel-thrown stoneware made in the Walmgate studio. " * 8) +
+        '</p></main></body></html>')
+    text = main_text(soup)
+    assert "leaving our website" not in text
+    assert "Wheel-thrown stoneware" in text
+
+
+def test_a_display_none_block_is_not_page_content():
+    from audit_common import main_text
+    soup = make_soup(
+        '<html><body><div style="display: none"><p>Hidden promotional copy.</p></div>'
+        '<main><p>' + ("Real readable content on the page. " * 12) +
+        '</p></main></body></html>')
+    assert "Hidden promotional copy" not in main_text(soup)
+
+
+def test_a_hidden_attribute_block_is_not_page_content():
+    from audit_common import main_text
+    soup = make_soup(
+        '<html><body><div hidden><p>A collapsed panel nobody sees.</p></div>'
+        '<main><p>' + ("Real readable content on the page. " * 12) +
+        '</p></main></body></html>')
+    assert "collapsed panel" not in main_text(soup)
+
+
+def test_visible_content_inside_an_ordinary_div_survives():
+    """The exclusion must be markup that says "hidden", not anything nested."""
+    from audit_common import main_text
+    soup = make_soup(
+        '<html><body><main><div class="promo"><p>' +
+        ("A visible promotional line that belongs to the page. " * 8) +
+        '</p></div></main></body></html>')
+    assert "visible promotional line" in main_text(soup)

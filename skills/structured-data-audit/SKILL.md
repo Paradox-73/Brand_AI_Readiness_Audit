@@ -46,6 +46,20 @@ from a consultancy or an author byline from a pricing page. See
    rather than inferring it from marketing copy. If present, check the high-value properties:
    `name`, `url`, `logo`, `description`, `sameAs`. Missing ones are **medium**.
 
+   When you write the snippet, use `Organization` unless the site is somewhere a customer
+   physically goes. `LocalBusiness` is schema.org's type for a single-location storefront,
+   clinic or restaurant, and choosing it because an address appeared anywhere on the site
+   handed a global software foundation and an international relief charity paste-ready markup
+   declaring them local businesses. Nearly every organisation publishes an address, for legal
+   reasons. Earn `LocalBusiness` from the site declaring a visitable type itself, publishing
+   opening hours, or having location pages.
+
+   Use the brand name **as the site spells it**, not as the domain flattens it: a shop whose
+   homepage says "Zingerman's" must not be handed a snippet naming it "Zingermans". And take
+   the name from the homepage where you can. One charity declared an Organization name on a
+   single store page out of sixty — its training subsidiary — and that became the identity for
+   the whole report.
+
 3. **Product and Offer**, only if product detail pages were detected. Missing `Product` is
    **high**. Present but with no `offers`, or an `offers` object missing `price`,
    `priceCurrency` or `availability`, is **medium** — it answers "what is this" but not
@@ -57,6 +71,15 @@ from a consultancy or an author byline from a pricing page. See
 
 5. **FAQPage**, only on pages that read as an FAQ. **Medium**: question-and-answer pairs are
    already shaped like the thing an assistant is trying to produce.
+
+   A page reads as an FAQ when most of its headings are questions, not merely four of them.
+   A contributor style guide with headings like "Duplication is evil" and "Code style" was
+   classified as an FAQ page on that weaker rule, and the generated markup then wrapped
+   those statements in `Question` nodes. When you write the snippet, include **only**
+   headings that are actually questions — never a policy heading, never a legal section, and
+   never a heading paired with a paragraph that is not its answer. Markup that does not match
+   the page is treated as spam by several consumers, which the finding itself says. If fewer
+   than two real questions remain, emit a placeholder rather than a fabrication.
 
 6. **BreadcrumbList** on deep pages, and **WebSite + SearchAction** on the homepage *only if
    the site actually has search*. Both **low**. Declaring a SearchAction for search that does

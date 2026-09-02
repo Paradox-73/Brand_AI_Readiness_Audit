@@ -50,8 +50,17 @@ as thin or title-only.
    pass ran and recovered nothing, report **critical** with high confidence. If no rendered
    pass was available, report **critical** with *medium* confidence and say why.
 
-3. **Then judge the rest.** More than half the crawled content pages being shells is a
-   site-wide template failure (high); fewer is medium. Name the pages, not the count alone.
+3. **Then judge the rest, and say how much of it you actually saw.** More than half the
+   crawled content pages being shells is a site-wide template failure (high); fewer is
+   medium. Name the pages, not the count alone.
+
+   This finding is a claim about every page in its list, and at most five of them were ever
+   opened in a browser. Say how many were rendered, what those showed, and that the rest are
+   an assumption. If every rendered page recovered its text, drop to **medium** with medium
+   confidence: the evidence you have points the other way. A shop was told 30 of its 33
+   pages ship empty and to spend "several days of development time" re-architecting
+   rendering, and its pages render correctly — the browser had been given half a second to
+   hydrate them.
 
 4. **Measure the render gap where you can.** With Playwright, compare rendered text length
    against static text length on up to 5 sampled pages. The five are spread across page
@@ -60,8 +69,15 @@ as thin or title-only.
    on the server, while the shells this check exists to find live on product and article
    pages one level down. A gap of 60% or more is the exact
    amount of content that disappears for any consumer that does not run JavaScript.
+
+   Wait for the rendered text to stop growing rather than for a fixed pause. A commerce site
+   built on a JavaScript framework needed about eleven seconds to hydrate; measured after
+   half a second it looked empty, and was reported as empty.
    **Playwright's absence is a property of the auditing machine. Never report it as a site
-   problem** — record it in `checks_run` and move on.
+   problem** — record it in `checks_run` and move on. Say which reason applies rather than
+   reaching for the stock one: a report once explained that Playwright was unavailable on a
+   run whose own startup line said Playwright had been found, when the truth was that the
+   crawl was blocked before there was anything to render.
 
 5. **Find facts locked in non-text.** Skip anything already reported as a shell so nothing
    is counted twice.

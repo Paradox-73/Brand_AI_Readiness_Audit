@@ -369,6 +369,27 @@ TITLE_BOILERPLATE_TAIL = (
 )
 
 
+# The half of "Brand - Region" that is the region. Many international
+# organisations name their national arm this way, and the region is never the
+# brand.
+_REGION_SUFFIXES = frozenset({
+    "usa", "u.s.a.", "us", "u.s.", "uk", "u.k.", "gb", "eu", "ca", "au", "nz",
+    "in", "canada", "australia", "new zealand", "ireland", "scotland", "wales",
+    "united states", "united kingdom", "great britain", "america",
+    "north america", "south america", "latin america", "europe", "emea",
+    "apac", "asia", "africa", "middle east", "global", "international",
+    "worldwide", "deutschland", "france", "espana", "italia", "nederland",
+    "sverige", "norge", "danmark", "suomi", "polska", "brasil", "mexico",
+    "en", "en-us", "en-gb", "de", "fr", "es", "it", "nl", "pt", "ja", "zh",
+})
+
+
+def _is_region_suffix(part):
+    """True for "USA", "EMEA", "Deutschland" - a place, not a brand."""
+    value = (part or "").strip().lower().strip(".")
+    return value in _REGION_SUFFIXES or value.replace(".", "") in _REGION_SUFFIXES
+
+
 def _is_title_boilerplate(part):
     """True for a title half that is only scaffolding: "Home", "Official Site"."""
     value = (part or "").strip().lower().strip(".")
@@ -379,8 +400,21 @@ def _is_title_boilerplate(part):
     for tail in TITLE_BOILERPLATE_TAIL:
         if value == tail.strip():
             return True
+    # "Home", in the languages the crawl actually meets. The comment on the
+    # og:site_name split says a German government site's "Die Bundesregierung
+    # informiert | Startseite" was fixed by splitting it - and splitting it and
+    # then taking the shorter half returns "Startseite", which is German for
+    # "home page". The bug the comment describes had never been fixed, only
+    # moved. Everything structural in this file is language-independent; this
+    # list is the one place a word has to be recognised, so it names them.
     return value in ("home page", "homepage", "official site", "official website",
-                     "welcome", "start", "start page", "index", "main page")
+                     "welcome", "start", "start page", "index", "main page",
+                     "startseite", "hauptseite", "willkommen",
+                     "accueil", "page d'accueil", "bienvenue",
+                     "inicio", "pagina de inicio", "portada", "bienvenido",
+                     "pagina iniziale", "benvenuto",
+                     "homepagina", "welkom", "hem", "forside", "hjem",
+                     "etusivu", "strona glowna", "glowna", "principal")
 
 
 def _strip_title_boilerplate(title):
@@ -504,10 +538,24 @@ def detect_brand(pages, origin):
             # separator and all: "Die Bundesregierung informiert | Startseite"
             # became the brand, and then appeared inside generated fix text as
             # if it were a company name.
+            #
+            # Shortest-wins is the wrong rule on its own. An international
+            # charity sets og:site_name to "Doctors Without Borders - USA", so
+            # the shortest piece is "USA" - and that became the brand for the
+            # whole report, the subject of two findings about a name collision
+            # that does not exist, and the `name` field of a paste-ready
+            # Organization snippet. A report about making a brand's identity
+            # unambiguous told a medical charity its own name was "USA".
+            #
+            # A national or regional suffix is not the brand, and neither is
+            # boilerplate. Drop both first; shortest-wins is only the tiebreak
+            # between two halves that are both real.
             pieces = [clean(x) for x in TITLE_SEPARATOR.split(site_name)]
             pieces = [x for x in pieces if x]
             if len(pieces) > 1:
-                site_name = min(pieces, key=len)
+                named = [x for x in pieces
+                         if not _is_title_boilerplate(x) and not _is_region_suffix(x)]
+                site_name = min(named or pieces, key=len)
             authoritative.append({"name": site_name, "source": "og:site_name" + suffix})
             declared_on.setdefault(site_name, set()).add(page.get("url"))
 

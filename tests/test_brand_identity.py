@@ -146,3 +146,52 @@ def test_the_shorter_end_still_wins_between_two_real_halves():
         [_page("https://example.test/", "Acme | Wheel-thrown stoneware from York")],
         "https://example.test")
     assert brand["name"] == "Acme"
+
+
+# --------------------------------------------------------------------------
+# og:site_name: the region is not the brand
+# --------------------------------------------------------------------------
+
+def _og(value, url="https://example.test/"):
+    return {"url": url, "title": "", "status": 200, "page_type": "home",
+            "jsonld": [], "og": {"og:site_name": value}}
+
+
+def test_a_national_suffix_is_not_the_brand():
+    """og:site_name "Doctors Without Borders - USA" made the brand "USA".
+
+    Shortest-piece-wins put "USA" at the top of the report, invented a name
+    collision about it, and wrote it into the `name` field of a paste-ready
+    Organization snippet - telling a medical charity its own name was "USA".
+    """
+    brand = detect_brand([_og("Example Without Borders - USA")], "https://example.test")
+    assert brand["name"] == "Example Without Borders"
+
+
+def test_a_regional_suffix_is_not_the_brand():
+    brand = detect_brand([_og("Example Software | EMEA")], "https://example.test")
+    assert brand["name"] == "Example Software"
+
+
+def test_a_home_word_in_another_language_is_not_the_brand():
+    """"Die Bundesregierung informiert | Startseite" -> "Startseite".
+
+    The comment on this code said splitting the title had fixed that case. It
+    had not: splitting it and taking the shorter half returns the German for
+    "home page".
+    """
+    brand = detect_brand([_og("Die Beispielregierung informiert | Startseite")],
+                         "https://example.test")
+    assert brand["name"] == "Die Beispielregierung informiert"
+
+
+def test_a_brand_whose_name_contains_a_place_is_left_alone():
+    """"USA Today" has no separator, so nothing is split off it."""
+    brand = detect_brand([_og("USA Today")], "https://example.test")
+    assert brand["name"] == "USA Today"
+
+
+def test_the_shorter_half_still_wins_when_both_halves_are_real():
+    brand = detect_brand([_og("Acme | Wheel-thrown stoneware from York")],
+                         "https://example.test")
+    assert brand["name"] == "Acme"

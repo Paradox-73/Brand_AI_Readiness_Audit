@@ -246,6 +246,23 @@ def _check_homepage_orientation(result, home, english=True):
                     "{} characters".format(h1s[0], cta.get("text"), CTA_BYTE_WINDOW))
         return
 
+    # A missing H1 belongs to whoever owns heading structure, and that is not
+    # this skill. A charity's report carried "1 page has no H1" from
+    # fact-extractability-audit and "The homepage has no h1" from this one, as
+    # two separate medium findings about one `<h1>` tag - two entries in the
+    # count, two effort estimates, one fix. Cross-skill dedup cannot merge them
+    # because they are different root causes, and they are different root
+    # causes for a good reason: heading structure is a markup problem and
+    # orientation is a visitor problem. So this check stays quiet when the
+    # heading is the only thing it has to say.
+    if problems == ["the homepage has no H1"]:
+        result.skip("homepage-orientation",
+                    "the homepage has no H1, which is reported once as a heading-structure "
+                    "finding rather than twice. Everything else this check looks at - a "
+                    "heading that names the business, and a call to action inside the first "
+                    "{} characters - is present".format(CTA_BYTE_WINDOW))
+        return
+
 
     # A missing H1 is a markup fact, not proof that a visitor is lost. Three
     # real sites - a database engine, an operating system and a JavaScript

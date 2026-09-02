@@ -60,8 +60,18 @@ described badly, or when someone reports "our pages exist but nothing ever cites
    See `references/ai-crawler-user-agents.md` for the list and the group of each.
 
 5. **Which paths are disallowed?** Ignore admin, cart, checkout, account, login and search
-   paths — blocking those is correct. Report only disallow rules covering what looks like
-   real content.
+   paths — blocking those is correct. Ignore files that exist for machines rather than
+   readers (`/apple-app-site-association`, `/humans.txt`, `/ads.txt`, `/.well-known/`),
+   framework and build directories (`/App_Themes`, `/_next/`, `/bin`), and error and
+   maintenance pages. Two shop reports opened with "robots.txt disallows N paths that look
+   like real content" and named an 89-byte Apple deep-linking manifest as the first thing to
+   fix. Ignore wildcard rules too: they usually filter query strings.
+
+   Report only disallow rules covering what looks like real content — and say in the finding
+   that you did **not** fetch those paths, because robots.txt disallows them and this audit
+   respects that, so what is behind them is unverified. Name all three exclusions you
+   applied, not one of them; a reader comparing the report against their own robots.txt will
+   otherwise find rules missing for a reason you never gave.
 
 6. **Sitemaps.** Referenced from robots, or present at `/sitemap.xml`? Does it parse? What
    share of entries carry `<lastmod>`? Do the URLs it advertises resolve? Prefer statuses
@@ -82,7 +92,11 @@ described badly, or when someone reports "our pages exist but nothing ever cites
 8. **Status and indexability across the crawled pages.** Homepage non-200 is critical. A
    non-200 rate at or above 10% is a systemic problem; below that, stay quiet. Redirect
    chains longer than two hops are low. `noindex` in a meta tag or `X-Robots-Tag` on a
-   content page is high: the page is fetched and then thrown away. Canonical tags pointing
+   content page is high: the page is fetched and then thrown away — unless the page's own
+   title says it is missing ("Page Not Found", "Nothing To See Here"), in which case
+   `noindex` is the correct thing for the site to do and telling the owner to remove it would
+   put a broken page into the index. Say in the exemption line that you found one and why you
+   left it alone. Canonical tags pointing
    off-domain are high; pointing at a non-200 URL is medium.
 
 9. **Transport and hostnames.** Plain HTTP is medium, skipped for localhost and bare IP
@@ -91,6 +105,17 @@ described badly, or when someone reports "our pages exist but nothing ever cites
 
 10. **`/llms.txt`.** Record presence. Absence is never a finding; it feeds a proactive
    recommendation instead.
+
+**A refused request is not an answer.** This applies to every step above and is the single
+easiest way to write something false. If `sitemap.xml` returns 429, you have not learned that
+there is no sitemap; you have learned that the edge refused you. One report said "No XML
+sitemap is available" as settled fact and recorded `/llms.txt` as a clean pass, on a site
+where both requests returned 429 — in the same document that correctly hedged the identically
+blocked robots.txt. Report a refusal as **unchecked**, in every check, or not at all.
+
+**A percentage of one page is not a second observation.** A site whose homepage is blocked
+produces one fetch. Reporting "the homepage refuses this crawler" and "100% of crawled pages
+refuse this crawler" as two findings prices one blocked request twice.
 
 ## Output
 

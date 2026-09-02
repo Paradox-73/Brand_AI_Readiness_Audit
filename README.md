@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Agent Skills](https://img.shields.io/badge/Agent%20Skills-agentskills.io-6E56CF?style=flat-square)
 ![Skills](https://img.shields.io/badge/Skills-7%20(1%20entrypoint)-0F9D58?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-564%20passing-2EA043?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-590%20passing-2EA043?style=flat-square)
 ![Read Only](https://img.shields.io/badge/Mode-Read--only-FF6F00?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-4169E1?style=flat-square)
 
@@ -178,8 +178,8 @@ The tests, if you want them:
 
 ```bash
 pip install pytest
-python3 -m pytest -q                        # 564 tests, about 16 minutes
-python3 -m pytest -q -m "not mutation"      # 507 tests, about 4 minutes
+python3 -m pytest -q                        # 590 tests, about 16 minutes
+python3 -m pytest -q -m "not mutation"      # 533 tests, about 4 minutes
 ```
 
 > **Windows path limit.** Do not unzip into a deep directory — `pip` cannot install `lxml` if
@@ -208,7 +208,7 @@ That separated in all six categories studied — the only measure that did — a
 cheapest fix here. You cannot become famous this quarter; you can claim six profiles this week
 and put the same sentence on all of them.
 
-*What that number is and is not:* our own study of 29 crawlable sites, six categories, matched within category. Whether an assistant "names" a brand was a prominence judgement we made, not a systematic query of any assistant. It is the strongest association we found and it is not a proven cause. The study says so at greater length, including the measures that did **not** separate the two groups.
+*What that number is and is not:* our own study of 29 crawlable sites in six categories, matched within category. Whether an assistant "names" a brand was our prominence judgement, not a systematic query of any assistant, so this is the strongest association we found and not a proven cause. The study says so at greater length, including the measures that did **not** separate the two groups.
 
 ---
 
@@ -217,36 +217,39 @@ and put the same sentence on all of them.
 - **A response is read to 5 MB and no further.** Above that the page is analysed up to the
   cap, recorded as truncated, and the report says so. The heaviest real homepage we
   measured was 1.38 MB, so nothing ordinary comes near it.
-- **On a site that refuses HEAD requests, unreached link targets are unchecked.** Three
-  of eight major commercial sites we measured answer 403 to a HEAD request and 200 to a
-  GET. Verifying those links would mean fetching every one in full. The report says how
-  many went unchecked rather than calling them broken.
-- **Sixty pages is still a sample** on a large site. The report says how many it read, and
-  every finding describes only those pages. Sixty was measured, not picked: on a large real
-  site thirty pages found 16 problems in 84 s, sixty found 19 in 99 s, and a hundred added
-  one more for another 72 s.
+- **On a site that refuses HEAD, unreached link targets are unchecked.** Three of eight
+  major commercial sites answer 403 to HEAD and 200 to GET; verifying those links would mean
+  fetching each in full. The report says how many went unchecked, not that they are broken.
+- **Sixty pages is still a sample** on a large site; the report says how many it read, and
+  every finding describes only those pages. Sixty was measured: thirty pages found 16
+  problems in 84 s, sixty found 19 in 99 s, a hundred added one for another 72 s.
 - **The prose checks are English.** The definition pattern, the answer-first test, sentence
   length and the call-to-action verbs all assume it. The crawl detects the site language once
   and those checks **decline** on a site in another language rather than guessing. Everything
   structural still runs.
 - **Engagement is read from markup, not analytics.** It finds structural reasons a visitor
   would leave. It cannot tell you that one did.
-- **Some sites refuse us, and we do not work around it.** We tested whether completing our HTTP
-  headers helped: zero of fifteen blocked sites changed. Getting in would mean wearing a
-  browser's identity, which circumvents a deliberate access decision. A block is a finding.
+- **Some sites refuse us, and we do not work around it.** Completing our HTTP headers
+  changed nothing on zero of fifteen blocked sites, and getting in would mean wearing a
+  browser's identity. A block is a finding.
 - **Name conflicts are checked against Wikidata only.** That says how many organisations share
   a name, not which one an assistant currently prefers.
-- **Only six platforms can be asked whether a profile exists.** LinkedIn, X, YouTube, GitHub,
-  Wikipedia and Wikidata answer 404 for a profile that is not there. Instagram, TikTok, Medium,
-  Pinterest and Threads answer 200 for anything; Crunchbase, Yelp, Glassdoor and Trustpilot
-  refuse every crawler. Those nine are reported as unchecked rather than guessed at.
+- **Only six platforms can be asked whether a profile exists** — LinkedIn, X, YouTube,
+  GitHub, Wikipedia and Wikidata answer 404 for one that is not there. Instagram, TikTok,
+  Medium, Pinterest and Threads answer 200 for anything, and Crunchbase, Yelp, Glassdoor and
+  Trustpilot refuse every crawler; those nine are reported as unchecked.
 - **Without Playwright the JavaScript gap is inferred, not measured**, so the homepage-shell
-  finding drops to medium confidence rather than claiming certainty it does not have. With
-  Playwright — which the audit uses automatically when it is installed — the same finding is
-  measured, and a homepage whose text JavaScript does recover is reported as high rather than
-  critical. Both verdicts are correct; the difference is what was known.
+  finding drops to medium confidence. With Playwright — used automatically when installed —
+  it is measured, and a homepage whose text JavaScript recovers is high rather than critical.
+  Both verdicts are correct; the difference is what was known.
 - **A robots.txt block stops the run.** The verdict explains the empty result instead of
   presenting it as a clean bill of health.
+- **A refused request is unchecked, never an absence**, and a path robots.txt disallows is
+  never fetched — so "this disallow looks like real content" is a judgement about the path,
+  not a measurement of what is behind it. Both findings say so.
+- **The JavaScript gap is measured on five pages.** A finding naming thirty extrapolates
+  from those five, says how many were rendered, and drops to medium when the rendered ones
+  recovered their text.
 
 ---
 

@@ -994,8 +994,37 @@ _SHARE_URL_RE = re.compile(
 # LinkedIn personal profiles (`/in/<person>`) are people, not the organisation.
 # One was being counted as a company's own LinkedIn because a customer story
 # linked to an individual.
+# What a profile URL looks like, per platform.
+#
+# Only LinkedIn had a rule, so every other platform accepted any URL containing
+# the domain - and a page that mentions things is full of those. Two open-source
+# projects were credited with GitHub profiles that were third-party tools named
+# in their news posts (`github.com/libredb/libredb-studio`), a YouTube profile
+# that was a movie clip used to demonstrate a video filter, and a Wikipedia
+# profile that was the article on ACID transactions. Those went into the
+# corroboration count *and* into the `sameAs` array of a paste-ready
+# Organization snippet, so following the report would have published false
+# claims of affiliation with other people's projects.
+#
+# A profile is a handle at the root of the platform, not a piece of content
+# inside it. The query string is stripped before matching, so tracking
+# parameters do not defeat the anchors.
 _PROFILE_PATH_RULES = {
-    "LinkedIn": re.compile(r"linkedin\.com/(?:company|school|showcase)/", re.I),
+    "LinkedIn": re.compile(r"^https?://(?:[\w-]+\.)?linkedin\.com/(?:company|school|showcase)/[\w.-]+/?$", re.I),
+    "GitHub": re.compile(r"^https?://(?:www\.)?github\.com/(?:orgs/)?[A-Za-z0-9][\w.-]*/?$", re.I),
+    "X": re.compile(r"^https?://(?:www\.)?(?:twitter|x)\.com/[A-Za-z0-9_]{1,15}/?$", re.I),
+    "YouTube": re.compile(r"^https?://(?:www\.)?youtube\.com/(?:@[\w.-]+|c/[\w.-]+|channel/[\w-]+|user/[\w.-]+)/?$", re.I),
+    "Facebook": re.compile(r"^https?://(?:[\w-]+\.)?facebook\.com/[\w.-]+/?$", re.I),
+    "Instagram": re.compile(r"^https?://(?:www\.)?instagram\.com/[\w.-]+/?$", re.I),
+    "TikTok": re.compile(r"^https?://(?:www\.)?tiktok\.com/@[\w.-]+/?$", re.I),
+    "Threads": re.compile(r"^https?://(?:www\.)?threads\.net/@[\w.-]+/?$", re.I),
+    "Bluesky": re.compile(r"^https?://(?:www\.)?bsky\.app/profile/[\w.-]+/?$", re.I),
+    "Medium": re.compile(r"^https?://(?:[\w-]+\.)?medium\.com/@?[\w.-]+/?$", re.I),
+    "Pinterest": re.compile(r"^https?://(?:[\w-]+\.)?pinterest\.[\w.]+/[\w.-]+/?$", re.I),
+    "Crunchbase": re.compile(r"^https?://(?:www\.)?crunchbase\.com/organization/[\w.-]+/?$", re.I),
+    "Wikidata": re.compile(r"^https?://(?:www\.)?wikidata\.org/(?:wiki|entity)/Q\d+/?$", re.I),
+    "Wikipedia": re.compile(r"^https?://[\w-]+\.wikipedia\.org/wiki/[^/]+$", re.I),
+    "Yelp": re.compile(r"^https?://(?:[\w-]+\.)?yelp\.[\w.]+/biz/[\w.-]+/?$", re.I),
 }
 
 
@@ -1018,11 +1047,15 @@ def _social_profiles(external_links, jsonld):
         low = url.lower()
         if _SHARE_URL_RE.search(low):
             continue
+        # Anchored rules must not be defeated by a tracking parameter or a
+        # fragment, and neither carries any information about whose profile
+        # this is.
+        bare = low.split("?")[0].split("#")[0]
         for domain, platform in SOCIAL_PLATFORMS.items():
             if domain not in low:
                 continue
             rule = _PROFILE_PATH_RULES.get(platform)
-            if rule and not rule.search(low):
+            if rule and not rule.search(bare):
                 continue
             found.setdefault(platform, url)
     return dict(sorted(found.items()))

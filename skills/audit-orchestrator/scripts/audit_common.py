@@ -241,8 +241,8 @@ def link_verdict(status, edge_refusal=False):
 # we never expect Product schema on a site that has no product pages.
 PAGE_TYPES = (
     "home", "about", "contact", "pricing", "product", "category", "service",
-    "article", "faq", "location", "comparison", "press", "careers", "legal",
-    "other",
+    "article", "documentation", "faq", "location", "comparison", "press",
+    "careers", "legal", "other",
 )
 
 # Types that carry substantive content a machine would want to quote.
@@ -250,11 +250,12 @@ PAGE_TYPES = (
 # lacking schema or a CTA is not a defect.
 CONTENT_TYPES = frozenset({
     "home", "about", "contact", "pricing", "product", "category", "service",
-    "article", "faq", "location", "comparison", "press",
+    "article", "documentation", "faq", "location", "comparison", "press",
 })
 
 # Deep types where a breadcrumb genuinely helps orientation.
-DEEP_TYPES = frozenset({"product", "article", "location", "service", "comparison"})
+DEEP_TYPES = frozenset({"product", "article", "documentation", "location", "service",
+                        "comparison"})
 
 
 # --------------------------------------------------------------------------
@@ -583,6 +584,15 @@ _URL_TYPE_SLUGS = (
     # Episodes are articles for our purposes: dated published pieces that a
     # machine should be able to read, quote and date. Without them a podcast
     # episode page classified as "other" and every content check skipped it.
+    # Reference material, checked before "article" because a documentation
+    # page is not an authored piece. It has no byline and no publication date
+    # by design, and demanding `author` and `datePublished` on it produced
+    # four findings across two sites telling engineering teams to attribute a
+    # third-party integration reference and a set of onboarding guides to a
+    # named person. Everything else a content page is asked for still applies.
+    ("documentation", ("docs", "doc", "documentation", "reference", "manual",
+                       "handbook", "wiki", "knowledge-base", "knowledgebase", "kb",
+                       "tutorial", "tutorials", "enablement", "learn", "api")),
     ("article", ("blog", "news", "article", "articles", "post", "posts", "insight",
                  "insights", "stories", "story", "guides", "resources", "journal",
                  "episode", "episodes", "podcast", "podcasts", "transcript",
@@ -1451,8 +1461,22 @@ def _strip_chrome(node):
     for tag in clone(list(_NON_CONTENT_TAGS)):
         tag.decompose()
     for selector in ("header", "nav", "footer", "aside", "[role=navigation]",
-                     "[role=contentinfo]", "[class*=breadcrumb]", "[id*=breadcrumb]"):
+                     "[role=contentinfo]", "[class*=breadcrumb]", "[id*=breadcrumb]",
+                     # Markup that says "do not show this". A restaurant chain
+                     # ships an aria-hidden "you are leaving our site" modal in
+                     # every page's header, and it became the first content
+                     # section of twelve pages: the answer-first check read it
+                     # as their opening prose, and the citation table offered
+                     # the same irrelevant sentence as what an assistant would
+                     # quote from the homepage, the contact page, the FAQ and
+                     # every location page. A machine reading the page for
+                     # facts does not read what the page has hidden.
+                     "[aria-hidden=true]", "[hidden]"):
         for found in clone.select(selector):
+            found.decompose()
+    for found in clone.select("[style]"):
+        style = (found.get("style") or "").replace(" ", "").lower()
+        if "display:none" in style or "visibility:hidden" in style:
             found.decompose()
     return re.sub(r"\s+", " ", clone.get_text(separator=" ")).strip()
 

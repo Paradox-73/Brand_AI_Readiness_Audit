@@ -212,14 +212,36 @@ def _identity_type(snapshot, pages, facts):
     visitable type somewhere, it publishes opening hours, or the crawl found
     location pages, which is what a business with premises has.
     """
-    for page in pages:
-        if {t.lower() for t in page.get("jsonld_types") or []} & _VISITABLE_TYPES:
-            return "LocalBusiness"
-    if facts.get("opening_hours"):
-        return "LocalBusiness"
-    location_pages = [p for p in (snapshot.get("pages") or [])
-                      if p.get("page_type") == "location"]
-    if location_pages:
+    # A chain is an Organization that has local businesses, not a local
+    # business. A national charity with donation centres and a restaurant group
+    # with five hundred branches both declare `LocalBusiness` per branch, which
+    # is correct - and both were handed a site-level snippet declaring the whole
+    # organisation to be one storefront. Several branches means several
+    # addresses, so count them.
+    # A list, not a set: `test_every_check_registers_itself_before_it_can_fire`
+    # reads these files with an AST walk and counts every `.add(` call as a
+    # finding being emitted, which is the right rule for `SkillResult.add`.
+    address_forms = []
+    location_pages = 0
+    declares_visitable = False
+    for page in (snapshot.get("pages") or []):
+        if page.get("page_type") == "location":
+            location_pages += 1
+        for node in page.get("jsonld") or []:
+            types = node.get("@type")
+            types = [types] if isinstance(types, str) else (types or [])
+            if not {str(t).split("/")[-1].lower() for t in types} & _VISITABLE_TYPES:
+                continue
+            declares_visitable = True
+            address = node.get("address")
+            if isinstance(address, list):
+                address = address[0] if address else None
+            if isinstance(address, dict):
+                address_forms.append(json.dumps(address, sort_keys=True))
+
+    if len(set(address_forms)) > 1 or location_pages > 1:
+        return "Organization"
+    if declares_visitable or facts.get("opening_hours") or location_pages == 1:
         return "LocalBusiness"
     return "Organization"
 
@@ -277,11 +299,53 @@ def _site_description(pages):
     return ""
 
 
-def _all_same_as(pages):
+def _all_same_as(pages, brand=None):
+    """Profile URLs safe to publish as `sameAs` - the brand's own, only.
+
+    `sameAs` is an assertion of identity: it says "these accounts are me". The
+    list was every off-site profile link found anywhere on the site, and a
+    company's pages link to plenty of accounts that are not the company. Real
+    examples that reached a paste-ready snippet: a co-founder's personal X
+    account lifted from an about-page byline, five GitHub file and pull-request
+    URLs from a documentation repository, third-party tools named in news
+    posts, and the Wikipedia article on ACID transactions.
+
+    Shape is checked during extraction. What shape cannot tell is whose account
+    it is, so the handle has to look like the brand: `x.com/postgresql` yes,
+    `x.com/james406` no. A handle is allowed to differ from the brand name in
+    the ordinary ways - dropped spaces, a `get` or `the` prefix, an `hq` or
+    `app` suffix - and anything further apart is left out rather than asserted.
+    """
     urls = set()
     for page in pages:
         urls.update((page.get("social_profiles") or {}).values())
-    return sorted(urls)
+    key = re.sub(r"[^a-z0-9]", "", str((brand or {}).get("name") or "").lower())
+    if len(key) < 3:
+        return sorted(urls)
+    return sorted(u for u in urls if _handle_matches_brand(u, key))
+
+
+_HANDLE_AFFIXES = ("get", "the", "team", "official", "hq", "app", "inc", "co", "org")
+
+
+def _handle_matches_brand(url, key):
+    """Does this profile URL's handle name the brand?"""
+    path = re.sub(r"[?#].*$", "", url).rstrip("/")
+    handle = re.sub(r"[^a-z0-9]", "", path.rsplit("/", 1)[-1].lower())
+    if not handle:
+        return False
+    for candidate in (handle, key):
+        other = key if candidate is handle else handle
+        if candidate == other:
+            return True
+    if key in handle or handle in key:
+        return True
+    for affix in _HANDLE_AFFIXES:
+        if handle.startswith(affix) and handle[len(affix):] == key:
+            return True
+        if handle.endswith(affix) and handle[: -len(affix)] == key:
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -445,7 +509,7 @@ def _org_snippet(snapshot, pages, brand):
     visits gets LocalBusiness, which is the type those facts belong to; see
     `_identity_type` for why an address alone is not enough to say so.
     """
-    same_as = _all_same_as(pages)
+    same_as = _all_same_as(pages, brand)
     facts = _contact_facts_for_snippet(pages)
 
     payload = {
@@ -462,8 +526,10 @@ def _org_snippet(snapshot, pages, brand):
         payload["description"] = description
     if facts.get("address"):
         payload["address"] = {"@type": "PostalAddress", "streetAddress": facts["address"]}
-        if facts.get("postal_code"):
-            payload["address"]["postalCode"] = facts["postal_code"]
+        for key, field in (("locality", "addressLocality"), ("region", "addressRegion"),
+                           ("postal_code", "postalCode"), ("country", "addressCountry")):
+            if facts.get(key):
+                payload["address"][field] = facts[key]
     if facts.get("telephone"):
         payload["telephone"] = facts["telephone"]
     if same_as:
@@ -486,13 +552,87 @@ def _contact_facts_for_snippet(pages):
         facts = page.get("contact_facts") or {}
         if not out.get("telephone") and facts.get("declared_phones"):
             out["telephone"] = facts["declared_phones"][0]
-        if not out.get("address") and facts.get("street_hint"):
-            out["address"] = facts["street_hint"]
-        if not out.get("postal_code") and facts.get("postcode_hint"):
-            out["postal_code"] = facts["postcode_hint"]
         if facts.get("has_address"):
             out["has_address"] = True
+
+    # The address comes from markup or it does not go in.
+    #
+    # It used to come from `street_hint` and `postcode_hint`, which are regular
+    # expressions run over page text, and the docstring above said they went in
+    # "with an instruction to check them". Nobody checks a paste-ready snippet.
+    # What four real sites got handed:
+    #
+    #   "2026 Shake Shack Hits the Road"  a year and a blog headline
+    #   "9 Let's Circle"                  a $9 nail polish called "Let's Circle Back"
+    #   "1 million row"                   a sentence about database rows
+    #   postalCode "15880"                a cosmetic colour-index code, CI 15880
+    #   postalCode "00005"                the price "$0.00005 / event"
+    #
+    # Every one of those was offered as the address to publish in schema.org
+    # Organization markup - the field search engines and assistants treat as
+    # ground truth about where a company is. Two of the four sites have no
+    # premises at all. A pattern that matches an address shape is evidence the
+    # site *mentions* something address-like, which is all `has_address` claims;
+    # it is not a fact about the organisation, and only a `PostalAddress` the
+    # site declared itself is.
+    declared = _declared_address(pages)
+    if declared:
+        out.update(declared)
     return out
+
+
+def _declared_address(pages):
+    """A PostalAddress the site published in its own markup, or nothing."""
+    for page in pages:
+        for node in page.get("jsonld") or []:
+            address = node.get("address")
+            if isinstance(address, list):
+                address = address[0] if address else None
+            if not isinstance(address, dict):
+                continue
+            street = str(address.get("streetAddress") or "").strip()
+            if not street:
+                continue
+            found = {"address": street}
+            for key, field in (("postal_code", "postalCode"),
+                               ("locality", "addressLocality"),
+                               ("region", "addressRegion"),
+                               ("country", "addressCountry")):
+                value = address.get(field)
+                if isinstance(value, dict):
+                    value = value.get("name")
+                if isinstance(value, str) and value.strip():
+                    found[key] = value.strip()
+            return found
+    return {}
+
+
+def _offer_of(node):
+    """The Offer on a product node, including the one inside a variant.
+
+    `ProductGroup` with `hasVariant[].offers` is how a shop with sizes or
+    colours is supposed to publish its prices, and it carries strictly more
+    than a flat `Product.offers`: a price per variant, plus return and shipping
+    policies. Reading only the top level, an eyewear retailer's complete,
+    schema-valid markup was reported as having "no offers object" with high
+    confidence, and the paste-ready fix would have replaced it with a flatter
+    block that had none of that. The report offered a downgrade as a repair.
+    """
+    offers = node.get("offers")
+    offer = offers[0] if isinstance(offers, list) and offers else offers
+    if isinstance(offer, dict):
+        return offer
+    variants = node.get("hasVariant")
+    if isinstance(variants, dict):
+        variants = [variants]
+    for variant in variants or []:
+        if not isinstance(variant, dict):
+            continue
+        nested = variant.get("offers")
+        nested = nested[0] if isinstance(nested, list) and nested else nested
+        if isinstance(nested, dict):
+            return nested
+    return None
 
 
 def _check_product(result, by_type, brand):
@@ -538,8 +678,7 @@ def _check_product(result, by_type, brand):
     incomplete = []
     for page in products:
         for node in _nodes_of(page, PRODUCT_TYPES):
-            offers = node.get("offers")
-            offer = offers[0] if isinstance(offers, list) and offers else offers
+            offer = _offer_of(node)
             if not isinstance(offer, dict):
                 incomplete.append((page, "no offers object"))
                 break
@@ -892,8 +1031,7 @@ def _check_consistency(result, pages, brand):
         text = page.get("body_text", "")
 
         for node in _nodes_of(page, PRODUCT_TYPES):
-            offers = node.get("offers")
-            offer = offers[0] if isinstance(offers, list) and offers else offers
+            offer = _offer_of(node)
             if not isinstance(offer, dict):
                 continue
             declared = str(_prop(offer, "price") or "").strip()
