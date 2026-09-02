@@ -3,8 +3,11 @@
 The submission README says what this marketplace does. This says why any of it should be
 believed, because a check is only worth as much as the evidence behind the number in it.
 
-Three methods, and they answer three different questions. None of them substitutes for
-another, and each one found defects the others were structurally unable to see.
+Nine methods, and they answer different questions. None substitutes for another, and each
+one found defects the others were structurally unable to see. The last of them - handing the
+shipped zip to agents and having them check every finding against the live page - found more
+than the rest put together, and its numbers are reported below whether or not they flatter
+the tool.
 
 ---
 
@@ -27,7 +30,7 @@ Six correct findings are worth more than 30 uncertain ones. Five rules produce t
 
 ## How We Know the Checks Work
 
-Three methods, because each one answers a question the others cannot.
+Each of these answers a question the others cannot.
 
 **We built the checks from a field study, not from opinion.** 36 sites, six categories,
 matched in pairs: three brands an assistant names readily against three real competitors
@@ -86,6 +89,53 @@ seconds, because `requests`' timeout counts silence between bytes rather than el
 are now capped, and `tests/test_budgets.py` keeps them capped. Separately, comparing `HEAD`
 against `GET` on real bot-managed sites showed three in eight answering 403 to one and 200 to
 the other - which three link checks were reporting as dead pages.
+
+**We had agents audit real sites and check every finding against the live page.** This is
+the method that found the most, because it is the only one that tests the thing the report
+is for: whether a person acting on it would be doing the right thing. A fresh agent runs the
+shipped zip against a site nobody here has seen, opens each finding, fetches the URLs it
+names, and marks it **true**, **misleading** or **false**. Misleading is its own verdict
+because it is where most of the damage was: a defensible observation with an overstated
+scope, a wrong severity, or a fix that would not help.
+
+Three rounds, and the numbers moved:
+
+| Round | Sites | Findings checked | True | Misleading | False | Wrong in some way |
+|---|---|---|---|---|---|---|
+| 1 | 9 | 36 | 8 | 19 | 9 | **78%** |
+| 2 | 8 | 92 | 48 | 33 | 11 | **48%** |
+| 3 | 8 | 93 | 53 | 23 | 17 | **43%** |
+
+Twenty-five sites, 221 findings, every one verified against the page it described.
+
+Two things this found that nothing else could.
+
+**The tool contradicting its own captured data.** A homepage reported as having 659
+characters of text, in a snapshot that recorded 91,261 for the same URL. A page excluded from
+the list of pages with no date because a video player's `<time datetime="PT0S">` counted as
+one. A homepage weighed at 2,076,957 bytes that weighs 1,430,541, because the inline script
+was added to a figure that already contained it. No unit test catches these, because each
+component is behaving exactly as written.
+
+**Fixes that would damage the site.** The worst class of defect here is not a false positive,
+which wastes a day. It is advice that leaves the site worse than not running the audit:
+paste-ready markup naming a shop without the apostrophe in its own name, a `noindex` removal
+that would index a "Page Not Found" page, a whole privacy policy marked up as FAQ
+question-and-answer pairs, an address assembled from a nail-polish price and a cosmetic
+ingredient code, `sameAs` claiming a co-founder's personal account and an unrelated
+encyclopedia article as the brand's own. Nine of those reached a real report before an agent
+opened the page and looked.
+
+Round 3 also re-tested the twenty named bugs from round 2 on the same four sites: **sixteen
+were gone**, three remained and are fixed here, one could not be told because the page had
+dropped out of the crawl sample.
+
+The rate is not zero and this file will not pretend it is heading there quickly. Every round
+has found new failure modes, because every site breaks a different assumption, and the curve
+is flattening rather than falling off a cliff: 78, 48, 43. What has changed most is not the
+count but the kind. Round 1 had the crawler adopting another organisation's identity and
+filing 17 of their pages as this brand's; round 3's worst finding is a report telling a
+restaurant chain to unify per-branch phone numbers that are correctly different.
 
 **We held out three samples and wrote the prediction down first.** The 36 study sites are
 training data: every threshold moved after looking at them. So we drew fresh samples in

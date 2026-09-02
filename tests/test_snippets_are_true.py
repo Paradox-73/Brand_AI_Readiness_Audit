@@ -175,3 +175,70 @@ def test_a_flat_product_offer_is_still_found():
 
 def test_a_product_with_no_offer_anywhere_is_still_reported():
     assert SD._offer_of({"@type": "Product"}) is None
+
+
+# --------------------------------------------------------------------------
+# Advice written for a seller, given to people who sell nothing
+# --------------------------------------------------------------------------
+
+FACT = _module("fact-extractability-audit")
+
+sys.path.insert(0, SCRIPTS)
+from audit_common import sells_something  # noqa: E402
+
+
+def _page(url, body="", page_type="home", jsonld_types=()):
+    return {"url": url, "body_text": body, "page_type": page_type,
+            "jsonld_types": list(jsonld_types), "jsonld": []}
+
+
+def test_a_charity_is_not_a_seller():
+    """It was told it "never states its pricing", with a fix reading
+    "contact sales for a quote"."""
+    pages = [_page("https://example.test/", "We provide medical care in crisis zones."),
+             _page("https://example.test/who-we-are", "Founded in 1971.", "about")]
+    assert sells_something({"pages": pages}, pages) is False
+
+
+def test_a_free_software_project_is_not_a_seller():
+    pages = [_page("https://example.test/", "Free and open source software.")]
+    assert sells_something({"pages": pages}, pages) is False
+
+
+def test_a_shop_is_a_seller():
+    pages = [_page("https://example.test/p/mug", "Walmgate mug. 18.00 GBP. Add to cart.",
+                   "product")]
+    assert sells_something({"pages": pages}, pages) is True
+
+
+def test_a_pricing_page_makes_a_seller():
+    pages = [_page("https://example.test/pricing", "Plans and packages.", "pricing")]
+    assert sells_something({"pages": pages}, pages) is True
+
+
+def test_commerce_markup_makes_a_seller():
+    pages = [_page("https://example.test/x", "", "other", ["Offer"])]
+    assert sells_something({"pages": pages}, pages) is True
+
+
+def test_the_worked_example_does_not_invent_a_pricing_plan():
+    """The snippet offered "$X per month on the Starter plan and $Y on Growth"
+    to a charity's FAQ, a database engine, a video toolkit and a museum."""
+    example = FACT._answer_first_example(False, "Example Relief")
+    assert "Starter plan" not in example
+    assert "per month" not in example
+    assert "What is Example Relief?" in example
+
+
+def test_the_worked_example_is_about_price_when_there_is_one():
+    example = FACT._answer_first_example(True, "Acme")
+    assert "How much does it cost?" in example
+    assert "Starter plan" not in example, "still no invented plan names"
+
+
+def test_free_software_is_described_as_free_not_as_quote_on_request():
+    """A project's report said it "states pricing is on request", a sentence
+    that appears nowhere on it."""
+    assert FACT.COSTS_NOTHING_RE.search("FFmpeg is free and open-source software")
+    assert not FACT.QUOTE_ON_REQUEST_RE.search("FFmpeg is free and open-source software")
+    assert FACT.QUOTE_ON_REQUEST_RE.search("Contact us for a quote")

@@ -54,8 +54,8 @@ sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
     example_urls, has_price, language_of, load_snapshot, name_forms,
-    pages_of, pct, plural, prose_skip_reason, sample, sentences,
-    SkillResult, truncate, word_count
+    pages_of, pct, plural, prose_skip_reason, sample, sells_something,
+    sentences, SkillResult, truncate, word_count
 )
 
 SKILL = "fact-extractability-audit"
@@ -87,18 +87,25 @@ CONCRETE_VALUE_RE = re.compile(
     re.I,
 )
 
-# Ways of answering "what does it cost" other than with a number. Both branches
-# are real answers a machine can quote; only silence is a defect.
+# Ways of answering "what does it cost" other than with a number. Both are real
+# answers a machine can quote; only silence is a defect. The second exists
+# because the check asked a free open-source project for its pricing, and "free
+# and open source" is a complete answer to the question.
 #
-# The second group exists because the check asked a free open-source project for
-# its pricing. "Free and open source" is a complete and quotable answer to the
-# question, and demanding a figure from a project that has none is the audit
-# being wrong about the site rather than the other way round.
-PRICING_ESCAPE_RE = re.compile(
+# Two different answers to "what does it cost", reported as one.
+#
+# A free software project's report said its homepage "states pricing is on
+# request" - a sentence that appears nowhere on it, produced by describing a
+# match on "free open-source" with the wording written for "talk to sales". A
+# report whose whole subject is unverifiable claims about a brand should not
+# make one, so the two are matched separately and each described in its own
+# words.
+QUOTE_ON_REQUEST_RE = re.compile(
     r"\b(?:contact (?:us )?for (?:a )?(?:price|pricing|quote)"
     r"|request a quote|custom(?:ised|ized)? pricing|pricing on (?:request|application)"
-    r"|talk to sales|get a quote|poa"
-    r"|free (?:and )?open[- ]source|open[- ]source(?: and)? free"
+    r"|talk to sales|get a quote|poa)\b", re.I)
+COSTS_NOTHING_RE = re.compile(
+    r"\b(?:free (?:and )?open[- ]source|open[- ]source(?: and)? free"
     r"|completely free|entirely free|always free|free to (?:use|download|install)"
     r"|no (?:cost|charge|licence fee|license fee)|free of charge"
     r"|costs? nothing|zero cost)\b", re.I)
@@ -146,7 +153,7 @@ def run(snapshot):
 
     if language.get("prose_checks_apply"):
         _check_entity_definition(result, snapshot, pages, brand_name, brand)
-        _check_answer_first(result, pages, brand_name)
+        _check_answer_first(result, snapshot, pages, brand_name)
         _check_long_sentences(result, pages)
     else:
         reason = prose_skip_reason(language)
@@ -449,8 +456,9 @@ def _content_sections(page):
             if not s.get("navigational") and len(s.get("first_paragraph") or "") >= 40]
 
 
-def _check_answer_first(result, pages, brand_name):
+def _check_answer_first(result, snapshot, pages, brand_name):
     result.check("answer-first-paragraphs")
+    sells = sells_something(snapshot, pages)
     candidates = [p for p in pages
                   if p["page_type"] in ANSWER_FIRST_TYPES
                   and len(_content_sections(p)) >= ANSWER_FIRST_MIN_SECTIONS]
@@ -512,11 +520,27 @@ def _check_answer_first(result, pages, brand_name):
                   "most relevant section. If the opening is throat-clearing, the passage that "
                   "gets quoted contains no facts, and a competitor's page gets used instead.",
         affected_pages=[p["url"] for p, _, _ in offenders],
-        snippet="<h2>How much does it cost?</h2>\n"
-                "<p><strong>{brand} costs $X per month on the Starter plan and $Y on Growth.</strong> "
-                "Both include &lt;what is included&gt;. Setup is &lt;free / $Z&gt;.</p>".format(
-                    brand=brand_name or "The product"),
+        # The example used to be a SaaS pricing table, and it was generated for
+        # a charity's abortion-care FAQ, a free database engine, an open-source
+        # video toolkit and a museum. What the snippet demonstrates is a shape -
+        # heading, then the concrete answer in sentence one - so the example is
+        # drawn from what this site actually is.
+        snippet=_answer_first_example(sells, brand_name),
     )
+
+
+def _answer_first_example(sells, brand_name):
+    """A worked example of answer-first writing, in this site's own terms."""
+    name = brand_name or "The brand"
+    if sells:
+        return ("<h2>How much does it cost?</h2>\n"
+                "<p><strong>{} costs &lt;price&gt; per &lt;unit&gt;.</strong> That includes "
+                "&lt;what is included&gt;. &lt;Then the context and the persuasion.&gt;</p>"
+                .format(name))
+    return ("<h2>What is {0}?</h2>\n"
+            "<p><strong>{0} is a &lt;category&gt; for &lt;who it is for&gt;, "
+            "&lt;the one fact that matters most&gt;.</strong> &lt;Then the context and the "
+            "persuasion.&gt;</p>".format(name))
 
 
 def _first_sentence(text):
@@ -536,11 +560,22 @@ def _check_core_facts(result, snapshot, pages, brand_name):
 
     # 1. Price, or an explicit statement that pricing is on request.
     price_page = next((p for p in pages if has_price(p.get("body_text", ""))), None)
-    escape_page = next((p for p in pages if PRICING_ESCAPE_RE.search(p.get("body_text", ""))), None)
+    on_request = next((p for p in pages
+                       if QUOTE_ON_REQUEST_RE.search(p.get("body_text", ""))), None)
+    free_page = next((p for p in pages
+                      if COSTS_NOTHING_RE.search(p.get("body_text", ""))), None)
     if price_page:
         found["pricing"] = price_page["url"]
-    elif escape_page:
-        found["pricing"] = "{} (states pricing is on request)".format(escape_page["url"])
+    elif free_page:
+        found["pricing"] = "{} (states that it costs nothing)".format(free_page["url"])
+    elif on_request:
+        found["pricing"] = "{} (states pricing is on request)".format(on_request["url"])
+    elif not sells_something(snapshot, pages):
+        # "This site never states its pricing" is only a defect if the site has
+        # a price. A medical charity was told it, and handed a fix reading
+        # "contact sales for a quote".
+        found["pricing"] = ("not applicable - nothing on this site is for sale, so there is "
+                            "no price for an assistant to be missing")
     else:
         has_pricing_page = bool(by_type.get("pricing"))
         missing.append(("pricing", "high" if has_pricing_page else "medium",

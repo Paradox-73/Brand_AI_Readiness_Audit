@@ -675,6 +675,40 @@ def looks_like_soft_404(page):
     return any(marker in haystack for marker in _SOFT_404_MARKERS)
 
 
+_COMMERCE_JSONLD_TYPES = frozenset({
+    "product", "productgroup", "productmodel", "offer", "aggregateoffer",
+    "onlinestore", "store", "individualproduct",
+})
+
+
+def sells_something(snapshot, pages=None):
+    """Does this site sell anything, or take a booking?
+
+    The price, pricing-page and "what does it cost" checks were written for a
+    business with a sales funnel and applied to everyone. A medical charity was
+    told it "never states its pricing" and handed a fix reading "contact sales
+    for a quote"; a free database project got a paste-ready snippet inventing
+    "$X per month on the Starter plan and $Y on Growth"; a museum and two
+    open-source projects got the same. None of them sells anything, and a
+    maintainer reading that discards the whole report, correctly.
+
+    Four signals, any one of which is the site itself saying it sells: a
+    product detail page, a pricing page, commerce markup, or a price in the
+    text of a page. Donation tiers are prices; a charity that publishes them is
+    not thereby a shop, so the pricing *check* stays quiet either way and only
+    the framing changes.
+    """
+    pages = pages if pages is not None else (snapshot.get("pages") or [])
+    for page in pages:
+        if page.get("page_type") in ("product", "pricing"):
+            return True
+        if {t.lower() for t in page.get("jsonld_types") or []} & _COMMERCE_JSONLD_TYPES:
+            return True
+        if _PRICE_RE.search(page.get("body_text") or ""):
+            return True
+    return False
+
+
 def is_question_heading(heading):
     """True for a heading a visitor would recognise as a question.
 
