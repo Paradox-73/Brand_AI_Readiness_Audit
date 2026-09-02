@@ -289,6 +289,20 @@ def _check_robots_reachable(result, robots):
         )
         return
 
+    if status in REFUSED_STATUS:
+        # A refusal is not an answer. A university's robots.txt returned 403 to
+        # this crawler and 200 to curl, and the report said five times over
+        # that there were "no rules to evaluate, which means nothing is
+        # disallowed" - about a file containing `Crawl-delay: 20` and several
+        # real disallow rules. The sitemap check in the same report got this
+        # right and said "unchecked"; this one contradicted it.
+        result.skip("robots-txt-rules",
+                    "the request for robots.txt was refused by the site's edge (HTTP {}), so "
+                    "its rules could not be read. This is not evidence that the file is absent "
+                    "or that nothing is disallowed - it is evidence that this crawler was not "
+                    "allowed to look".format(status))
+        return
+
     if status != 200:
         result.skip("robots-txt-rules",
                     "robots.txt returned HTTP {}; no rules to evaluate, which means nothing "
@@ -782,7 +796,17 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
         )
 
     fetched = [p for p in pages if p.get("status") is not None]
-    bad = [p for p in fetched if p["status"] != 200]
+    # An edge refusing this crawler in a ten-byte body is not a deleted page,
+    # and the crawl already worked that out - `_mark_edge_refusals` flags them
+    # and the report's own appendix says "one edge refusing this crawler, not
+    # 19 deleted pages". This check was not reading the flag, so the same
+    # report carried "32.8% of crawled pages do not return HTTP 200 - fix or
+    # redirect the URLs that no longer resolve" at the top, about pages that
+    # are live, and the correction two sections below where nobody reads.
+    refused_by_edge = [p for p in fetched if p.get("edge_refusal")]
+    bad = [p for p in fetched if p["status"] != 200 and not p.get("edge_refusal")]
+    if refused_by_edge:
+        result.signal("edge_refused_urls", len(refused_by_edge))
     # A percentage of one page is not a second observation. A museum whose
     # homepage was blocked produced exactly one fetch, and the report carried
     # both "The homepage refuses this crawler" (critical) and "100.0% of
@@ -851,6 +875,11 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
             result.skip("non-200-rate",
                         "{}% of fetched URLs were non-200, below the 10% threshold where this "
                         "indicates a systemic problem".format(rate))
+    elif fetched and refused_by_edge:
+        result.skip("non-200-rate",
+                    "{} URL(s) were refused by the site's edge with an identical short body, "
+                    "which is one refusal rather than that many broken pages, and every other "
+                    "fetched URL returned HTTP 200".format(len(refused_by_edge)))
     elif fetched:
         result.skip("non-200-rate", "every fetched URL returned HTTP 200")
 

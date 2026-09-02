@@ -165,7 +165,13 @@ _BENIGN_DISALLOW = re.compile(
     # Error, maintenance and utility pages. A site is right to keep these
     # out of an index, and none of them is content anyone would quote.
     r"pageerror|error|errors|404|500|not-found|notfound|maintenance|"
-    r"addtocart|internationaladdress)",
+    r"addtocart|internationaladdress|"
+    # Shopify's own boilerplate. `/services` and `/recommendations` are its
+    # internal endpoints, and a shop's robots.txt says so in a comment
+    # directly above them - a comment robots parsers drop. Reported as "paths
+    # that look like real content", `/services` was the number one thing to
+    # fix on a nail-care shop's report, and it returns 404.
+    r"services|recommendations|cdn|_shopify|shopify)",
     re.I,
 )
 
@@ -181,11 +187,19 @@ _BENIGN_ANYWHERE = re.compile(
     r"callback|confirm|verify|activate|invite|invitation|webhook)\b", re.I)
 
 
+# A path made only of digits is an internal identifier, not a page anyone
+# reads. One shop's robots.txt disallows `/26657478`; it returns 404, and it
+# was reported alongside a real content path as something to unblock.
+_NUMERIC_PATH_RE = re.compile(r"^/\d+/?$")
+
+
 def benign_disallow(rule):
     """True for the admin/cart/search/parameter paths every site blocks on purpose."""
     rule = (rule or "").strip()
     if not rule or rule in ("/", "/*"):
         return False
+    if _NUMERIC_PATH_RE.match(rule):
+        return True
     # A rule that is only a parameter or wildcard filter blocks duplicates,
     # not content.
     #

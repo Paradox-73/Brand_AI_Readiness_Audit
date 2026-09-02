@@ -30,9 +30,10 @@ from audit_common import (  # noqa: E402
     REQUEST_DELAY,
     REQUEST_TIMEOUT,
     SEED, USER_AGENT, WALL_CLOCK_BUDGET, FetchError, Fetcher, detect_page_type,
-    detect_site_language, eprint, is_forbidden_path, normalise_url, origin_of,
+    detect_site_language, eprint, is_forbidden_path, is_multi_location,
+    normalise_url, origin_of,
     response_text, same_site,
-    site_label, strip_www, truncate, write_json,
+    site_label, strip_www, truncate, VISITABLE_JSONLD_TYPES, write_json,
 )
 
 from page_extract import extract_page  # noqa: E402
@@ -500,6 +501,7 @@ def detect_brand(pages, origin):
 
     home_url = (home or {}).get("url")
     declared_on = {}
+    branches = is_multi_location({"pages": pages})
 
     for page in pages:
         # Where a declaration was found decides how much it is worth. One
@@ -517,10 +519,18 @@ def detect_brand(pages, origin):
         for node in page.get("jsonld") or []:
             types = node.get("@type")
             types = [types] if isinstance(types, str) else (types or [])
-            if not any(str(t).lower() in ("organization", "localbusiness", "corporation", "store",
-                                          "restaurant", "ngo", "educationalorganization",
-                                          "professionalservice", "onlinestore")
-                       for t in types):
+            names = {str(t).split("/")[-1].lower() for t in types}
+            if not names & ({"organization", "corporation", "ngo",
+                             "educationalorganization", "onlinestore"}
+                            | VISITABLE_JSONLD_TYPES):
+                continue
+            # A branch name is not a spelling of the brand. A restaurant group
+            # declares one node per restaurant, named for where it is - "Citi
+            # Field, NYC", "Dubai, Mall of the Emirates" - and the naming check
+            # then reported the brand as "written 13 different ways" and advised
+            # picking one and using it everywhere. There is nothing to fix: the
+            # site is naming thirteen restaurants.
+            if branches and names & VISITABLE_JSONLD_TYPES:
                 continue
             name = clean(node.get("name"))
             if name:

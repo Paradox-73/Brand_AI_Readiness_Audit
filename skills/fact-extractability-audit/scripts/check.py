@@ -177,7 +177,8 @@ def run(snapshot):
     # The evidence sentence claimed the whole site from a sample it never
     # disclosed. Four of five confirmed false positives on real sites came from
     # this one line.
-    _check_core_facts(result, snapshot, pages_of(snapshot), brand_name)
+    _check_core_facts(result, snapshot, pages_of(snapshot), brand_name,
+                      english=bool(language.get("prose_checks_apply")))
     _check_naming_consistency(result, snapshot, pages, brand)
     return result
 
@@ -567,7 +568,7 @@ def _first_sentence(text):
     return parts[0] if parts else (text or "")
 
 
-def _check_core_facts(result, snapshot, pages, brand_name):
+def _check_core_facts(result, snapshot, pages, brand_name, english=True):
     """The five facts someone asks an assistant for, checked one at a time.
 
     "This site never states X" is a claim about the site, and it is only worth
@@ -627,13 +628,19 @@ def _check_core_facts(result, snapshot, pages, brand_name):
 
     # 2. Where the business is, or who it serves.
     address_page = next((p for p in pages if (p.get("contact_facts") or {}).get("has_address")), None)
-    area_page = next((p for p in pages if SERVICE_AREA_RE.search(p.get("body_text", ""))), None)
+    # Also an English pattern ("serving", "based in", "available across"), so
+    # it only speaks where it can read the language.
+    area_page = next((p for p in pages
+                      if SERVICE_AREA_RE.search(p.get("body_text", ""))), None) if english else None
     local_signals = bool(by_type.get("location")) or any(
         "localbusiness" in {t.lower() for t in p.get("jsonld_types") or []} for p in pages)
     if address_page:
         found["location"] = address_page["url"]
     elif area_page:
         found["service area"] = area_page["url"]
+    elif not english:
+        found["location"] = ("not checked - no postal address was found, and the pattern for "
+                             "a stated service area is English while this site is not")
     else:
         missing.append(("location or service area", "high" if local_signals else "medium",
                         "no postal address and no statement of where the business operates "
@@ -655,9 +662,26 @@ def _check_core_facts(result, snapshot, pages, brand_name):
 
     # 4. Founding or team facts - the corroborating detail that separates one
     #    brand from another with a similar name.
-    fact_page = next((p for p in pages if FOUNDING_FACT_RE.search(p.get("body_text", ""))), None)
-    team_page = next((p for p in pages if TEAM_FACT_RE.search(p.get("body_text", ""))), None)
-    if fact_page:
+    #
+    #    Both patterns are English: "founded", "established", "our team", "led
+    #    by". Run on a French bakery's site they matched nothing, and the report
+    #    said no founding year appears in the page text - while its own
+    #    "what an assistant would quote" table, for the same homepage, quoted
+    #    "Creee en 1932 par Pierre Poilane". One section of the report asserted
+    #    the fact was absent from a page the next section quoted it from.
+    #
+    #    Everything else in this check is structural - a price is a number, a
+    #    telephone is a `tel:` link - so only this pair is language-gated.
+    fact_page = team_page = None
+    if english:
+        fact_page = next((p for p in pages
+                          if FOUNDING_FACT_RE.search(p.get("body_text", ""))), None)
+        team_page = next((p for p in pages
+                          if TEAM_FACT_RE.search(p.get("body_text", ""))), None)
+    if not english:
+        found["founding facts"] = ("not checked - the patterns for a founding year and a "
+                                   "named team are English, and this site is not in English")
+    elif fact_page:
         found["founding facts"] = fact_page["url"]
     elif team_page:
         found["team facts"] = team_page["url"]

@@ -60,8 +60,9 @@ sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
     CONTENT_TYPES, example_urls, Fetcher, FetchError, load_snapshot,
-    pages_of, pct, plural, PROFILE_GONE_STATUS, sample, SkillResult,
-    strip_www, truncate, VERIFIABLE_PROFILE_PLATFORMS
+    is_multi_location, pages_of, pct, plural, PROFILE_GONE_STATUS, sample,
+    SkillResult, strip_www, truncate, VERIFIABLE_PROFILE_PLATFORMS,
+    VISITABLE_JSONLD_TYPES
 )
 
 SKILL = "freshness-corroboration-audit"
@@ -173,7 +174,7 @@ def run(snapshot, now=None, allow_network=True, time_budget=None):
     _check_stale_year_references(result, pages, now)
     profiles = _check_authoritative_profiles(result, snapshot, pages)
     _check_sitemap_lastmod(result, snapshot, now)
-    _check_fact_consistency(result, pages)
+    _check_fact_consistency(result, snapshot, pages)
 
     fetcher = None
     if allow_network:
@@ -828,17 +829,25 @@ ORG_IDENTITY_TYPES = frozenset({
 })
 
 
-def _org_identity(page, field):
+def _org_identity(page, field, branches=False):
     """Values the page declares for the organisation itself, at any nesting depth.
 
     `telephone` sits on the Organization node; `postalCode` sits inside its
     PostalAddress. Both are read here so the caller only has to name the field.
+
+    On a multi-location site the branch nodes are skipped: a restaurant's own
+    telephone number is not the organisation declaring a second number for
+    itself, and reading it as one produced "8 different values for telephone
+    across 9 pages" about a chain that was describing nine restaurants.
     """
     found = []
     for node in page.get("jsonld") or []:
         types = node.get("@type")
         types = [types] if isinstance(types, str) else (types or [])
-        if not any(str(t).lower() in ORG_IDENTITY_TYPES for t in types):
+        names = {str(t).split("/")[-1].lower() for t in types}
+        if not names & ORG_IDENTITY_TYPES:
+            continue
+        if branches and names & VISITABLE_JSONLD_TYPES:
             continue
         if node.get(field):
             found.append(node[field])
@@ -850,11 +859,12 @@ def _org_identity(page, field):
     return found
 
 
-def _check_declared_identity(result, conflicts, pages, label, field, normalise):
+def _check_declared_identity(result, conflicts, pages, label, field, normalise,
+                             branches=False):
     """Record a conflict when the site declares two different values for itself."""
     per_page = {}
     for page in pages:
-        values = {normalise(v) for v in _org_identity(page, field)}
+        values = {normalise(v) for v in _org_identity(page, field, branches)}
         values.discard(None)
         if values:
             per_page[page["url"]] = values
@@ -868,22 +878,38 @@ def _check_declared_identity(result, conflicts, pages, label, field, normalise):
                       "them".format(len(distinct), label, len(per_page))))
 
 
-def _check_fact_consistency(result, pages):
+def _check_fact_consistency(result, snapshot, pages):
     """Contact and boilerplate facts that contradict each other across the site.
 
     Scope note: JSON-LD name and price mismatches belong to structured-data-audit.
     This check owns telephone, postal address and the description boilerplate.
+
+    On a site with branches, most of what this check compares is not the site
+    talking about itself. A restaurant group declares one `LocalBusiness` per
+    restaurant, each with its own address and telephone, and that is exactly
+    right; read as facts about one organisation they look like a site
+    contradicting itself dozens of times. This produced a high-severity finding
+    ranked second in what to fix first, telling marketing to spend a day
+    forcing every location onto "one canonical version" - which would strip the
+    real addresses customers use to find their nearest branch.
+
+    So on a multi-location site the branch nodes are left out of the comparison
+    and only what the site declares about itself is compared.
     """
     result.check("fact-consistency-across-pages")
     conflicts = []
+    branches = is_multi_location(snapshot)
 
     descriptions = {}
     for page in pages:
         for node in page.get("jsonld") or []:
             types = node.get("@type")
             types = [types] if isinstance(types, str) else (types or [])
-            if not any(str(t).lower() in ("organization", "localbusiness", "corporation",
-                                          "store", "restaurant") for t in types):
+            names = {str(t).split("/")[-1].lower() for t in types}
+            if not names & ({"organization", "corporation"} | VISITABLE_JSONLD_TYPES):
+                continue
+            # One branch of many is not the site.
+            if branches and names & VISITABLE_JSONLD_TYPES:
                 continue
             description = str(node.get("description") or "").strip()
             if description:
@@ -933,10 +959,12 @@ def _check_fact_consistency(result, pages):
     _check_declared_identity(
         result, conflicts, pages, "telephone number", "telephone",
         lambda value: re.sub(r"\D", "", str(value))[-7:] if len(
-            re.sub(r"\D", "", str(value))) >= 7 else None)
+            re.sub(r"\D", "", str(value))) >= 7 else None,
+        branches=branches)
     _check_declared_identity(
         result, conflicts, pages, "postal code", "postalCode",
-        lambda value: re.sub(r"\s+", "", str(value)).lower() or None)
+        lambda value: re.sub(r"\s+", "", str(value)).lower() or None,
+        branches=branches)
 
     if len(descriptions) > 1:
         pairs = sorted(descriptions.items(), key=lambda kv: kv[0])

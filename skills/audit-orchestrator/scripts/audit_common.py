@@ -608,7 +608,22 @@ _URL_TYPE_PATTERNS = tuple(
     # Boundary includes `.` so `/about.html` counts, and `-` so `/about-us`
     # counts, while `/roundabout` and `/2004/Jun/29/job/`-style slugs inside
     # dated permalinks do not.
-    (page_type, r"(?:^|/)(?:{})(?:$|/|-|\.)".format(
+    #
+    # The trailing `-` is what makes `/about-us` work and what made
+    # `/products/press-on-sponge-replenishment` a press page: "press" is a
+    # strong slug, so it won outright, and a nail-varnish product was reported
+    # as an article page carrying no publication date. A hyphen may follow the
+    # slug only where the slug is not also an ordinary English word that starts
+    # other words - and rather than judge that word by word, the segment now has
+    # to be the slug, or the slug plus a suffix, and never the slug plus a
+    # different word that happens to begin with it. `[a-z]*` after the hyphen
+    # would allow either; requiring the rest of the segment to be short does
+    # not. The simplest rule that separates the real cases is that a hyphen may
+    # follow only when what precedes it is the whole first word of the segment
+    # AND the segment's remaining words do not turn it into a different noun -
+    # which is what `-us`, `-kit` and `-centre` are and `-on-sponge` is not.
+    (page_type, r"(?:^|/)(?:{})(?:$|/|\.|-(?:us|kit|centre|center|page|policy|"
+                r"info|list|room|us\.html)\b)".format(
         "|".join(re.escape(slug) for slug in slugs)))
     for page_type, slugs in _URL_TYPE_SLUGS
 )
@@ -673,6 +688,49 @@ def looks_like_soft_404(page):
     heading = heading or (page.get("h1") or "")
     haystack = "{} {}".format(page.get("title") or "", heading).lower()
     return any(marker in haystack for marker in _SOFT_404_MARKERS)
+
+
+# schema.org types that mean "somewhere a customer physically goes".
+VISITABLE_JSONLD_TYPES = frozenset({
+    "localbusiness", "store", "restaurant", "hotel", "cafe", "bakery", "bar",
+    "clothingstore", "grocerystore", "healthandbeautybusiness", "medicalclinic",
+    "hospital", "dentist", "autorepair", "professionalservice",
+    "foodestablishment", "fastfoodrestaurant", "library", "museum",
+})
+
+
+def declared_locations(snapshot):
+    """Distinct postal addresses the site declares for visitable places.
+
+    A chain declares one `LocalBusiness` node per branch, each with its own
+    address and telephone, and that is correct. Read as facts about a single
+    organisation they look like the site contradicting itself: a restaurant
+    group with hundreds of branches was told, at high severity and second in
+    what to fix first, to force every location onto "one canonical version" of
+    its address and phone number - which would delete the real addresses
+    customers use to find their nearest branch.
+    """
+    forms = []
+    for page in snapshot.get("pages") or []:
+        for node in page.get("jsonld") or []:
+            types = node.get("@type")
+            types = [types] if isinstance(types, str) else (types or [])
+            if not {str(t).split("/")[-1].lower() for t in types} & VISITABLE_JSONLD_TYPES:
+                continue
+            address = node.get("address")
+            if isinstance(address, list):
+                address = address[0] if address else None
+            if isinstance(address, dict):
+                forms.append(json.dumps(address, sort_keys=True))
+    return set(forms)
+
+
+def is_multi_location(snapshot):
+    """True when the site declares more than one place you can visit."""
+    if len(declared_locations(snapshot)) > 1:
+        return True
+    return len([p for p in (snapshot.get("pages") or [])
+                if p.get("page_type") == "location"]) > 1
 
 
 _COMMERCE_JSONLD_TYPES = frozenset({
@@ -888,6 +946,46 @@ def _looks_like_product_detail(lower_text, html_meta):
     if not prices or len(prices) >= DISTINCT_PRICE_CEILING:
         return False
     return _product_signal_count(lower_text) >= PRODUCT_SIGNAL_MINIMUM
+
+
+PRICE_NUMBER_RE = re.compile(r"\d[\d.,]*\d|\d")
+
+
+def price_value(text):
+    """The numeric value of a price string, whichever way the world writes it.
+
+    Half the world writes 28,00 and half writes 28.00. The old reader stripped
+    every comma and called `float`, so a French bakery's "28,00 EUR" became
+    2800 - and the audit then reported the site's own structured data as
+    contradicting its own page, four times, second in what to fix first, on
+    prices that were correct. The advice was to spend up to a day reconciling
+    them, and a developer following it would have changed a right number into a
+    wrong one.
+
+    The separator is read from the number rather than assumed: when both appear,
+    the last one is the decimal point; when one appears, three digits after it
+    make it a thousands separator and one or two make it a decimal point.
+    """
+    match = PRICE_NUMBER_RE.search(str(text or ""))
+    if not match:
+        return None
+    raw = match.group(0)
+    has_dot, has_comma = "." in raw, "," in raw
+    if has_dot and has_comma:
+        decimal = "." if raw.rfind(".") > raw.rfind(",") else ","
+        thousands = "," if decimal == "." else "."
+        raw = raw.replace(thousands, "").replace(decimal, ".")
+    elif has_dot or has_comma:
+        separator = "." if has_dot else ","
+        parts = raw.split(separator)
+        if len(parts) > 2 or (len(parts[-1]) == 3 and len(parts[0]) <= 3):
+            raw = raw.replace(separator, "")          # 2,800 and 2.800 are 2800
+        else:
+            raw = raw.replace(separator, ".")         # 28,00 and 28.00 are 28
+    try:
+        return float(raw)
+    except ValueError:
+        return None
 
 
 def has_price(text):
@@ -1495,6 +1593,38 @@ def main_text(soup):
     return whole or visible_text(soup)
 
 
+HIDDEN_SELECTORS = ("[aria-hidden=true]", "[hidden]")
+
+
+def visible_soup(soup):
+    """A copy of the document with the parts it has hidden removed.
+
+    `main_text` strips these, and for a while nothing else did. So a restaurant
+    chain's `aria-hidden` "you are about to leave our website" modal, which
+    sits in every page's header, stayed in the paragraph and section lists -
+    and it was the sentence the report offered as what an assistant would quote
+    from the homepage, the about page, the contact page, the FAQ and every one
+    of the location pages, plus the "opening prose" the answer-first check
+    judged. One piece of markup, one verdict, thirteen rows of a report.
+
+    Applied to the text-bearing extractions only. JSON-LD lives in a `<script>`
+    and is read from the original document.
+    """
+    clone = make_soup(str(soup))
+    for selector in HIDDEN_SELECTORS:
+        for found in clone.select(selector):
+            if getattr(found, "attrs", None) is None:
+                continue
+            found.decompose()
+    for found in clone.select("[style]"):
+        if getattr(found, "attrs", None) is None:
+            continue
+        style = (found.get("style") or "").replace(" ", "").lower()
+        if "display:none" in style or "visibility:hidden" in style:
+            found.decompose()
+    return clone
+
+
 def _strip_chrome(node):
     """Text of a region with scripts, navigation and breadcrumbs removed.
 
@@ -1506,6 +1636,25 @@ def _strip_chrome(node):
         tag.decompose()
     for selector in ("header", "nav", "footer", "aside", "[role=navigation]",
                      "[role=contentinfo]", "[class*=breadcrumb]", "[id*=breadcrumb]",
+                     # The announcement bar. It sits above the header on most
+                     # commerce templates, outside every landmark element, and
+                     # repeats on every page - so it is chrome by any definition
+                     # except the one this function was using.
+                     #
+                     # A cosmetics retailer stacks one free-shipping threshold
+                     # per locale in that bar and switches them client-side, so
+                     # the delivered HTML carries "$40", "$60 CAD", "$110 AUD"
+                     # and "R$670" at once. The audit read those as the prices
+                     # shown on the page, reported the product's own correct
+                     # JSON-LD price of $16 as contradicting them at high
+                     # severity - while the same report's appendix said the
+                     # product markup was complete - and then offered the
+                     # shipping sentence as what an assistant would quote from
+                     # all twelve of the pages it looked at.
+                     "[class*=announcement]", "[id*=announcement]",
+                     "[class*=promo-bar]", "[class*=promobar]", "[class*=promo_bar]",
+                     "[class*=announce-bar]", "[class*=top-bar]", "[class*=topbar]",
+                     "[class*=usp-bar]", "[class*=marquee]", "[role=marquee]",
                      # Markup that says "do not show this". A restaurant chain
                      # ships an aria-hidden "you are leaving our site" modal in
                      # every page's header, and it became the first content
@@ -1518,7 +1667,16 @@ def _strip_chrome(node):
                      "[aria-hidden=true]", "[hidden]"):
         for found in clone.select(selector):
             found.decompose()
+    # `select` builds the whole list before anything is removed, so decomposing
+    # a parent leaves its already-matched descendants in the list with their
+    # attributes set to None. Calling `.get` on one of those raised
+    # `AttributeError: 'NoneType' object has no attribute 'get'` and killed the
+    # crawl outright - no snapshot, no report, just a stack trace - on two major
+    # retail sites, both of which ship a hidden banner containing an
+    # inline-styled child. That is ordinary markup, not an exotic case.
     for found in clone.select("[style]"):
+        if getattr(found, "attrs", None) is None:
+            continue                      # already removed with its parent
         style = (found.get("style") or "").replace(" ", "").lower()
         if "display:none" in style or "visibility:hidden" in style:
             found.decompose()

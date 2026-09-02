@@ -53,9 +53,10 @@ if _SHARED is None:
 sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
-    CONTENT_TYPES, DEEP_TYPES, example_urls, find_prices, is_question_heading,
-    load_snapshot, name_forms, pages_of, pct, plural, sample, sentences,
-    SkillResult, truncate
+    CONTENT_TYPES, DEEP_TYPES, example_urls, find_prices, is_multi_location,
+    is_question_heading,
+    load_snapshot, name_forms, pages_of, pct, plural, price_value,
+    PRICE_NUMBER_RE, sample, sentences, SkillResult, truncate
 )
 
 SKILL = "structured-data-audit"
@@ -91,18 +92,9 @@ HIGH_VALUE_PROPS = {
 TITLE_MIN, TITLE_MAX = 15, 90   # 75 flagged ordinary retail titles; real ones run long
 DESC_MIN, DESC_MAX = 50, 165
 
-PRICE_NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d{1,2})?")
-
-
-def _price_value(text):
-    """The numeric value of a price string, or None if there is not one."""
-    match = PRICE_NUMBER_RE.search(str(text or ""))
-    if not match:
-        return None
-    try:
-        return float(match.group(0).replace(",", ""))
-    except ValueError:
-        return None
+# One reader for both sides of every price comparison, in audit_common, so the
+# markup and the page can never be parsed by two different rules.
+_price_value = price_value
 
 
 def _format_price(value):
@@ -510,7 +502,7 @@ def _org_snippet(snapshot, pages, brand):
     `_identity_type` for why an address alone is not enough to say so.
     """
     same_as = _all_same_as(pages, brand)
-    facts = _contact_facts_for_snippet(pages)
+    facts = _contact_facts_for_snippet(pages, is_multi_location(snapshot))
 
     payload = {
         "@context": "https://schema.org",
@@ -538,7 +530,7 @@ def _org_snippet(snapshot, pages, brand):
         json.dumps(payload, indent=2, ensure_ascii=False))
 
 
-def _contact_facts_for_snippet(pages):
+def _contact_facts_for_snippet(pages, branches=False):
     """Real-world location facts the crawl already extracted.
 
     Only values the site *declared* are treated as safe to paste. A telephone
@@ -550,7 +542,11 @@ def _contact_facts_for_snippet(pages):
     out = {}
     for page in pages:
         facts = page.get("contact_facts") or {}
-        if not out.get("telephone") and facts.get("declared_phones"):
+        # On a site with branches this is one shop's number. A bakery with
+        # three shops was offered the Cherche-Midi shop's line as the
+        # `telephone` for its whole company record, which would tell every
+        # machine reading the site that one shop's phone is the only phone.
+        if not branches and not out.get("telephone") and facts.get("declared_phones"):
             out["telephone"] = facts["declared_phones"][0]
         if facts.get("has_address"):
             out["has_address"] = True

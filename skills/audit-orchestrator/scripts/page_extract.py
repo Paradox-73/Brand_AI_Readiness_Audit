@@ -13,7 +13,8 @@ from urllib.parse import urljoin, urlparse
 
 from audit_common import (
     detect_challenge, detect_page_type, find_prices, main_text, make_soup,
-    normalise_url, same_site, sentences, truncate, visible_text, word_count,
+    normalise_url, same_site, sentences, truncate, visible_soup, visible_text,
+    word_count,
 )
 
 # Root containers frameworks mount into. An empty one means the delivered HTML
@@ -224,12 +225,16 @@ def extract_page(url, final_url, status, headers, html, redirect_chain, elapsed_
     """Build the snapshot record for one page."""
     soup = make_soup(html)
     body = soup.body or soup
+    # One copy with the page's own hidden markup removed, for everything
+    # that reads the page as prose. See `visible_soup` for what it cost not
+    # to have this: thirteen rows of one report quoting a hidden modal.
+    shown = visible_soup(soup)
 
     page_text = visible_text(soup)
     body_text = main_text(soup)
     jsonld, jsonld_errors = _extract_jsonld(soup)
     jsonld_types = _jsonld_types(jsonld)
-    headings = _headings(soup)
+    headings = _headings(shown)
 
     meta = _meta_tags(soup)
     og = {k: v for k, v in meta.items() if k.startswith("og:")}
@@ -266,7 +271,7 @@ def extract_page(url, final_url, status, headers, html, redirect_chain, elapsed_
         "twitter": twitter,
         "headings": headings,
         "heading_sequence": _heading_sequence(soup),
-        "sections": _sections(soup),
+        "sections": _sections(shown),
         "jsonld": jsonld,
         "jsonld_errors": jsonld_errors,
         "jsonld_types": jsonld_types,
@@ -278,7 +283,7 @@ def extract_page(url, final_url, status, headers, html, redirect_chain, elapsed_
         "body_text_len": len(body_text),
         "word_count": word_count(body_text),
         "above_fold_text": truncate(body_text, 1500),
-        "paragraphs": _paragraphs(soup),
+        "paragraphs": _paragraphs(shown),
         "links": links,
         "scripts": scripts,
         "images": images,
