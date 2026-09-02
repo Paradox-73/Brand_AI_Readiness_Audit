@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import time
 from urllib.parse import quote
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -139,7 +140,19 @@ def months_between(earlier, later):
     return (later.year - earlier.year) * 12 + (later.month - earlier.month)
 
 
-def run(snapshot, now=None, allow_network=True):
+def _deadline(time_budget):
+    """Turn a remaining-seconds allowance into a monotonic deadline.
+
+    The orchestrator knows how much of the five-minute ceiling the crawl
+    already spent; this check does not, so it is told what is left rather
+    than assuming a fixed slice. `None` means no ceiling, which is what a
+    direct command-line run of this one skill gets.
+    """
+    if time_budget is None:
+        return None
+    return time.monotonic() + max(0.0, float(time_budget))
+
+def run(snapshot, now=None, allow_network=True, time_budget=None):
     result = SkillResult(SKILL)
     now = now or dt.datetime.now(dt.timezone.utc).date()
     pages = pages_of(snapshot, content_only=True)
@@ -163,7 +176,8 @@ def run(snapshot, now=None, allow_network=True):
     fetcher = None
     if allow_network:
         try:
-            fetcher = Fetcher(max_requests=MAX_EXTRA_REQUESTS)
+            fetcher = Fetcher(max_requests=MAX_EXTRA_REQUESTS,
+                              deadline=_deadline(time_budget))
         except FetchError:
             fetcher = None
     _check_profile_links_resolve(result, profiles, fetcher, allow_network)
@@ -912,6 +926,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--snapshot", required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--time-budget", type=float,
+                        help="seconds of wall clock this check may spend on its own requests; unreached targets are reported as unchecked rather than guessed at")
     parser.add_argument("--now", help="reference date as YYYY-MM-DD (defaults to today, UTC)")
     parser.add_argument("--no-network", action="store_true",
                         help="skip the Wikidata entity-ambiguity lookup")
@@ -921,7 +937,8 @@ def main(argv=None):
     if args.now and now is None:
         parser.error("--now must be a date in YYYY-MM-DD form")
 
-    result = run(load_snapshot(args.snapshot), now=now, allow_network=not args.no_network)
+    result = run(load_snapshot(args.snapshot), now=now, allow_network=not args.no_network,
+                 time_budget=args.time_budget)
     result.write(args.out)
     print("{}: {} finding(s), {} extra request(s)".format(
         SKILL, len(result.findings), result.extra_requests_made), file=sys.stderr)

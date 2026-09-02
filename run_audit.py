@@ -24,7 +24,9 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(ROOT, "skills", "audit-orchestrator", "scripts")
 sys.path.insert(0, SCRIPTS)
 
-from audit_common import MAX_PAGES, WALL_CLOCK_BUDGET, eprint  # noqa: E402
+from audit_common import (  # noqa: E402
+    MAX_PAGES, RUN_WALL_CLOCK_LIMIT, WALL_CLOCK_BUDGET, eprint,
+)
 
 # Order matters: earlier skills own overlapping observations at the dedup step.
 SUB_SKILLS = [
@@ -35,6 +37,14 @@ SUB_SKILLS = [
     "freshness-corroboration-audit",
     "engagement-audit",
 ]
+
+# The three that make requests of their own after the crawl. They are the only
+# ones that can overrun the clock, so they are the only ones handed a deadline.
+NETWORK_SUB_SKILLS = frozenset({
+    "crawl-access-audit",
+    "freshness-corroboration-audit",
+    "engagement-audit",
+})
 
 
 def run_step(command, label):
@@ -102,12 +112,24 @@ def main(argv=None):
         crawl_command.append("--render")
     run_step(crawl_command, "crawl")
 
+    # A caller who raises --budget past the five-minute ceiling has chosen a
+    # longer run, so the ceiling moves with them rather than silently capping
+    # the number they asked for.
+    hard_limit = max(RUN_WALL_CLOCK_LIMIT, args.budget * 1.2)
+
     eprint("[2/3] running {} sub-skills".format(len(SUB_SKILLS)))
     findings_files = []
     for skill in SUB_SKILLS:
         out_path = os.path.join(out_dir, "{}.findings.json".format(skill))
         command = [python, os.path.join(ROOT, "skills", skill, "scripts", "check.py"),
                    "--snapshot", snapshot, "--out", out_path]
+        if skill in NETWORK_SUB_SKILLS:
+            # Whatever is left of the run, not a fixed slice. A crawl that
+            # finished in 20 seconds leaves the probes plenty; a crawl that
+            # used its whole budget leaves them little, and they report the
+            # targets they could not reach as unchecked rather than guessing.
+            left = max(0.0, hard_limit - (time.monotonic() - started))
+            command += ["--time-budget", "{:.1f}".format(left)]
         if args.no_network:
             command.append("--no-network")
         if skill == "freshness-corroboration-audit" and args.now:

@@ -15,6 +15,7 @@ import argparse
 import os
 import re
 import sys
+import time
 from collections import Counter
 from urllib.parse import urlparse
 
@@ -98,7 +99,19 @@ CANONICAL_PROBE_LIMIT = 3
 SITEMAP_PROBE_LIMIT = 8
 
 
-def run(snapshot, allow_network=True):
+def _deadline(time_budget):
+    """Turn a remaining-seconds allowance into a monotonic deadline.
+
+    The orchestrator knows how much of the five-minute ceiling the crawl
+    already spent; this check does not, so it is told what is left rather
+    than assuming a fixed slice. `None` means no ceiling, which is what a
+    direct command-line run of this one skill gets.
+    """
+    if time_budget is None:
+        return None
+    return time.monotonic() + max(0.0, float(time_budget))
+
+def run(snapshot, allow_network=True, time_budget=None):
     result = SkillResult(SKILL)
     robots = snapshot.get("robots") or {}
     origin = snapshot["origin"]
@@ -109,7 +122,8 @@ def run(snapshot, allow_network=True):
     fetcher = None
     if allow_network:
         try:
-            fetcher = Fetcher(max_requests=MAX_EXTRA_REQUESTS)
+            fetcher = Fetcher(max_requests=MAX_EXTRA_REQUESTS,
+                              deadline=_deadline(time_budget))
         except FetchError:
             fetcher = None
 
@@ -1063,11 +1077,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--snapshot", required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--time-budget", type=float,
+                        help="seconds of wall clock this check may spend on its own requests; unreached targets are reported as unchecked rather than guessed at")
     parser.add_argument("--no-network", action="store_true",
                         help="skip the bot-user-agent probe and sitemap HEAD checks")
     args = parser.parse_args(argv)
 
-    result = run(load_snapshot(args.snapshot), allow_network=not args.no_network)
+    result = run(load_snapshot(args.snapshot), allow_network=not args.no_network,
+                 time_budget=args.time_budget)
     result.write(args.out)
     print("{}: {} finding(s), {} extra request(s)".format(
         SKILL, len(result.findings), result.extra_requests_made), file=sys.stderr)

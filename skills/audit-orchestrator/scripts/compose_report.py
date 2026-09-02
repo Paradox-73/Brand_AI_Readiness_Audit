@@ -86,6 +86,16 @@ def dedupe(results):
     it twice makes the report look padded and inflates the severity counts,
     so the earlier skill keeps the finding and the later one's evidence is
     appended to it.
+
+    On a healthy build this never fires, and that is the point rather than a
+    defect. `test_no_root_cause_has_two_owners` fails the build if any two
+    skills emit the same root cause, so the cross-skill branch below is
+    unreachable while the decomposition holds. It is a backstop against a
+    future skill reaching into another's territory, not a working feature, and
+    `merged_duplicates` being empty in every report is the evidence that the
+    six skills are still separate. `test_dedupe_is_a_backstop` pins both
+    halves of that: the branch is exercised on synthetic input, and the
+    production impossibility is asserted.
     """
     merged = {}
     order = []

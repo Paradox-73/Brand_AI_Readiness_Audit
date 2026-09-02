@@ -114,12 +114,30 @@ EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]{2,}\b")
 # 812." with the US branch first returned the area code as the postcode. The
 # numeric branches now refuse to match anything sitting inside a longer run of
 # digits and spaces, which is what a phone number is.
+# A decimal fraction is also a run of five or six digits. A pricing page
+# reading "$0.00005 / event" handed back postal code "00005", the audit then
+# reported the site as contradicting its own address, and the generated
+# Organization snippet offered "00005" as the postalCode to publish. So the
+# numeric branches now refuse a run that a decimal point leads into or that a
+# decimal point continues.
 POSTCODE_HINT_RE = re.compile(
     r"\b(?:[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}"       # UK
     r"|[A-Z]\d[A-Z]\s*\d[A-Z]\d"                    # CA
-    r"|(?<!\d)\d{5}(?:-\d{4})?(?![\s.-]?\d{3})(?!\d)"   # US, not a phone's area code
-    r"|(?<!\d)\d{6}(?![\s.-]?\d{3})(?!\d))\b"           # IN / SG, likewise
+    r"|(?<![\d.])\d{5}(?:-\d{4})?(?![\s.-]?\d{3})(?![\d.]\d)"   # US, not a phone or a decimal
+    r"|(?<![\d.])\d{6}(?![\s.-]?\d{3})(?![\d.]\d))\b"           # IN / SG, likewise
 )
+
+# Where a postal code is allowed to be read from.
+#
+# A five- or six-digit number means "postal code" only in a place that is
+# describing an address. Read off a whole page it means whatever the page
+# happens to be about: a retailer's "Item ID 374819" was reported as the
+# postal code its structured data disagreed with, and that finding was ranked
+# third in what to fix first. So an address-bearing region is preferred, and
+# the whole page is used only as a last resort, where a street hint has to
+# corroborate it.
+ADDRESS_REGION_SELECTORS = ("address", "[itemtype*=PostalAddress]",
+                            "[class*=address]", "[id*=address]", "footer")
 
 # The original required a street-type word, so "41 Walmgate, York" matched
 # nothing - and neither does most of the UK, where the street type is often
@@ -127,16 +145,35 @@ POSTCODE_HINT_RE = re.compile(
 # branch accepts a number followed by capitalised words when a postcode follows
 # close behind, which is what an address looks like when the word "Street" is
 # not in it.
-STREET_HINT_RE = re.compile(
+# Two patterns, and they must not share a flag.
+#
+# The second branch says "a number, then capitalised words, then a postcode",
+# and capitalisation is the only thing separating a street name from any other
+# phrase that starts with a number. Both branches were compiled with `re.I`,
+# which switches that requirement off: on a pricing page, "1 million rows"
+# followed later by a five-digit run matched, and "1 million row" was published
+# as the streetAddress in a paste-ready Organization snippet. The street-type
+# branch does want to ignore case, because "Road" and "road" are both a road.
+# So they are compiled separately.
+STREET_TYPE_RE = re.compile(
     r"\b\d+[A-Za-z]?\s+[\w.'-]+(?:\s+[\w.'-]+){0,3}\s+"
     r"(?:street|st\.?|road|rd\.?|avenue|ave\.?|lane|ln\.?|drive|dr\.?|boulevard|blvd\.?|"
     r"way|court|ct\.?|place|pl\.?|suite|ste\.?|floor|marg|nagar|colony|gate|row|mews|"
     r"close|terrace|crescent|parade|walk|green|hill|square|sq\.?|parkway|pkwy\.?|"
-    r"highway|hwy\.?|circle|cir\.?|trail|loop|alley|plaza|park|gardens|grove)\b"
-    r"|\b\d+[A-Za-z]?\s+[A-Z][\w.'-]+(?:,?\s+[A-Z][\w.'-]+){0,3}"
-    r"(?=[,\s]+(?:[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}|[A-Z]\d[A-Z]\s*\d[A-Z]\d|\d{5}))",
+    r"highway|hwy\.?|circle|cir\.?|trail|loop|alley|plaza|park|gardens|grove)\b",
     re.I,
 )
+STREET_CAPITALISED_RE = re.compile(
+    r"\b\d+[A-Za-z]?\s+[A-Z][\w.'-]+(?:,?\s+[A-Z][\w.'-]+){0,3}"
+    r"(?=[,\s]+(?:[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}|[A-Z]\d[A-Z]\s*\d[A-Z]\d|\d{5}))"
+)
+
+
+def _street_hint(text):
+    """The earliest street-shaped phrase, whichever pattern finds it."""
+    matches = [m for m in (STREET_TYPE_RE.search(text),
+                           STREET_CAPITALISED_RE.search(text)) if m]
+    return min(matches, key=lambda m: m.start()) if matches else None
 
 # A call to action is a link that asks the visitor to do something next.
 # Matching a fixed list of marketing phrases missed most real ones ("Browse the
@@ -850,6 +887,23 @@ def _first_jsonld_date(jsonld, key):
     return ""
 
 
+def _postcode_hint(text, soup, street):
+    """A postal code, read from somewhere that is describing an address.
+
+    An address region is authoritative: whatever postcode-shaped run sits in
+    an `<address>` block or a footer is a postcode. Outside one, the shape is
+    not enough on its own - it is also an item number, an order reference and
+    a five-digit price - so the whole page counts only when a street-shaped
+    phrase on the same page corroborates it.
+    """
+    for selector in ADDRESS_REGION_SELECTORS:
+        for node in soup.select(selector):
+            match = POSTCODE_HINT_RE.search(re.sub(r"\s+", " ", node.get_text(" ")))
+            if match:
+                return match
+    return POSTCODE_HINT_RE.search(text) if street else None
+
+
 def _contact_facts(text, soup):
     """Plain-text facts an assistant would try to quote for "where/how" questions."""
     emails = sorted(set(EMAIL_RE.findall(text)))[:5]
@@ -858,8 +912,8 @@ def _contact_facts(text, soup):
         m.group(0).strip() for m in PHONE_RE.finditer(text)
         if len(re.sub(r"\D", "", m.group(0))) >= 9
     ][:3]
-    street = STREET_HINT_RE.search(text)
-    postcode = POSTCODE_HINT_RE.search(text)
+    street = _street_hint(text)
+    postcode = _postcode_hint(text, soup, street)
     return {
         "emails": emails,
         "phones": phones,

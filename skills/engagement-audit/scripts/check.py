@@ -17,6 +17,7 @@ import argparse
 import os
 import re
 import sys
+import time
 from collections import Counter
 from urllib.parse import urlparse
 
@@ -133,7 +134,19 @@ this that these those we you they what how why when where which who best top new
 """.split())
 
 
-def run(snapshot, allow_network=True):
+def _deadline(time_budget):
+    """Turn a remaining-seconds allowance into a monotonic deadline.
+
+    The orchestrator knows how much of the five-minute ceiling the crawl
+    already spent; this check does not, so it is told what is left rather
+    than assuming a fixed slice. `None` means no ceiling, which is what a
+    direct command-line run of this one skill gets.
+    """
+    if time_budget is None:
+        return None
+    return time.monotonic() + max(0.0, float(time_budget))
+
+def run(snapshot, allow_network=True, time_budget=None):
     result = SkillResult(SKILL)
     pages = pages_of(snapshot, content_only=True)
     all_ok = pages_of(snapshot)
@@ -169,7 +182,8 @@ def run(snapshot, allow_network=True):
     fetcher = None
     if allow_network:
         try:
-            fetcher = Fetcher(max_requests=BROKEN_LINK_SAMPLE)
+            fetcher = Fetcher(max_requests=BROKEN_LINK_SAMPLE,
+                              deadline=_deadline(time_budget))
         except FetchError:
             fetcher = None
     _check_broken_links(result, snapshot, pages, fetcher, allow_network)
@@ -750,10 +764,17 @@ def _check_weight_and_scripts(result, pages):
     heavy = []
     for page in pages:
         scripts = page.get("scripts") or {}
-        weight = page.get("html_len", 0) + scripts.get("inline_bytes", 0) + scripts.get("style_bytes", 0)
+        # `html_len` is the length of the whole document, so the inline script
+        # and inline CSS are already inside it. Adding them on top counted the
+        # same bytes twice and inflated one real homepage from its true
+        # 1,430,541 bytes to a reported 2,076,957 - a 45% overstatement, and
+        # enough to push pages over the threshold that were never over it.
+        weight = page.get("html_len", 0)
         third_party = scripts.get("third_party_host_count", 0)
         if weight > PAGE_WEIGHT_BYTES:
-            heavy.append((page, "{:,} bytes of HTML, inline script and inline CSS".format(weight)))
+            inline = scripts.get("inline_bytes", 0) + scripts.get("style_bytes", 0)
+            heavy.append((page, "{:,} bytes of HTML, {:,} of it inline script and CSS".format(
+                weight, inline)))
         elif third_party > THIRD_PARTY_SCRIPT_LIMIT:
             heavy.append((page, "{} third-party script hosts".format(third_party)))
 
@@ -946,11 +967,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--snapshot", required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--time-budget", type=float,
+                        help="seconds of wall clock this check may spend on its own requests; unreached targets are reported as unchecked rather than guessed at")
     parser.add_argument("--no-network", action="store_true",
                         help="skip the internal-link HEAD probes")
     args = parser.parse_args(argv)
 
-    result = run(load_snapshot(args.snapshot), allow_network=not args.no_network)
+    result = run(load_snapshot(args.snapshot), allow_network=not args.no_network,
+                 time_budget=args.time_budget)
     result.write(args.out)
     print("{}: {} finding(s), {} extra request(s)".format(
         SKILL, len(result.findings), result.extra_requests_made), file=sys.stderr)

@@ -68,6 +68,23 @@ REQUEST_TIMEOUT = 10.0
 REQUEST_DELAY = 0.5
 WALL_CLOCK_BUDGET = 240.0
 
+# WALL_CLOCK_BUDGET governs the crawl. It said nothing about the phase that
+# follows it, and that phase makes network requests too: up to 40 link probes,
+# 16 sitemap and redirect probes, 10 profile checks and 2 Wikidata lookups.
+# Each of those can sit on a REQUEST_TIMEOUT before failing, so 68 requests
+# against a slow or half-dead host is 680 seconds of waiting that nothing was
+# counting. One real run finished its crawl inside the budget and then took
+# 496 seconds in total, which breaks the five-minute ceiling the audit is
+# supposed to hold itself to.
+#
+# So the whole run gets a ceiling, not just the crawl. 285 leaves 15 seconds
+# for composing the report and for the four interpreter start-ups, which are
+# local work and take about two seconds between them; the rest is margin. A
+# caller who deliberately raises --budget above this gets their number plus a
+# proportional allowance instead, because at that point the five-minute
+# ceiling is a limit they have chosen to leave behind.
+RUN_WALL_CLOCK_LIMIT = 285.0
+
 # Two caps on a single response. Both were measured, and both close a hole that
 # a green test suite had nothing to say about.
 #
@@ -652,6 +669,14 @@ def detect_page_type(url, html_meta):
 
     # Otherwise JSON-LD is an explicit declaration by the site owner, and
     # beats guessing from the URL shape.
+    #
+    # `CollectionPage` and `ItemList` are checked first because a listing page
+    # legitimately embeds a Product node per item on it. Reading those as
+    # "this is a product page" is how a shop's category pages came to be
+    # counted as product pages that were missing the markup they were in fact
+    # carrying, one node per item.
+    if jsonld_types & _LISTING_JSONLD_TYPES:
+        return "category"
     if jsonld_types & {"product", "productgroup"}:
         return "product"
     if jsonld_types & {"faqpage", "qapage"}:
@@ -716,14 +741,44 @@ def _product_signal_count(lower_text):
     return sum(1 for s in _PRODUCT_TEXT_SIGNALS if s in lower_text)
 
 
+# What separates one item from a list of items.
+#
+# Measured on a real retailer's 40 crawlable shop pages, using its own URL
+# scheme as the answer key:
+#
+#   11 product detail pages   1 to 4 distinct prices (median 3), 4-5 signals
+#   29 category listings      2 to 18 distinct prices (median 9), 1-2 signals
+#
+# The old rule asked for a price and two buying signals, and a listing page
+# has both - it repeats "free shipping" and "in stock" once per item on it.
+# So twenty category pages were classified as product pages, and the report
+# told the retailer that "20 of 31 product pages have no Product markup" when
+# every one of its real product pages already had it and not one of the twenty
+# was a product page.
+#
+# What the two groups do not share is how many different prices they show, and
+# that alone separates them completely on the measured data: 11 of 11 detail
+# pages kept, 29 of 29 listings excluded. Both thresholds were swept; raising
+# the signal count from 2 to 3 changed nothing there and would have demoted an
+# ordinary small-shop page whose only affordances are "Add to cart" and "In
+# stock", so it stays at 2 and the price ceiling does the work.
+PRODUCT_SIGNAL_MINIMUM = 2
+DISTINCT_PRICE_CEILING = 5
+
+# A site saying "this page is a list" outranks any guess made from its text.
+_LISTING_JSONLD_TYPES = frozenset({"collectionpage", "itemlist", "searchresultspage"})
+
+
 def _looks_like_product_detail(lower_text, html_meta):
-    """A single purchasable item: a price plus at least two buying affordances.
+    """A single purchasable item, not a page listing several of them.
 
     Used where the URL gives no help. Where the URL does - a deeper path under a
     products section - that evidence is stronger and is applied first.
     """
-    has_price = bool(_PRICE_RE.search(lower_text))
-    return has_price and _product_signal_count(lower_text) >= 2
+    prices = {m.group(0).strip() for m in _PRICE_RE.finditer(lower_text)}
+    if not prices or len(prices) >= DISTINCT_PRICE_CEILING:
+        return False
+    return _product_signal_count(lower_text) >= PRODUCT_SIGNAL_MINIMUM
 
 
 def has_price(text):
@@ -1267,20 +1322,58 @@ def visible_text(soup):
     return re.sub(r"\s+", " ", text).strip()
 
 
+MAIN_TEXT_SELECTORS = ("main", "article", "[role=main]", "#main", "#content", ".content")
+MAIN_TEXT_MIN_CHARS = 200
+
+# How complete a content region has to be before it is trusted over the whole
+# stripped document. Measured on sixteen live pages, comparing what the chosen
+# region held against what the whole document held once chrome was removed:
+#
+#   thirteen pages     0.89 to 1.00 - the region is the content
+#   a space agency     0.39 - <main> is a shell; 62% of the page sits outside it
+#   a framework's site 0.27 - <main> holds the hero; 73% sits outside it
+#
+# The old rule took the first region over 200 characters, so on those two it
+# returned a fraction of the page and every downstream check read the rest as
+# absent. That is how a page with 3,176 characters of text gets reported as
+# having 30: not a crawl failure, a extraction rule that stopped too early.
+#
+# 0.85 sits in the gap. Nothing measured falls between 0.39 and 0.89, so the
+# threshold separates the two populations rather than cutting through one.
+MAIN_TEXT_COMPLETE_SHARE = 0.85
+
+
 def main_text(soup):
     """Text of the main content region, falling back to the whole body.
 
     Header/nav/footer chrome repeats on every page and would otherwise mask a
-    genuinely empty article body.
+    genuinely empty article body, so a real content region is preferred.
+
+    But a content region is only better than the whole document when it
+    actually holds the content. Two failures are possible and both were seen
+    on live sites: a `<main>` that wraps a hero and leaves the article outside
+    it, and a page whose article sits inside an element `_strip_chrome` treats
+    as chrome, where the whole-document fallback is the one that loses text.
+    So both candidates are measured and the fuller one wins, with the region
+    preferred while it is within `MAIN_TEXT_COMPLETE_SHARE` of the best.
     """
-    for selector in ("main", "article", "[role=main]", "#main", "#content", ".content"):
+    whole = _strip_chrome(soup)
+    best = ""
+    for selector in MAIN_TEXT_SELECTORS:
         node = soup.select_one(selector)
-        if node is not None:
-            text = _strip_chrome(node)
-            if len(text) >= 200:
-                return text
-    text = _strip_chrome(soup)
-    return text or visible_text(soup)
+        if node is None:
+            continue
+        text = _strip_chrome(node)
+        if len(text) < MAIN_TEXT_MIN_CHARS:
+            continue
+        # Complete enough to be the content region: keep the chrome out.
+        if len(text) >= MAIN_TEXT_COMPLETE_SHARE * len(whole):
+            return text
+        if len(text) > len(best):
+            best = text
+    if len(best) > len(whole):
+        return best
+    return whole or visible_text(soup)
 
 
 def _strip_chrome(node):

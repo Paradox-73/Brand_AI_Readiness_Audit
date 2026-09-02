@@ -719,3 +719,69 @@ def test_every_check_registers_itself_before_it_can_fire():
                                 "result.check()".format(skill, function.name, emits))
 
     assert not problems, "\n".join(problems)
+
+
+def test_dedupe_is_a_backstop_not_a_feature():
+    """`merged_duplicates` is empty in every real report, and should be.
+
+    `test_no_root_cause_has_two_owners` above fails the build if two skills
+    ever emit the same root cause, and `dedupe` merges only across skills on a
+    matching root cause. So on a healthy build the cross-skill branch cannot
+    be reached, and an empty `merged_duplicates` is the evidence that the six
+    skills are still separate rather than a sign that dedup is broken.
+
+    That leaves a branch no production run exercises, which is exactly how
+    dead code rots. This test drives it directly, so the backstop still works
+    on the day a new skill leaks into another's territory.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "compose_for_dedupe_test", os.path.join(SCRIPTS, "compose_report.py"))
+    compose = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(compose)
+
+    def finding(hint, pages):
+        return {"mechanism": "A", "root_cause": "robots-blocks-answer-crawler",
+                "id_hint": hint, "evidence": "seen from {}".format(hint),
+                "affected_pages": list(pages)}
+
+    pages = ["https://example.test/a", "https://example.test/b"]
+    merged, duplicates = compose.dedupe([
+        {"skill": "crawl-access-audit", "findings": [finding("first", pages)]},
+        {"skill": "engagement-audit", "findings": [finding("second", pages)]},
+    ])
+
+    assert len(merged) == 1, "a leaked cause must be reported once, not twice"
+    assert merged[0]["detected_by"] == "crawl-access-audit", "the earlier skill keeps it"
+    assert merged[0]["also_detected_by"] == ["engagement-audit"]
+    assert "Also observed by engagement-audit" in merged[0]["evidence"], (
+        "the later skill's evidence must survive the merge, not be discarded")
+    assert duplicates == [{"skill": "engagement-audit", "id_hint": "second",
+                           "merged_into": "first"}]
+
+
+def test_one_skill_may_report_several_findings_that_share_a_cause():
+    """Three robots.txt problems are three fixes, not one finding repeated.
+
+    Blocking answer crawlers, blocking training crawlers and blocking content
+    paths are three separate decisions a site made, and collapsing them would
+    hand the owner one line where they need three.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "compose_for_dedupe_test_same_skill", os.path.join(SCRIPTS, "compose_report.py"))
+    compose = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(compose)
+
+    def finding(hint):
+        return {"mechanism": "A", "root_cause": "robots-blocks-answer-crawler",
+                "id_hint": hint, "evidence": hint, "affected_pages": []}
+
+    merged, duplicates = compose.dedupe([
+        {"skill": "crawl-access-audit",
+         "findings": [finding("answer"), finding("training"), finding("paths")]},
+    ])
+    assert len(merged) == 3, "same skill, same cause: all three are kept"
+    assert duplicates == []

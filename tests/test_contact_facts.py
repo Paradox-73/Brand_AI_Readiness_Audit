@@ -34,7 +34,7 @@ from conftest import SCRIPTS
 sys.path.insert(0, SCRIPTS)
 
 from page_extract import (  # noqa: E402
-    PHONE_RE, POSTCODE_HINT_RE, STREET_HINT_RE,
+    PHONE_RE, POSTCODE_HINT_RE, _contact_facts, _street_hint, make_soup,
 )
 
 
@@ -51,7 +51,7 @@ WALMGATE = "41 Walmgate, York, YO1 9TT. 01904 555 812."
 
 
 def test_a_uk_address_with_no_street_type_word_is_found():
-    assert _first(STREET_HINT_RE, WALMGATE) == "41 Walmgate, York"
+    assert _street_hint(WALMGATE).group(0) == "41 Walmgate, York"
 
 
 def test_the_postcode_is_the_postcode_not_the_phone_area_code():
@@ -85,7 +85,7 @@ def test_postcodes_across_countries(text, expected):
     ("12 MG Road, Bengaluru 560001", "12 MG Road"),
 ])
 def test_streets_across_countries(text, expected):
-    assert _first(STREET_HINT_RE, text) == expected
+    assert (_street_hint(text).group(0) if _street_hint(text) else "") == expected
 
 
 # --------------------------------------------------------------------------
@@ -108,7 +108,7 @@ def test_a_phone_number_alone_never_produces_a_postcode(text):
     "Over 5000 pieces made since we opened.",
 ])
 def test_prose_with_numbers_is_not_read_as_an_address(text):
-    assert STREET_HINT_RE.search(text) is None
+    assert _street_hint(text) is None
 
 
 @pytest.mark.parametrize("text,expected", [
@@ -117,3 +117,64 @@ def test_prose_with_numbers_is_not_read_as_an_address(text):
 ])
 def test_phone_numbers_keep_their_full_form(text, expected):
     assert _first(PHONE_RE, text) == expected
+
+
+# --------------------------------------------------------------------------
+# Numbers that are not addresses
+#
+# Both of these shipped. Both produced a high-severity "the site contradicts
+# its own contact details" finding, and one of them put its invented value
+# into a paste-ready Organization snippet, offering the site a postal code
+# scraped out of a price as the thing to publish.
+# --------------------------------------------------------------------------
+
+PRICING_PAGE = (
+    "Pricing that scales. $0.00005 / event after the first 1 million rows. "
+    "Volume discounts apply above 20 million events per month."
+)
+PRODUCT_PAGE = (
+    "3in Round 3-Ring Binder for Lifeguarding Manual. Item ID 374819. "
+    "In stock. Ships in 2 business days."
+)
+
+
+def test_a_price_is_not_a_postal_code():
+    """"$0.00005 / event" was read as postal code 00005."""
+    assert POSTCODE_HINT_RE.search(PRICING_PAGE) is None, (
+        "a decimal fraction must not match the postal-code shape")
+
+
+def test_a_row_count_is_not_a_street_address():
+    """"1 million rows" was published as a streetAddress in a fix snippet.
+
+    The capitalised-words branch is the only thing separating a street name
+    from any other phrase opening with a number, and `re.I` had switched that
+    requirement off.
+    """
+    assert _street_hint(PRICING_PAGE) is None
+
+
+def test_an_item_number_outside_an_address_block_is_not_a_postal_code():
+    """A retailer's SKU was reported as the postal code its markup disagreed with."""
+    soup = make_soup("<html><body><p>{}</p></body></html>".format(PRODUCT_PAGE))
+    facts = _contact_facts(PRODUCT_PAGE, soup)
+    assert facts["postcode_hint"] == "", (
+        "a six-digit run with no address around it is not an address")
+    assert facts["has_address"] is False
+
+
+def test_a_postal_code_inside_an_address_block_is_still_read():
+    """The fix must not cost us the addresses that are real."""
+    html = ("<html><body><address>Acme Ltd, 41 Walmgate, York YO1 9TT</address>"
+            "</body></html>")
+    soup = make_soup(html)
+    facts = _contact_facts(soup.get_text(" "), soup)
+    assert facts["postcode_hint"] == "YO1 9TT"
+    assert facts["has_address"] is True
+
+
+def test_a_postal_code_with_a_street_beside_it_is_still_read_without_an_address_block():
+    text = "Visit us at 1600 Pennsylvania Avenue, Washington 20500 for a tour."
+    soup = make_soup("<html><body><p>{}</p></body></html>".format(text))
+    facts = _contact_facts(text, soup)
+    assert facts["postcode_hint"] == "20500"

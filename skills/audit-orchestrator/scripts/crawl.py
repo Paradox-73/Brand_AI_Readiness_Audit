@@ -48,6 +48,25 @@ GZIP_MAGIC = bytes([0x1F, 0x8B])
 # Longer than this and a separator-free <title> is a sentence, not a name.
 TITLE_AS_BRAND_MAX = 40
 
+# Where a <title> splits into "Brand" and "the rest of the sentence".
+#
+# The first version required whitespace on both sides of the separator, and
+# that is not how titles are punctuated. A real shop's homepage title reads
+# "Zingerman's: Online Shopping for Food and Gifts" - colon tight against the
+# word, space after it, which is ordinary English. The split found nothing, the
+# whole 47-character title was rejected as too long to be a name, the domain
+# won, and the brand became "Zingermans". Every generated fix in that report -
+# the definition sentence, the Organization snippet's `name` field, the sample
+# llms.txt - then told the owner to publish their own shop's name without its
+# apostrophe, in a report whose whole subject is making the brand's identity
+# unambiguous. Following the advice would have made the site worse.
+#
+# So a colon, pipe or bullet may sit tight against the word before it and must
+# be followed by space. The dashes still need space on both sides: a tight
+# hyphen belongs to the word ("e-commerce", "Jean-Paul"). The trailing-space
+# requirement is what keeps a clock time like "9:00 to 5:00" in one piece.
+TITLE_SEPARATOR = re.compile(r"\s*[|:·•]\s+|\s[-–—]\s")
+
 # A meta refresh with a delay this short is a redirect, not a courtesy pause on a
 # page someone is meant to read. Longer ones stay where they are.
 META_REFRESH_MAX_DELAY = 5
@@ -350,6 +369,20 @@ TITLE_BOILERPLATE_TAIL = (
 )
 
 
+def _is_title_boilerplate(part):
+    """True for a title half that is only scaffolding: "Home", "Official Site"."""
+    value = (part or "").strip().lower().strip(".")
+    if not value:
+        return True
+    if value in _NOT_A_BRAND:
+        return True
+    for tail in TITLE_BOILERPLATE_TAIL:
+        if value == tail.strip():
+            return True
+    return value in ("home page", "homepage", "official site", "official website",
+                     "welcome", "start", "start page", "index", "main page")
+
+
 def _strip_title_boilerplate(title):
     """"SQLite Home Page" -> "SQLite". Returns "" if nothing is left."""
     value = (title or "").strip()
@@ -376,6 +409,38 @@ def _strip_title_boilerplate(title):
     return value
 
 
+def _site_spelling(token, home):
+    """The site's own spelling of a name the domain can only approximate.
+
+    A hostname cannot carry an apostrophe, an ampersand or a space, so the
+    domain token is a flattened version of a name the site writes properly on
+    its own homepage: `zingermans` for "Zingerman's", `benjerry` for "Ben &
+    Jerry's". Falling back to the domain is reasonable; publishing the
+    flattened spelling back to the owner as the name they should put in their
+    structured data is not, because the report's own subject is making the
+    brand's identity unambiguous.
+
+    So when the domain is all we have, the homepage is checked for a run of up
+    to four words that flattens to the same letters, and the site's spelling
+    wins. Four words is enough for "Ben & Jerry's" and short enough that a
+    coincidental match across a whole sentence is not a risk; the four-letter
+    floor keeps short domains from matching anything.
+    """
+    key = re.sub(r"[^a-z0-9]", "", (token or "").lower())
+    if len(key) < 4 or not home:
+        return None
+    for text in (home.get("title") or "", home.get("h1") or ""):
+        words = str(text).split()
+        for start in range(len(words)):
+            for end in range(start + 1, min(start + 4, len(words)) + 1):
+                phrase = " ".join(words[start:end])
+                if re.sub(r"[^a-z0-9]", "", phrase.lower()) == key:
+                    trimmed = phrase.strip(" ,.:;|-")
+                    if trimmed and trimmed.lower() != token.lower():
+                        return trimmed
+    return None
+
+
 def detect_brand(pages, origin):
     """Work out the brand name and, separately, how the site declares it.
 
@@ -399,7 +464,22 @@ def detect_brand(pages, origin):
         value = re.sub(r"\s+", " ", str(value or "")).strip().strip("|-–—·•").strip()
         return value if 1 < len(value) <= 80 else ""
 
+    home_url = (home or {}).get("url")
+    declared_on = {}
+
     for page in pages:
+        # Where a declaration was found decides how much it is worth. One
+        # national charity declared no identity at all on its homepage, its
+        # about page or its contact page, and declared an Organization `name`
+        # on exactly one of sixty crawled pages: a store listing for a
+        # three-ring binder, naming the training subsidiary that runs the
+        # shop. That name became the brand for the whole report, drove two of
+        # the three "start here" items, and headed the generated llms.txt - so
+        # the file telling assistants what the organisation is would have
+        # named a merchandise subsidiary. A declaration on a deep page is
+        # still evidence; it is just worth less than the homepage's own title.
+        on_home = page.get("url") == home_url and home_url is not None
+        suffix = "" if on_home else "-off-home"
         for node in page.get("jsonld") or []:
             types = node.get("@type")
             types = [types] if isinstance(types, str) else (types or [])
@@ -410,7 +490,9 @@ def detect_brand(pages, origin):
                 continue
             name = clean(node.get("name"))
             if name:
-                authoritative.append({"name": name, "source": "jsonld:Organization"})
+                authoritative.append(
+                    {"name": name, "source": "jsonld:Organization" + suffix})
+                declared_on.setdefault(name, set()).add(page.get("url"))
             alternate = node.get("alternateName")
             for value in ([alternate] if isinstance(alternate, str) else (alternate or [])):
                 cleaned = clean(value)
@@ -422,19 +504,26 @@ def detect_brand(pages, origin):
             # separator and all: "Die Bundesregierung informiert | Startseite"
             # became the brand, and then appeared inside generated fix text as
             # if it were a company name.
-            pieces = [clean(x) for x in re.split(r"\s[|\-–—:·•]\s", site_name)]
+            pieces = [clean(x) for x in TITLE_SEPARATOR.split(site_name)]
             pieces = [x for x in pieces if x]
             if len(pieces) > 1:
                 site_name = min(pieces, key=len)
-            authoritative.append({"name": site_name, "source": "og:site_name"})
+            authoritative.append({"name": site_name, "source": "og:site_name" + suffix})
+            declared_on.setdefault(site_name, set()).add(page.get("url"))
 
     if home:
         title = home.get("title") or ""
-        parts = [clean(p) for p in re.split(r"\s[|\-–—:·•]\s", title)]
+        parts = [clean(p) for p in TITLE_SEPARATOR.split(title)]
         parts = [p for p in parts if p]
         if len(parts) > 1:
-            # The brand is conventionally the shorter end of "Brand | Tagline".
-            ordered = sorted([parts[0], parts[-1]], key=len)
+            # The brand is conventionally the shorter end of "Brand | Tagline",
+            # but "Brand | Home" and "Brand | Official Site" are also ordinary
+            # titles, and there the shorter end is the boilerplate. Drop the
+            # ends that are nothing but boilerplate first, and only fall back
+            # to length when that leaves nothing to choose between.
+            ends = [parts[0], parts[-1]]
+            named = [p for p in ends if not _is_title_boilerplate(p)]
+            ordered = sorted(named or ends, key=len)
             for index, value in enumerate(ordered):
                 fallback.append({"name": value, "source": "title-part-{}".format(index)})
         elif parts:
@@ -466,12 +555,24 @@ def detect_brand(pages, origin):
         fallback.append({"name": host_brand.title(), "source": "domain"})
 
     priority = {"jsonld:Organization": 0, "og:site_name": 1,
-                "title-part-0": 2, "title-part-1": 3, "title": 4, "domain": 5,
+                "title-part-0": 2, "title-part-1": 3, "title": 4,
+                # A declaration found on one deep page and nowhere near the
+                # homepage ranks below the homepage's own title. It is still
+                # evidence, and it still beats the domain.
+                "jsonld:Organization-off-home": 4.4, "og:site_name-off-home": 4.6,
+                "domain": 5,
                 # Below the domain: a headline is not a brand name.
                 "title-long": 6}
     ranked = sorted(authoritative + fallback,
                     key=lambda c: (priority.get(c["source"], 9), c["name"].lower()))
     chosen = ranked[0] if ranked else {"name": host_brand.title() or origin, "source": "domain"}
+
+    # The domain is a last resort, and a last resort should still spell the
+    # name the way the site does.
+    if chosen["source"] == "domain":
+        spelled = _site_spelling(host_brand, home)
+        if spelled:
+            chosen = {"name": spelled, "source": "domain-as-the-site-writes-it"}
 
     return {
         "name": chosen["name"],
@@ -480,6 +581,12 @@ def detect_brand(pages, origin):
         "authoritative_sources": sorted({c["source"] for c in authoritative}),
         "alternate_names": sorted(alternates),
         "fallback_candidates": sorted({c["name"] for c in fallback}),
+        # Which pages asserted each name. Without this a naming-inconsistency
+        # finding lists no pages at all, and a finding with no pages is scored
+        # as affecting the whole site - so a disagreement visible on one page
+        # out of sixty outscored a critical crawler block on the same report.
+        "declared_on": {name: sorted(urls) for name, urls in sorted(declared_on.items())},
+        "pages_seen": len(pages),
         "host": host,
         "domain_token": host_brand,
     }

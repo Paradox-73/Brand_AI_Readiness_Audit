@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Agent Skills](https://img.shields.io/badge/Agent%20Skills-agentskills.io-6E56CF?style=flat-square)
 ![Skills](https://img.shields.io/badge/Skills-7%20(1%20entrypoint)-0F9D58?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-464%20passing-2EA043?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-501%20passing-2EA043?style=flat-square)
 ![Read Only](https://img.shields.io/badge/Mode-Read--only-FF6F00?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-4169E1?style=flat-square)
 
@@ -178,8 +178,8 @@ The tests, if you want them:
 
 ```bash
 pip install pytest
-python3 -m pytest -q                        # 464 tests, about 16 minutes
-python3 -m pytest -q -m "not mutation"      # 407 tests, about 4 minutes
+python3 -m pytest -q                        # 501 tests, about 16 minutes
+python3 -m pytest -q -m "not mutation"      # 444 tests, about 4 minutes
 ```
 
 > **Windows path limit.** Do not unzip into a deep directory — `pip` cannot install `lxml` if

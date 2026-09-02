@@ -721,13 +721,29 @@ def _check_naming_consistency(result, snapshot, pages, brand):
         detail.append("{} distinct names are asserted as the site's identity: {}".format(
             len(undeclared), ", ".join('"{}"'.format(v) for v in sorted(variants)[:4])))
 
+    # The pages that actually declared a name. A finding that lists none is
+    # scored as affecting the whole site, and this one was: a disagreement
+    # between two names declared on a single store page out of sixty scored
+    # higher than a confirmed crawler block on the same report, because
+    # "no pages listed" is meant to mean robots.txt, not "we did not look".
+    declared_on = brand.get("declared_on") or {}
+    pages_declaring = sorted({url for name in variants
+                              for url in declared_on.get(name, []) if url})
+    pages_seen = brand.get("pages_seen") or 0
+    scope = ""
+    if pages_declaring and pages_seen:
+        scope = (" Both forms were found on {} of the {} pages crawled; the rest declare no "
+                 "name at all, so this is a disagreement between the few pages that do."
+                 .format(len(pages_declaring), pages_seen))
+
     result.add(
         id_hint="brand-name-written-inconsistently",
+        affected_pages=pages_declaring,
         title="The brand name is written more than one way",
         severity="medium", confidence="medium",
         evidence="Sources checked: Organization JSON-LD `name` and og:site_name. "
-                 "Result: {}. The primary form was taken to be \"{}\" (from {}).".format(
-                     "; ".join(detail), brand.get("name"), brand.get("source")),
+                 "Result: {}. The primary form was taken to be \"{}\" (from {}).{}".format(
+                     "; ".join(detail), brand.get("name"), brand.get("source"), scope),
         mechanism="D", root_cause="name-inconsistency",
         summary="Pick one written form of the name and use it everywhere, character for character.",
         how_to_fix=[
