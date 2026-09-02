@@ -603,6 +603,23 @@ def _declared_address(pages):
     return {}
 
 
+def _offer_props(offer):
+    """The properties this kind of Offer is supposed to carry.
+
+    `AggregateOffer` states a range with `lowPrice` and `highPrice` and has no
+    single `price`, which is correct and is what this report's own advice tells
+    people to use for a range. Grading it against the flat `Offer` shape
+    reported a coffee roaster's valid range pricing as an offer "missing
+    price", and the suggested fix would have replaced a correct range with a
+    single made-up number.
+    """
+    types = offer.get("@type")
+    types = [types] if isinstance(types, str) else (types or [])
+    if any(str(t).split("/")[-1].lower() == "aggregateoffer" for t in types):
+        return ["lowPrice", "highPrice", "priceCurrency"]
+    return HIGH_VALUE_PROPS["Offer"]
+
+
 def _offer_of(node):
     """The Offer on a product node, including the one inside a variant.
 
@@ -678,7 +695,7 @@ def _check_product(result, by_type, brand):
             if not isinstance(offer, dict):
                 incomplete.append((page, "no offers object"))
                 break
-            missing = _missing_props(offer, HIGH_VALUE_PROPS["Offer"])
+            missing = _missing_props(offer, _offer_props(offer))
             if missing:
                 incomplete.append((page, "offer missing " + ", ".join(missing)))
                 break

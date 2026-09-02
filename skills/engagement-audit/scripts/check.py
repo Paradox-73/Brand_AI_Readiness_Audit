@@ -56,7 +56,7 @@ if _SHARED is None:
 sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
-    CONTENT_TYPES, DEEP_TYPES, example_urls, Fetcher, FetchError,
+    confirm_dead, CONTENT_TYPES, DEEP_TYPES, example_urls, Fetcher, FetchError,
     language_of, link_verdict, load_snapshot, normalise_url, pages_of, pct,
     plural, same_site, sample, SkillResult, truncate, word_count
 )
@@ -544,9 +544,17 @@ def _check_broken_links(result, snapshot, pages, fetcher, allow_network):
     else:
         for url in sample(sorted(candidates), BROKEN_LINK_SAMPLE):
             response = fetcher.try_get(url, method="HEAD")
-            verdict = link_verdict(response.status_code if response is not None else None)
+            status = response.status_code if response is not None else None
+            verdict = link_verdict(status)
             if verdict == "dead":
-                broken.append((url, response.status_code))
+                # HEAD may say alive on its own; it may not say dead on its
+                # own. Support is per-URL, not per-site, and a site that
+                # answers HEAD honestly on its homepage can still 404 to HEAD
+                # on an article that serves 200 to a reader.
+                status = confirm_dead(fetcher, url, status)
+                verdict = link_verdict(status)
+            if verdict == "dead":
+                broken.append((url, status))
                 checked += 1
             elif verdict == "alive":
                 checked += 1

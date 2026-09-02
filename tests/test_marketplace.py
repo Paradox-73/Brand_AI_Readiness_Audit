@@ -207,6 +207,13 @@ def test_no_real_domain_names_anywhere():
         "libsyn.com", "megaphone.fm", "simplecast.com", "acast.com",
         "anchor.fm", "captivate.fm", "transistor.fm", "art19.com",
         "omnystudio.com", "audioboom.com", "brightcove.com", "wistia.com",
+        # Analytics and consent vendors whose invisible iframes the extractor
+        # recognises, so a tracking pixel is not reported as the page's main
+        # content trapped in a frame. Same standing again: a platform we
+        # detect, never an example site.
+        "googletagmanager.com", "google-analytics.com", "doubleclick.net",
+        "connect.facebook.net", "facebook.net", "hotjar.com", "clarity.ms",
+        "segment.com", "cookielaw.org", "onetrust.com",
         # Reserved documentation domains.
         "example.com", "example.invalid",
     }

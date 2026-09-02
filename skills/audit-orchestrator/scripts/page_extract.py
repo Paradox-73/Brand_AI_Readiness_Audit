@@ -350,6 +350,18 @@ def _meta_refresh(soup, base):
     tag = soup.find("meta", attrs={"http-equiv": re.compile(r"^refresh$", re.I)})
     if not tag or not tag.get("content"):
         return None
+    # A refresh inside `<noscript>` is the opposite of a redirect: it is what
+    # the page does for the minority of consumers that cannot run JavaScript,
+    # and following it means auditing the fallback instead of the site.
+    #
+    # A language-learning site ships one. The crawl followed it, collapsed six
+    # distinct seed URLs into a single legacy stub, finished with three pages
+    # instead of sixty, and the report then told the owner to make the redirect
+    # permanent - which would send every visitor and every crawler to the stub
+    # for good, degrading a homepage that works. Five of that report's eight
+    # findings trace back to this one tag.
+    if tag.find_parent("noscript") is not None:
+        return None
     match = _META_REFRESH_RE.match(tag["content"])
     if not match:
         return None
@@ -717,6 +729,29 @@ def _form_is_search(form, text):
     return "search" in action or "/s/" in action or "search" in text[:60]
 
 
+# Frames that exist for machinery rather than for a reader.
+_PLUMBING_FRAME_HOSTS = (
+    "googletagmanager.com", "google-analytics.com", "doubleclick.net",
+    "facebook.com/tr", "connect.facebook.net", "hotjar.com", "clarity.ms",
+    "segment.com", "cdn.cookielaw.org", "onetrust.com",
+)
+
+
+def _invisible_frame(tag, src):
+    """True for a frame with no size, no source, or a tracking source."""
+    low = (src or "").strip().lower()
+    if not low or low in ("about:blank", "javascript:false", "javascript:;"):
+        return True
+    if any(host in low for host in _PLUMBING_FRAME_HOSTS):
+        return True
+    if _is_hidden(tag) or tag.find_parent("noscript") is not None:
+        return True
+    style = (tag.get("style") or "").replace(" ", "").lower()
+    if "width:0" in style or "height:0" in style:
+        return True
+    return _int_attr(tag.get("width")) == 0 or _int_attr(tag.get("height")) == 0
+
+
 def _iframes(soup, base):
     out = []
     for tag in soup.find_all("iframe"):
@@ -727,6 +762,12 @@ def _iframes(soup, base):
             "is_video": any(host in src.lower() for host in VIDEO_HOSTS),
             "is_audio": any(host in src.lower() for host in AUDIO_HOSTS),
             "is_map": "map" in src.lower(),
+            # An iframe nobody can see holds nobody's content. Two real sites
+            # were told their main content was trapped in one: a museum's was
+            # a tag manager's invisible tracking pixel, and a coffee roaster's
+            # was a 0x0 form helper whose src the report printed as
+            # `about:blank`. A blank, hidden, sizeless frame is plumbing.
+            "is_invisible": _invisible_frame(tag, src),
         })
         if len(out) >= 12:
             break

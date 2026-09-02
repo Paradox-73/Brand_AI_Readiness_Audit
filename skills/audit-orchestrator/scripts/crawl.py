@@ -196,7 +196,21 @@ def fetch_sitemaps(fetcher, origin, robots_record, deadline):
         try:
             root = ET.fromstring(payload)
         except ET.ParseError as exc:
-            record["parse_error"] = "XML parse error: {}".format(exc)
+            # Our cap, not their file. A national museum publishes a valid
+            # 10.5 MB sitemap; the read cap stops at 5 MB, the parser then
+            # fails on an unclosed tag at exactly that offset, and the report
+            # told the museum to spend an hour fixing XML that is not broken.
+            # A limit this audit imposed on itself is never a defect in the
+            # site, and the same rule already governs blocked requests.
+            if getattr(response, "truncated", False):
+                record["truncated"] = True
+                record["parse_error"] = None
+                record["unchecked_reason"] = (
+                    "the file is larger than the {:,}-byte cap this audit reads to, so it was "
+                    "cut off mid-document and could not be parsed. That is a limit of this "
+                    "audit, not a fault in the sitemap".format(MAX_RESPONSE_BYTES))
+            else:
+                record["parse_error"] = "XML parse error: {}".format(exc)
             results.append(record)
             continue
 

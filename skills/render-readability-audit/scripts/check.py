@@ -547,7 +547,8 @@ def _check_iframed_content(result, content_pages, shells):
     for page in content_pages:
         if page["url"] in shell_urls:
             continue
-        frames = [f for f in (page.get("iframes") or []) if not f["is_video"] and not f["is_map"]]
+        frames = [f for f in (page.get("iframes") or [])
+                  if not f["is_video"] and not f["is_map"] and not f.get("is_invisible")]
         if frames and page.get("body_text_len", 0) < MIN_QUOTABLE_TEXT:
             iframed.append((page, frames[0]))
 

@@ -211,13 +211,20 @@ def _check_challenge_pages(result, snapshot):
         # wall on part of it hides that part and no more.
         severity="critical" if share >= 50 else "high",
         confidence="high",
+        # The status is read from the records, not asserted. It said "a 2xx
+        # response" whatever the pages actually returned, and a bank's report
+        # then described its 403s as 2xx - contradicted by the next finding in
+        # the same report, which quoted the real status. An evidence sentence
+        # that states a value it did not read is a fabrication however small.
         evidence="{} of {} fetched URLs ({}%) returned a verification page rather than "
-                 "content: a 2xx response carrying {} challenge scaffolding and under {} "
+                 "content: HTTP {} carrying {} challenge scaffolding and under {} "
                  "characters of readable text. Examples: {}. Those pages are excluded from "
                  "every content check in this report, because they describe the crawler's "
                  "reception and not the site.".format(
-                     len(challenged), len(fetched), share, " and ".join(vendors),
-                     CHALLENGE_TEXT_CEILING,
+                     len(challenged), len(fetched), share,
+                     ", ".join(str(s) for s in sorted(
+                         {p.get("status") for p in challenged if p.get("status")})) or "no status",
+                     " and ".join(vendors), CHALLENGE_TEXT_CEILING,
                      "; ".join(p["url"] for p in sorted(challenged, key=lambda x: x["url"])[:3])),
         mechanism="A", root_cause="bot-manager-block",
         summary="Allow the AI answer crawlers through {} so they receive the page, not the "
@@ -484,6 +491,20 @@ def _check_sitemaps(result, snapshot, fetcher):
     sitemaps = snapshot.get("sitemaps") or []
     reachable = [s for s in sitemaps if s.get("status") == 200 and not s.get("parse_error")]
     broken = [s for s in sitemaps if s.get("status") == 200 and s.get("parse_error")]
+    # Sitemaps the crawl fetched but could not read to the end. A limit this
+    # audit imposes on itself is not a defect in the site, so they are neither
+    # "reachable" nor "broken" - they are unchecked, and said to be.
+    truncated = [s for s in sitemaps if s.get("truncated")]
+    if truncated and not reachable and not broken:
+        result.skip("sitemap-present",
+                    "a sitemap is published at {} and was fetched, but {}".format(
+                        truncated[0]["url"], truncated[0].get("unchecked_reason")
+                        or "it could not be read in full"))
+        result.skip("sitemap-parses", "the sitemap was not read in full, so it was not parsed")
+        result.skip("sitemap-urls-resolve",
+                    "the sitemap was not read in full, so its URLs were not sampled")
+        result.signal("sitemap_truncated", True)
+        return
 
     # A request the edge refused is not an answer about whether the file
     # exists. A museum's sitemap.xml returned 429 along with everything else on
@@ -1118,6 +1139,18 @@ def _check_canonicals(result, snapshot, ok_pages, fetcher=None):
                         len(with_canonical)))
 
 
+def _landed_on_https(ok_pages):
+    """Did the pages the crawl actually read come back over HTTPS?
+
+    Prefer what was observed over what was assumed. This is the general shape
+    of the bug it fixes: a check reasoning about a value it could have read
+    from the record, using instead the value it was handed at the start.
+    """
+    landed = [(p.get("final_url") or p.get("url") or "") for p in ok_pages]
+    landed = [u for u in landed if u]
+    return bool(landed) and all(u.startswith("https://") for u in landed)
+
+
 def _check_transport_and_hosts(result, snapshot, ok_pages):
     result.check("https-transport")
     result.check("canonical-host-consistency")
@@ -1131,12 +1164,26 @@ def _check_transport_and_hosts(result, snapshot, ok_pages):
         result.skip("https-transport",
                     "the audited origin is a local or IP-addressed host, so transport security "
                     "is a deployment concern rather than a site defect")
+    elif snapshot["origin"].startswith("http://") and _landed_on_https(ok_pages):
+        # The crawl watched the redirect happen and the check did not look.
+        #
+        # A bank's report said "The site is served over plain HTTP. No HTTPS
+        # redirect was observed" while the same snapshot recorded
+        # `final_url: https://www.example-bank.test/` for that very fetch. The origin
+        # is where the audit started - which can be http:// because that is
+        # what someone typed, or because a certificate check failed on the
+        # auditing machine - and it is not where the site serves from.
+        result.skip("https-transport",
+                    "the audited origin was entered as http://, and every page fetched "
+                    "redirected to https://, so the site does serve over HTTPS. The scheme "
+                    "the audit started from is not a fact about the site")
     elif snapshot["origin"].startswith("http://"):
         result.add(
             id_hint="site-served-over-http",
             title="The site is served over plain HTTP",
             severity="medium", confidence="high",
-            evidence="The audited origin is {}. No HTTPS redirect was observed.".format(snapshot["origin"]),
+            evidence="The audited origin is {}, and no page fetched redirected to an https:// "
+                     "address.".format(snapshot["origin"]),
             mechanism="A", root_cause="insecure-transport",
             summary="Serve the whole site over HTTPS and redirect HTTP to it.",
             how_to_fix=[

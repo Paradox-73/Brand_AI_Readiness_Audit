@@ -601,7 +601,18 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
     found = {}
 
     # 1. Price, or an explicit statement that pricing is on request.
-    price_page = next((p for p in pages if has_price(p.get("body_text", ""))), None)
+    #
+    # "Does the site sell anything" is asked first, before "is there a currency
+    # symbol anywhere". A global law firm's diversity page mentions a client's
+    # US$60 million bond issuance; read as the firm's own pricing, it satisfied
+    # this check and silently prevented the honest answer - that a law firm
+    # publishes no prices and is not supposed to. A number in a case study is
+    # not what anything costs, and no pattern will ever be able to tell the
+    # difference. What the site is is knowable; what a stray figure means is
+    # not.
+    sells = sells_something(snapshot, pages)
+    price_page = next((p for p in pages
+                       if has_price(p.get("body_text", ""))), None) if sells else None
     on_request = next((p for p in pages
                        if QUOTE_ON_REQUEST_RE.search(p.get("body_text", ""))), None)
     free_page = next((p for p in pages
@@ -612,7 +623,7 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
         found["pricing"] = "{} (states that it costs nothing)".format(free_page["url"])
     elif on_request:
         found["pricing"] = "{} (states pricing is on request)".format(on_request["url"])
-    elif not sells_something(snapshot, pages):
+    elif not sells:
         # "This site never states its pricing" is only a defect if the site has
         # a price. A medical charity was told it, and handed a fix reading
         # "contact sales for a quote".

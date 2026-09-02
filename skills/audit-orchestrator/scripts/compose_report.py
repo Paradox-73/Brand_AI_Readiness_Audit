@@ -230,11 +230,18 @@ def state_the_denominator(finding, pages_crawled):
     which is the only version of this that stays fixed.
     """
     evidence = finding.get("evidence") or ""
-    affected = finding.get("affected_pages") or []
-    if not affected or not pages_crawled or _DENOMINATOR_RE.search(evidence):
+    # `affected_pages` is the display list and is capped at five. Counting it
+    # made the sentence meant to fix understated scope understate scope itself:
+    # seven findings across two sites read "Seen on 5 of the 60" when the true
+    # reach was 6, 11, 15, 27, 32 and twice 60. `affected_page_count` is the
+    # number that was not truncated.
+    count = finding.get("affected_page_count")
+    if count is None:
+        count = len(finding.get("affected_pages") or [])
+    if not count or not pages_crawled or _DENOMINATOR_RE.search(evidence):
         return evidence
     return "{} Seen on {} of the {} pages this crawl read.".format(
-        evidence.rstrip(), len(affected), pages_crawled)
+        evidence.rstrip(), count, pages_crawled)
 
 
 # Values a snippet may contain without the site having to show them: the
@@ -250,6 +257,18 @@ _SCHEMA_VOCABULARY = frozenset({
 })
 _SNIPPET_VALUE_RE = re.compile(r'"([^"\\]{2,120})"\s*:\s*"([^"\\]{1,200})"')
 
+# Fields whose value is a claim about the world, checked however short it is.
+# A price, a postcode or a phone number is exactly the kind of value that is
+# both short and damaging to get wrong.
+_ALWAYS_VERIFY = frozenset({
+    "price", "lowprice", "highprice", "pricecurrency", "postalcode",
+    "telephone", "streetaddress", "addresslocality", "addressregion",
+    "addresscountry", "sku", "gtin", "email", "faxnumber", "vatid",
+    "foundingdate", "datepublished", "datemodified",
+})
+# A shorter value than this occurs somewhere in any site's text by accident.
+_MIN_MEANINGFUL_VALUE = 4
+
 
 def observed_values(snapshot):
     """Everything this crawl actually saw, as one lowercase haystack."""
@@ -257,13 +276,30 @@ def observed_values(snapshot):
     brand = snapshot.get("brand") or {}
     parts.extend(str(v) for v in (brand.get("name"), brand.get("host")) if v)
     for page in snapshot.get("pages") or []:
-        for key in ("url", "final_url", "title", "text", "body_text", "meta_description"):
+        for key in ("url", "final_url", "title", "text", "body_text", "meta_description",
+                    "canonical"):
             value = page.get(key)
             if isinstance(value, str):
                 parts.append(value)
         for value in (page.get("og") or {}).values():
             if isinstance(value, str):
                 parts.append(value)
+        # A telephone number the site publishes as `tel:+442072323010` never
+        # appears in the visible text in that form, so the guard called a real,
+        # correct number a guess and replaced it with a placeholder - which is
+        # the same defect as inventing one, pointing the other way. Anything
+        # the extractor captured is something the site showed.
+        facts = page.get("contact_facts") or {}
+        for key in ("declared_phones", "phones", "emails"):
+            parts.extend(str(v) for v in (facts.get(key) or []))
+        for key in ("street_hint", "postcode_hint"):
+            if facts.get(key):
+                parts.append(str(facts[key]))
+        for link in (page.get("links", {}).get("external") or []):
+            if isinstance(link, dict) and link.get("url"):
+                parts.append(str(link["url"]))
+        for value in (page.get("social_profiles") or {}).values():
+            parts.append(str(value))
         for node in page.get("jsonld") or []:
             parts.append(_json_text(node))
     return re.sub(r"\s+", " ", " ".join(parts)).lower()
@@ -311,12 +347,56 @@ def hold_back_invented_values(snippet, haystack):
         low = stripped.lower()
         if low in _SCHEMA_VOCABULARY or low.startswith("@"):
             return match.group(0)
-        if low in haystack or low.rstrip("/") in haystack:
+        # Substring matching is how a fabricated value passes. `"price": "1"`
+        # went into a snippet as fact, with no warning, because the character
+        # "1" occurs in every page of every site - inside a year, a phone
+        # number, an address. That is the exact failure this function exists to
+        # stop, so the fields that carry a claim about the world have to match
+        # as a whole token, not as a fragment of a longer one.
+        if key.lower() in _ALWAYS_VERIFY:
+            if re.search(r"(?<![\w.]){}(?![\w])".format(re.escape(low)), haystack):
+                return match.group(0)
+        elif low in haystack or low.rstrip("/") in haystack:
             return match.group(0)
         invented.append("{}={!r}".format(key, truncate(stripped, 40)))
         return '"{}": "<{} - not found on the site, fill this in>"'.format(key, key)
 
     return _SNIPPET_VALUE_RE.sub(replace, snippet), invented
+
+
+def price_one_observation_once(findings, snapshot):
+    """One blocked request is one problem, however many checks noticed it.
+
+    A bank's homepage refused the crawler once. The report carried two
+    critical findings about that single fetch - one from the challenge-page
+    check, one from the user-agent comparison - each with its own "do first"
+    and its own several-days estimate, and a summary line reading "2 critical
+    problems". A site whose homepage is blocked has one problem.
+
+    The rule is general and does not name any check: when the crawl read fewer
+    pages than it takes to observe anything twice, the access findings are all
+    describing the same event, so the first stands as written and the rest are
+    folded into it as corroboration.
+    """
+    readable = len([p for p in (snapshot.get("pages") or [])
+                    if p.get("status") == 200 and not p.get("skipped")])
+    if readable > 1:
+        return findings
+
+    access = [f for f in findings if f.get("mechanism") == "A"]
+    if len(access) < 2:
+        return findings
+
+    primary, rest = access[0], access[1:]
+    primary["evidence"] = "{} The same refusal was reached independently by {}.".format(
+        primary["evidence"].rstrip(),
+        ", ".join(sorted({f.get("detected_by") or "another check" for f in rest})))
+    keep = []
+    for finding in findings:
+        if finding in rest:
+            continue
+        keep.append(finding)
+    return keep
 
 
 def score(finding, pages_crawled):
@@ -718,6 +798,7 @@ def compose(snapshot, skill_results, audited_at=None):
 
     findings, duplicates = dedupe(skill_results)
     findings, unverifiable = withhold_absence_claims(findings, snapshot)
+    findings = price_one_observation_once(findings, snapshot)
     for finding in findings:
         value, reach = score(finding, pages_crawled)
         finding["suggested_action"]["priority"] = priority_label(value, finding["severity"])

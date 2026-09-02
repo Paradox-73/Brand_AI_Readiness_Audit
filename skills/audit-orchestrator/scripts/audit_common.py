@@ -210,6 +210,29 @@ PROFILE_GONE_STATUS = frozenset({404, 410})
 REFUSED_STATUS = frozenset({401, 403, 405, 406, 429})
 
 
+def confirm_dead(fetcher, url, head_status):
+    """A page is dead only if the request a reader would make says so.
+
+    HEAD is the polite probe and it is not the authoritative one. The crawl
+    already asks once, per site, whether HEAD means anything here - and that is
+    not enough, because support is per-URL, not per-site. A global law firm
+    answers HEAD honestly on its homepage and 404 to HEAD on individual
+    articles that serve 200 to GET; three of four "internal link targets return
+    an error", reported at high confidence, were live pages of current content.
+    Acting on that finding means redirecting or deleting working URLs, which is
+    the opposite of what the audit is for.
+
+    So a cheap probe may say "alive" on its own and may never say "dead" on its
+    own. Only the negatives cost a second request, and on a healthy site there
+    are almost none.
+
+    Returns the status to judge on: the GET status when there is one, otherwise
+    the HEAD status so the caller still has something to report.
+    """
+    confirmation = fetcher.try_get(url, method="GET")
+    return confirmation.status_code if confirmation is not None else head_status
+
+
 def link_verdict(status, edge_refusal=False):
     """`alive`, `dead` or `unchecked` for a probed URL.
 
