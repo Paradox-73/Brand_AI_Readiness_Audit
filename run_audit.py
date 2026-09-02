@@ -38,6 +38,17 @@ SUB_SKILLS = [
     "engagement-audit",
 ]
 
+# What composing the report costs, held back from the deadline handed to the
+# probe phase.
+#
+# Without it the ceiling was not a ceiling. Measured on a real retailer whose
+# crawl uses its whole 240 s budget: the probes were given every remaining
+# second up to 285, spent them, and compose then ran on top - 289.2 s and
+# 289.7 s on two runs, past a limit whose own comment says it exists so the
+# five-minute promise holds. Compose took about five seconds there; twelve
+# leaves room for a report with far more findings in it.
+COMPOSE_RESERVE_SECONDS = 12.0
+
 # The three that make requests of their own after the crawl. They are the only
 # ones that can overrun the clock, so they are the only ones handed a deadline.
 NETWORK_SUB_SKILLS = frozenset({
@@ -128,7 +139,8 @@ def main(argv=None):
             # finished in 20 seconds leaves the probes plenty; a crawl that
             # used its whole budget leaves them little, and they report the
             # targets they could not reach as unchecked rather than guessing.
-            left = max(0.0, hard_limit - (time.monotonic() - started))
+            left = max(0.0, hard_limit - COMPOSE_RESERVE_SECONDS
+                       - (time.monotonic() - started))
             command += ["--time-budget", "{:.1f}".format(left)]
         if args.no_network:
             command.append("--no-network")

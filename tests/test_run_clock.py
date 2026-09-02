@@ -21,6 +21,7 @@ These tests hold two separate claims:
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import sys
 import time
@@ -72,6 +73,27 @@ def test_a_time_budget_becomes_a_deadline(skill):
     assert 0 < soon - time.monotonic() <= 5.0
     assert module._deadline(-10.0) <= time.monotonic(), (
         "a budget already spent must not read as time remaining")
+
+
+def test_composing_the_report_is_reserved_for_before_the_ceiling():
+    """The ceiling was not a ceiling: compose ran on top of it.
+
+    The probe phase was handed every second up to the limit and used them,
+    then the report was composed afterwards - two real runs finished at 289.2
+    and 289.7 seconds against a 285-second design target that exists so the
+    five-minute promise holds.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "run_audit_reserve", os.path.join(ROOT, "run_audit.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.COMPOSE_RESERVE_SECONDS > 0
+    assert RUN_WALL_CLOCK_LIMIT - module.COMPOSE_RESERVE_SECONDS > WALL_CLOCK_BUDGET, (
+        "the reserve must not eat into the crawl's own budget")
+    source = io.open(os.path.join(ROOT, "run_audit.py"), encoding="utf-8").read()
+    assert "hard_limit - COMPOSE_RESERVE_SECONDS" in source, (
+        "the reserve has to be subtracted from what the probes are given")
 
 
 def test_only_the_three_that_make_requests_are_given_a_deadline():
