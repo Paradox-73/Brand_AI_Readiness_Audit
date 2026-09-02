@@ -1012,7 +1012,11 @@ _SHARE_URL_RE = re.compile(
 _PROFILE_PATH_RULES = {
     "LinkedIn": re.compile(r"^https?://(?:[\w-]+\.)?linkedin\.com/(?:company|school|showcase)/[\w.-]+/?$", re.I),
     "GitHub": re.compile(r"^https?://(?:www\.)?github\.com/(?:orgs/)?[A-Za-z0-9][\w.-]*/?$", re.I),
-    "X": re.compile(r"^https?://(?:www\.)?(?:twitter|x)\.com/[A-Za-z0-9_]{1,15}/?$", re.I),
+    # No length cap. Fifteen characters is X's own limit for new handles, and
+    # anchoring on it rejected a perfectly ordinary-looking profile link for
+    # being 18 characters long. What separates a profile from a post is the
+    # single path segment, not how long the handle is.
+    "X": re.compile(r"^https?://(?:www\.)?(?:twitter|x)\.com/[A-Za-z0-9_]{1,40}/?$", re.I),
     "YouTube": re.compile(r"^https?://(?:www\.)?youtube\.com/(?:@[\w.-]+|c/[\w.-]+|channel/[\w-]+|user/[\w.-]+)/?$", re.I),
     "Facebook": re.compile(r"^https?://(?:[\w-]+\.)?facebook\.com/[\w.-]+/?$", re.I),
     "Instagram": re.compile(r"^https?://(?:www\.)?instagram\.com/[\w.-]+/?$", re.I),
@@ -1106,6 +1110,20 @@ def _interstitial(soup):
         # design, which is the whole point of it. Named by its own class, and
         # not hidden, it counts.
         elif any(hint in identity for hint in COOKIE_BANNER_HINTS + MODAL_HINTS):
+            blocking = True
+        # An overlay is the backdrop that covers the page behind it, which is
+        # exactly the claim this finding makes. A dialog that is not hidden by
+        # any markup signal and whose own class calls itself an overlay is
+        # showing.
+        #
+        # This is narrower than the rule that caused the false positives above:
+        # those were `aria-modal` dialogs with ordinary component-library class
+        # names, and a library ships its closed dialog hidden. It is also the
+        # only thing that detects the plainest shape there is, `class="modal-
+        # overlay" role="dialog"`, which the mutation suite has had a case for
+        # and which nothing was catching - the check was listed, documented and
+        # blind to its own headline example.
+        elif any("overlay" in token for token in tokens):
             blocking = True
     return {
         "cookie_banner_hints": cookie[:5],

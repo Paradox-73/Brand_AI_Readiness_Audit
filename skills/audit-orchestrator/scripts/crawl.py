@@ -780,6 +780,27 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
             if landed in fetched_final:
                 skipped.append({"url": url, "reason": "redirects to an already-crawled page"})
                 continue
+            # A page that names an already-crawled page as its canonical is
+            # that page. A retailer's cookie-preferences links produced
+            # `/?ketch_show=preferences` and a second variant of it, both
+            # byte-identical to the homepage and both self-canonicalling back
+            # to it; the report counted three pages sharing a title, spent 5%
+            # of a sixty-page budget on one page, and inflated the denominator
+            # of every site-wide share. Only an already-fetched target counts,
+            # so a site that mass-declares a canonical nobody has read still
+            # gets every page crawled and the canonical check still fires.
+            # `normalise_url("", origin)` returns the origin, so an empty
+            # canonical has to be rejected before it is resolved - otherwise
+            # every page that declares none reads as a duplicate of the
+            # homepage, and a five-page fixture crawls one page.
+            declared_canonical = (record.get("canonical") or "").strip()
+            canonical = normalise_url(declared_canonical, origin) if declared_canonical else ""
+            if canonical and dedup_key(canonical) != dedup_key(landed) \
+                    and canonical in fetched_final:
+                skipped.append({"url": url,
+                                "reason": "names {} as its canonical, already "
+                                          "crawled".format(canonical)})
+                continue
             fetched_final.add(landed)
             # Whatever the root landed on is the homepage. A site whose `/`
             # redirects to `/en/`, or answers with a meta refresh to

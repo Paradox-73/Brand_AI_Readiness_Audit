@@ -53,9 +53,9 @@ if _SHARED is None:
 sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
-    example_urls, has_price, language_of, load_snapshot, name_forms,
-    pages_of, pct, plural, prose_skip_reason, sample, sells_something,
-    sentences, SkillResult, truncate, word_count
+    example_urls, has_price, language_of, load_snapshot, looks_like_soft_404,
+    name_forms, pages_of, pct, plural, prose_skip_reason, sample,
+    sells_something, sentences, SkillResult, truncate, word_count
 )
 
 SKILL = "fact-extractability-audit"
@@ -72,6 +72,14 @@ SLOGAN_MIN_SECTIONS = 5         # below 5 headings the share is one bad heading,
 LONG_SENTENCE_SHARE = 0.4       # 25% fired on 76% of real sites; technical prose runs long,
                                 # and only a page where most sentences are unliftable is a defect
 
+# How much of a site has to be readable before "the site never states X" is a
+# claim worth making. Half: below that the sample is smaller than the part it
+# is describing, and the missing half is exactly where an about page or a
+# contact page would be. Measured against the two blocked sites that produced
+# the false findings - 4 of 60 and 2 of 60 readable - and against every
+# unblocked site in the same rounds, none of which fell below 0.9.
+CORE_FACTS_MIN_COVERAGE = 0.5
+
 # Page types where a visitor arrives with a specific question, so the first
 # paragraph of each section is expected to answer it.
 ANSWER_FIRST_TYPES = ("pricing", "faq", "product", "service", "location", "comparison")
@@ -87,19 +95,17 @@ CONCRETE_VALUE_RE = re.compile(
     re.I,
 )
 
-# Ways of answering "what does it cost" other than with a number. Both are real
-# answers a machine can quote; only silence is a defect. The second exists
+# Two ways of answering "what does it cost" other than with a number. Both are
+# real answers a machine can quote; only silence is a defect. The second exists
 # because the check asked a free open-source project for its pricing, and "free
 # and open source" is a complete answer to the question.
 #
-# Two different answers to "what does it cost", reported as one.
-#
-# A free software project's report said its homepage "states pricing is on
-# request" - a sentence that appears nowhere on it, produced by describing a
-# match on "free open-source" with the wording written for "talk to sales". A
-# report whose whole subject is unverifiable claims about a brand should not
-# make one, so the two are matched separately and each described in its own
-# words.
+# They used to share one pattern, and one wording. A free software project's
+# report then said its homepage "states pricing is on request" - a sentence
+# that appears nowhere on it, produced by describing a match on "free
+# open-source" with the words written for "talk to sales". A report whose whole
+# subject is unverifiable claims about a brand should not make one, so the two
+# are matched separately and each described in its own words.
 QUOTE_ON_REQUEST_RE = re.compile(
     r"\b(?:contact (?:us )?for (?:a )?(?:price|pricing|quote)"
     r"|request a quote|custom(?:ised|ized)? pricing|pricing on (?:request|application)"
@@ -160,7 +166,7 @@ def run(snapshot):
         for name in ("entity-definition", "answer-first-paragraphs", "long-sentences"):
             result.skip(name, reason)
 
-    _check_heading_hierarchy(result, pages)
+    _check_heading_hierarchy(result, pages_of(snapshot))
     # Every page the crawl read, not only the ones the classifier recognised.
     #
     # This check asks "does the site state its price / contact / location
@@ -328,7 +334,19 @@ def _check_entity_definition(result, snapshot, pages, brand_name, brand=None):
 
 
 def _check_heading_hierarchy(result, pages):
+    """Every page a machine can fetch, not only the content-typed ones.
+
+    An `<h1>` is expected on any page. Read across content types only, this
+    reported "3 page(s) have no H1" on a site whose own crawl data showed 15
+    without one - release notes, catalogue pages and an archive index, all
+    typed `other` and all silently outside the sample. Someone fixing the three
+    named would have left twelve behind.
+
+    A page whose own title says it is missing is left out: an error page has no
+    heading because there is nothing to head.
+    """
     result.check("heading-hierarchy")
+    pages = [p for p in pages if not looks_like_soft_404(p)]
     no_h1 = [p for p in pages if len(p.get("headings", {}).get("h1") or []) == 0]
     # Multiple H1s are valid HTML5 sectioning, and skipped heading levels are
     # near-universal on real sites. Neither stops a machine reading the page.
@@ -344,7 +362,8 @@ def _check_heading_hierarchy(result, pages):
         problems = []
         affected = set()
         if no_h1:
-            problems.append("{} page(s) have no H1".format(len(no_h1)))
+            problems.append("{} of {} crawled page(s) have no H1".format(
+                len(no_h1), len(pages)))
             affected.update(p["url"] for p in no_h1)
         if many_h1:
             problems.append("{} page(s) have more than one H1".format(len(many_h1)))
@@ -549,8 +568,30 @@ def _first_sentence(text):
 
 
 def _check_core_facts(result, snapshot, pages, brand_name):
-    """The five facts a buyer asks an assistant for, checked one at a time."""
+    """The five facts someone asks an assistant for, checked one at a time.
+
+    "This site never states X" is a claim about the site, and it is only worth
+    making if most of the site was read. On two blocked sites it was made from
+    four pages of sixty and two of sixty: a charity was told it never states
+    its founding facts while `/who-we-are/our-history` - listed in the same
+    report's own crawl table, marked 403 - opens "founded in 1971 in France",
+    and a museum was told it never states a contact method while `/contacts`
+    sat in the same table under the same block.
+
+    That is not a content problem the owner can fix by writing anything. The
+    report already carries the finding that explains it, and repeating it as
+    four content defects charges them twice for one cause.
+    """
     result.check("core-facts-present")
+    attempted = len(snapshot.get("pages") or [])
+    if attempted and len(pages) < attempted * CORE_FACTS_MIN_COVERAGE:
+        result.skip("core-facts-present",
+                    "only {} of the {} URLs the crawl reached could be read - the rest were "
+                    "refused or challenged - so whether the site states these facts could not "
+                    "be determined. What it publishes on the pages this crawler was not "
+                    "allowed to see is unknown, and the access finding above is the one to "
+                    "act on".format(len(pages), attempted))
+        return
     by_type = {}
     for page in pages:
         by_type.setdefault(page["page_type"], []).append(page)

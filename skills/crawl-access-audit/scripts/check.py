@@ -877,6 +877,7 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
 
     noindexed = []
     soft_404s = []
+    duplicates = []
     for page in ok_pages:
         if page.get("page_type") not in CONTENT_TYPES:
             continue
@@ -889,6 +890,17 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
         # into the index.
         if looks_like_soft_404(page):
             soft_404s.append(page)
+            continue
+        # A filtered or sorted view of a listing carries `noindex` and a
+        # canonical pointing at the listing itself. That is the textbook way to
+        # keep a duplicate out of an index, and it was reported as a
+        # high-severity defect in a retailer's top three, with the fix "remove
+        # `noindex` where the page should be public" - which would index the
+        # duplicate the site is deliberately hiding.
+        canonical = (page.get("canonical") or "").strip()
+        if canonical and canonical.rstrip("/") != (page.get("url") or "").rstrip("/") \
+                and canonical.rstrip("/") != (page.get("final_url") or "").rstrip("/"):
+            duplicates.append(page)
             continue
         noindexed.append(page)
     if soft_404s:
@@ -917,6 +929,12 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
         )
     else:
         detail = "no crawled content page carries a noindex directive"
+        if duplicates:
+            detail = ("the content page(s) carrying noindex ({}) each name a different page as "
+                      "their canonical, so they are filtered or sorted duplicates the site is "
+                      "deliberately keeping out of an index - which is correct, and is not "
+                      "reported as a defect".format(
+                          ", ".join(example_urls([p["url"] for p in duplicates]))))
         if soft_404s:
             detail = ("the only content page(s) carrying noindex are ones whose own title "
                       "says the page is missing ({}), which is the correct thing for a "

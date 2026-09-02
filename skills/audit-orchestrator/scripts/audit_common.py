@@ -1224,6 +1224,16 @@ def pages_of(snapshot, types=None, content_only=False, ok_only=True,
     for page in snapshot.get("pages", []):
         if ok_only and page.get("status") != 200:
             continue
+        # A record with `skipped` set is a URL we deliberately did not read:
+        # a redirect off this origin, or a non-HTML response. It answers 200
+        # and carries no title, no `lang` and no text, so every hygiene check
+        # counted it as a page missing all three. A retailer's `/country/ca`
+        # redirects to a separate national site, and the report told them that
+        # page had no title and declared no language; both are present on the
+        # page a visitor actually lands on, which is on a host this audit is
+        # not auditing.
+        if page.get("skipped"):
+            continue
         if not include_challenged and page.get("challenge"):
             continue
         if content_only and page.get("page_type") not in CONTENT_TYPES:
