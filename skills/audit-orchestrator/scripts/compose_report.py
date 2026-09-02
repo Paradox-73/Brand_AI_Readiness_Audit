@@ -127,6 +127,198 @@ def dedupe(results):
     return [merged[k] for k in order], duplicates
 
 
+# Words that make a finding a claim about something not being there.
+#
+# The single largest class of wrong finding across twenty-six audited sites was
+# this one shape: the crawler was not allowed to look, and the report said the
+# thing was not there. It appeared as "No XML sitemap is available" when the
+# sitemap returned 429; as "no rules to evaluate, which means nothing is
+# disallowed" about a robots.txt that returned 403 and contains a crawl delay;
+# as "the site never states its founding facts" drawn from four pages of sixty
+# while the page that states them sat in the same report's crawl table marked
+# 403; as "no product detail pages were detected" about a retailer whose
+# product pages were blocked. Four different skills, four separate fixes, and
+# the next blocked site would have found a fifth.
+#
+# So it is caught once, here, where the whole report and the whole crawl are
+# both in view - which means it also covers every check written after this one.
+_ABSENCE_RE = re.compile(
+    r"\b(no|not|never|none|missing|without|absent|lacks?|zero)\b", re.I)
+
+# Below this share of readable pages, an absence claim is a claim about the
+# crawler's reception rather than about the site.
+#
+# Half. Above it the sample is most of the site and silence means something;
+# below it the unread half is exactly where an about page, a contact page or a
+# product catalogue would be. Measured across the sites in these rounds:
+# unblocked crawls sit at 0.93 to 1.00 readable, and the blocked ones that
+# produced the false findings sit at 0.00, 0.03 and 0.07. Nothing observed
+# falls between 0.07 and 0.93.
+READABLE_SHARE_FOR_ABSENCE = 0.5
+
+
+def claims_absence(finding, brand_name=""):
+    """Does this finding assert that something is not on the site?
+
+    The brand's own name is not part of the claim, and reading it as one is a
+    live trap: a medical charity is called "Doctors Without Borders", so every
+    finding naming it contained the word "without" and the whole report was
+    held back as unverifiable. Names arrive quoted in these titles, so the
+    quoted spans come out before the sentence is read, and the brand name comes
+    out whether it is quoted or not.
+    """
+    title = re.sub(r'"[^"]*"', " ", finding.get("title", ""))
+    if brand_name:
+        title = re.sub(re.escape(brand_name), " ", title, flags=re.I)
+    return bool(_ABSENCE_RE.search(title))
+
+
+def withhold_absence_claims(findings, snapshot):
+    """Hold back "it is not there" when the crawler was not allowed to look.
+
+    Returns the findings to report and the ones held back. A held-back finding
+    is not deleted: it is shown under its own heading, as a question the audit
+    could not answer and why, which is a different and more useful thing to
+    tell a reader than a defect they do not have.
+    """
+    brand_name = (snapshot.get("brand") or {}).get("name") or ""
+    pages = snapshot.get("pages") or []
+    attempted = len(pages)
+    readable = len([p for p in pages
+                    if p.get("status") == 200 and not p.get("skipped")
+                    and not p.get("challenge")])
+    if not attempted or readable >= attempted * READABLE_SHARE_FOR_ABSENCE:
+        return findings, []
+
+    keep, held = [], []
+    for finding in findings:
+        # The access findings are the ones explaining the block. They are the
+        # only thing the reader can act on, and several of them are phrased as
+        # absences themselves ("the homepage does not return HTTP 200").
+        if finding.get("mechanism") == "A" or not claims_absence(finding, brand_name):
+            keep.append(finding)
+            continue
+        held.append({
+            "title": finding.get("title"),
+            "detected_by": finding.get("detected_by"),
+            "root_cause": finding.get("root_cause"),
+            "reason": ("only {} of the {} URLs the crawl reached could be read, so this is a "
+                       "fact about what this crawler was shown rather than about the site. It "
+                       "is held back rather than reported as a defect".format(
+                           readable, attempted)),
+        })
+    return keep, held
+
+
+# A finding's evidence already states its denominator when it contains one of
+# these shapes: "3 of 60", "12/60", "48.0%".
+_DENOMINATOR_RE = re.compile(r"\b\d+\s*(?:of|/)\s*\d+\b|\d+(?:\.\d+)?%")
+
+
+def state_the_denominator(finding, pages_crawled):
+    """Append "on N of the M pages crawled" when the evidence names no scale.
+
+    The second-largest class of wrong finding was a real observation sized
+    wrongly by the reader, because the number that would have sized it was
+    missing. "3 page(s) have no H1" on a site where fifteen did; "2 pages do
+    not declare a language" where fifty-seven did not; "the site never states
+    its pricing" from four pages of sixty. In each case the count was of what
+    the check happened to look at, and nothing said so.
+
+    Fixing them one at a time fixed three checks. Stating the scale of every
+    finding, here, fixes the shape - including for checks not yet written,
+    which is the only version of this that stays fixed.
+    """
+    evidence = finding.get("evidence") or ""
+    affected = finding.get("affected_pages") or []
+    if not affected or not pages_crawled or _DENOMINATOR_RE.search(evidence):
+        return evidence
+    return "{} Seen on {} of the {} pages this crawl read.".format(
+        evidence.rstrip(), len(affected), pages_crawled)
+
+
+# Values a snippet may contain without the site having to show them: the
+# vocabulary of the format itself, and the shape of a placeholder.
+_SCHEMA_VOCABULARY = frozenset({
+    "https://schema.org", "http://schema.org", "organization", "localbusiness",
+    "postaladdress", "product", "productgroup", "offer", "aggregateoffer",
+    "article", "blogposting", "newsarticle", "faqpage", "question", "answer",
+    "breadcrumblist", "listitem", "website", "searchaction", "entrypoint",
+    "imageobject", "person", "https://schema.org/instock",
+    "https://schema.org/outofstock", "instock", "outofstock", "gbp", "usd",
+    "eur", "true", "false",
+})
+_SNIPPET_VALUE_RE = re.compile(r'"([^"\\]{2,120})"\s*:\s*"([^"\\]{1,200})"')
+
+
+def observed_values(snapshot):
+    """Everything this crawl actually saw, as one lowercase haystack."""
+    parts = [str(snapshot.get("origin") or ""), str(snapshot.get("site") or "")]
+    brand = snapshot.get("brand") or {}
+    parts.extend(str(v) for v in (brand.get("name"), brand.get("host")) if v)
+    for page in snapshot.get("pages") or []:
+        for key in ("url", "final_url", "title", "text", "body_text", "meta_description"):
+            value = page.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+        for value in (page.get("og") or {}).values():
+            if isinstance(value, str):
+                parts.append(value)
+        for node in page.get("jsonld") or []:
+            parts.append(_json_text(node))
+    return re.sub(r"\s+", " ", " ".join(parts)).lower()
+
+
+def _json_text(node):
+    if isinstance(node, dict):
+        return " ".join(_json_text(v) for v in node.values())
+    if isinstance(node, list):
+        return " ".join(_json_text(v) for v in node)
+    return str(node)
+
+
+def hold_back_invented_values(snippet, haystack):
+    """Replace any value in a paste-ready snippet the site never showed.
+
+    This is the class of defect that does real damage, because a snippet is the
+    part of a report a reader copies rather than reads. What reached real
+    reports: a streetAddress of "1 million row" taken from a sentence about
+    database rows; a postal code of "00005" taken from the price
+    "$0.00005 / event"; another taken from a cosmetic ingredient's colour-index
+    code; a $90 price on a $10 product; `sameAs` claiming a co-founder's
+    personal account and an encyclopedia article about ACID transactions; a
+    shop's own name spelt without its apostrophe.
+
+    Each was fixed at its source, and each source was a different function. The
+    property they violate is one property: a snippet may only contain what the
+    audit observed. Enforced here, once, over every snippet any check produces
+    now or later - so the next extractor that guesses wrong produces a
+    placeholder and a note, not a fact the owner publishes.
+    """
+    if not snippet:
+        return snippet, []
+
+    invented = []
+
+    def replace(match):
+        key, value = match.group(1), match.group(2)
+        stripped = value.strip()
+        if not stripped:
+            return match.group(0)
+        # A placeholder is already honest about being one.
+        if "<" in stripped and ">" in stripped:
+            return match.group(0)
+        low = stripped.lower()
+        if low in _SCHEMA_VOCABULARY or low.startswith("@"):
+            return match.group(0)
+        if low in haystack or low.rstrip("/") in haystack:
+            return match.group(0)
+        invented.append("{}={!r}".format(key, truncate(stripped, 40)))
+        return '"{}": "<{} - not found on the site, fill this in>"'.format(key, key)
+
+    return _SNIPPET_VALUE_RE.sub(replace, snippet), invented
+
+
 def score(finding, pages_crawled):
     """priority = severity weight x reach / effort.
 
@@ -525,11 +717,25 @@ def compose(snapshot, skill_results, audited_at=None):
         extra_requests += result.get("extra_requests_made", 0)
 
     findings, duplicates = dedupe(skill_results)
+    findings, unverifiable = withhold_absence_claims(findings, snapshot)
     for finding in findings:
         value, reach = score(finding, pages_crawled)
         finding["suggested_action"]["priority"] = priority_label(value, finding["severity"])
         finding["suggested_action"]["priority_score"] = value
         finding["reach"] = reach
+    haystack = observed_values(snapshot)
+    for finding in findings:
+        finding["evidence"] = state_the_denominator(finding, pages_crawled)
+        action = finding["suggested_action"]
+        if action.get("snippet"):
+            action["snippet"], invented = hold_back_invented_values(
+                action["snippet"], haystack)
+            if invented:
+                action["snippet_warning"] = (
+                    "{} value(s) below could not be found anywhere on this site and were "
+                    "replaced with a placeholder ({}). Something guessed them; fill them in "
+                    "yourself rather than publishing a guess.".format(
+                        len(invented), ", ".join(sorted(invented)[:4])))
     findings = assign_ids(findings)
 
     # Severity first, then the priority score inside each band.
@@ -592,6 +798,10 @@ def compose(snapshot, skill_results, audited_at=None):
         "checks_passed": _checks_passed(checks_run, not_applicable, fired_checks),
         "not_applicable": sorted(not_applicable, key=lambda n: (n.get("skill", ""), n["check"])),
         "merged_duplicates": duplicates,
+        # Questions the audit could not answer, kept separate from defects it
+        # found. A blocked crawl used to turn every one of these into a
+        # confident claim about the site.
+        "unverifiable": unverifiable,
         "auditor": {"name": "brand-ai-readiness-audit", "version": VERSION},
     }
     return report
@@ -632,6 +842,8 @@ def _public_finding(finding):
     }
     if "snippet" in action:
         out["suggested_action"]["snippet"] = action["snippet"]
+    if action.get("snippet_warning"):
+        out["suggested_action"]["snippet_warning"] = action["snippet_warning"]
     if finding.get("also_detected_by"):
         out["also_detected_by"] = finding["also_detected_by"]
     return out
@@ -958,6 +1170,18 @@ def render_markdown(report):
             add("- **{}** ({})".format(item["check"], item.get("skill", "")))
         add("")
 
+    if report.get("unverifiable"):
+        add("### Questions this audit could not answer")
+        add("")
+        add("This crawler was shown very little of the site, so the checks below have nothing "
+            "to report either way. They are listed here rather than as defects, because "
+            "\"we could not see it\" and \"it is not there\" are different statements and only "
+            "one of them is something to fix.")
+        add("")
+        for item in report["unverifiable"]:
+            add("- **{}** - {}.".format(item["title"], item["reason"]))
+        add("")
+
     if report["merged_duplicates"]:
         add("### Observations merged")
         add("")
@@ -1001,6 +1225,9 @@ def _render_finding(finding):
         out.append("- {}".format(step))
     if action.get("snippet"):
         out.append("")
+        if action.get("snippet_warning"):
+            out.append("> **{}**".format(action["snippet_warning"]))
+            out.append("")
         # The snippet is pre-filled with values found on the site, and on a
         # staging or local origin that means a non-public URL inside code
         # labelled paste-ready. Somebody pastes it into a live template and

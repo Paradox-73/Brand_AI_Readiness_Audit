@@ -853,6 +853,7 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
             notes.append("homepage unreachable after two attempts: {}".format(retry.get("error")))
 
     _mark_edge_refusals(pages, notes)
+    _strip_sitewide_boilerplate(pages, notes)
     head_supported = _probe_head_support(fetcher, home_url, home_record, notes)
 
     oversized = [p["url"] for p in pages if p.get("truncated")]
@@ -921,6 +922,95 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
 # a few bytes, identically, many times over.
 EDGE_REFUSAL_MAX_BYTES = 400
 EDGE_REFUSAL_MIN_REPEATS = 3
+
+
+# Text that appears on this share of the crawled pages is the site's furniture,
+# whatever element it happens to live in.
+#
+# Every selector-based attempt at this failed the same way: the list is a list
+# of the shapes we have already been burned by, and the next site uses a shape
+# nobody wrote down. Stripping `header`, `nav`, `footer` and `aside` missed a
+# cosmetics retailer's `<div class="promo-bar__text">`, so four locales' worth
+# of free-shipping thresholds were read as the prices on a product page and the
+# page's own correct price was reported as contradicting them. Adding
+# announcement-bar classes to the list fixed that site and would not have fixed
+# the next one.
+#
+# Repetition is the property that actually defines chrome, and it does not
+# depend on knowing any site's markup conventions. A paragraph on 90% of a
+# site's pages is not what any of those pages is about.
+#
+# 0.5 with a floor of 4 pages: a two-column footer, a cookie line and a
+# promotional banner all sit at or near 1.0, while the most-repeated genuine
+# content block measured across the crawls behind these numbers - a shipping
+# blurb repeated on one retailer's product pages - sat at 0.34. Nothing
+# measured falls between. The floor exists because on a three-page crawl every
+# block is "on most pages" and the rule would eat the site.
+BOILERPLATE_PAGE_SHARE = 0.5
+BOILERPLATE_MIN_PAGES = 4
+# Below this a repeated string is a label, not a passage: "Read more", "Home",
+# a price. Stripping those would empty the tables that legitimately repeat
+# short cells, and they are too short to be quoted as a fact anyway.
+BOILERPLATE_MIN_CHARS = 40
+
+
+def _strip_sitewide_boilerplate(pages, notes):
+    """Remove text that repeats across the site from each page's own content.
+
+    Runs after the crawl because it needs every page to see the repetition.
+    Rewrites `paragraphs`, `sections` and `body_text` in place; `text` keeps
+    the whole page, so nothing is lost, only reattributed.
+    """
+    readable = [p for p in pages if p.get("status") == 200 and not p.get("skipped")]
+    if len(readable) < BOILERPLATE_MIN_PAGES:
+        return
+
+    counts = defaultdict(set)
+    for page in readable:
+        for block in _content_blocks(page):
+            counts[block].add(page["url"])
+
+    threshold = max(BOILERPLATE_MIN_PAGES, int(len(readable) * BOILERPLATE_PAGE_SHARE))
+    boilerplate = {block for block, urls in counts.items() if len(urls) >= threshold}
+    if not boilerplate:
+        return
+
+    for page in readable:
+        page["paragraphs"] = [p for p in (page.get("paragraphs") or [])
+                              if _block_key(p) not in boilerplate]
+        page["sections"] = [s for s in (page.get("sections") or [])
+                            if _block_key(s.get("first_paragraph")) not in boilerplate]
+        body = page.get("body_text") or ""
+        removed = [b for b in (page.get("_raw_blocks") or []) if _block_key(b) in boilerplate]
+        for raw in removed:
+            body = body.replace(raw, " ")
+        page.pop("_raw_blocks", None)
+        body = re.sub(r"\s+", " ", body).strip()
+        page["body_text"] = body
+        page["body_text_len"] = len(body)
+
+    notes.append(
+        "{} block(s) of text appear on at least {} of the {} readable pages and were treated "
+        "as site furniture rather than as any one page's content".format(
+            len(boilerplate), threshold, len(readable)))
+
+
+def _content_blocks(page):
+    """The text blocks on this page that repetition could mark as furniture."""
+    raw = []
+    for paragraph in page.get("paragraphs") or []:
+        raw.append(paragraph)
+    for section in page.get("sections") or []:
+        if section.get("first_paragraph"):
+            raw.append(section["first_paragraph"])
+    page["_raw_blocks"] = raw
+    return {key for key in (_block_key(value) for value in raw) if key}
+
+
+def _block_key(value):
+    """A repeated block, normalised so spacing and case cannot hide it."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+    return text if len(text) >= BOILERPLATE_MIN_CHARS else ""
 
 
 def _mark_edge_refusals(pages, notes):
