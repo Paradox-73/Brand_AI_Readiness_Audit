@@ -181,9 +181,16 @@ def test_four_or_more_collisions_is_high_severity():
                 if f["root_cause"] == "entity-ambiguity")["severity"] == "high"
 
 
-def test_only_one_lookup_is_made():
+def test_at_most_two_lookups_are_made():
+    """A name search, then one batch lookup for whose site is whose.
+
+    The second exists because the search API cannot say which of the matches
+    is the audited brand's own entry. Without it, a project's own Wikidata
+    item was counted among the entities colliding with its name, and the fix
+    told the brand to go and create the item it already had.
+    """
     _, fetcher = _ambiguity([BRAND, BRAND])
-    assert fetcher.count == 1
+    assert fetcher.count <= 2
 
 
 def test_no_network_means_no_lookup_and_a_stated_reason():

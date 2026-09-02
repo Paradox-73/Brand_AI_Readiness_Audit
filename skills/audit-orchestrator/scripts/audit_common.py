@@ -632,6 +632,49 @@ _QUESTION_HEADING_RE = re.compile(
 )
 
 
+# A page that answers 200 while telling the visitor there is nothing here.
+#
+# These are matched against the <title> and the first heading only, never the
+# body: a help page explaining what a 404 is would otherwise be mistaken for
+# one, and a shop's search results legitimately say "no results found" in the
+# body of a page that is working correctly.
+_SOFT_404_MARKERS = (
+    "page not found", "not found", "404", "no longer available", "nothing to see here",
+    "page doesn't exist", "page does not exist", "page unavailable", "oops",
+    "sorry, we can't find", "we couldn't find that page",
+)
+
+
+def looks_like_soft_404(page):
+    """True for a 200 response whose own title says the page is missing.
+
+    A retailer's `/collections/all` answers 200 with `noindex, nofollow`, the
+    title "Page Not Found" and the body "Uh-Oh, Nothing To See Here!". The
+    audit reported the `noindex` as a high-severity defect and told the
+    developer to remove it, which would have put a broken page into the index -
+    a fix that makes the site worse in exactly the way the finding claims to
+    prevent. `noindex` on a soft-404 is the correct thing for a site to do.
+    """
+    heading = ""
+    headings = page.get("headings") or {}
+    if isinstance(headings, dict):
+        h1s = headings.get("h1") or []
+        heading = h1s[0] if h1s else ""
+    heading = heading or (page.get("h1") or "")
+    haystack = "{} {}".format(page.get("title") or "", heading).lower()
+    return any(marker in haystack for marker in _SOFT_404_MARKERS)
+
+
+def is_question_heading(heading):
+    """True for a heading a visitor would recognise as a question.
+
+    Shared so the classifier and the FAQPage snippet cannot disagree about
+    what a question is - they did, and the snippet was the one marking up
+    policy statements and legal text as question-and-answer pairs.
+    """
+    return bool(_QUESTION_HEADING_RE.match(heading or ""))
+
+
 def detect_page_type(url, html_meta):
     """Classify a page from URL shape, then confirm or override with content.
 
@@ -716,8 +759,15 @@ def detect_page_type(url, html_meta):
             return page_type
 
     # Content-only fallbacks for sites with opaque URLs (e.g. `/page/17`).
-    question_headings = sum(1 for h in h2s if _QUESTION_HEADING_RE.match(h))
-    if question_headings >= 4:
+    #
+    # Four questions is not enough on its own. A contributor style guide with
+    # twenty-four headings, four of them phrased as questions and the rest
+    # policy statements ("Duplication is evil", "Code style"), was classified
+    # as an FAQ page and then handed generated FAQPage markup wrapping those
+    # statements in `Question` nodes. An FAQ page is mostly questions, so the
+    # share has to carry as much weight as the count.
+    question_headings = sum(1 for h in h2s if is_question_heading(h))
+    if question_headings >= 4 and question_headings * 2 >= len(h2s):
         return "faq"
     if _looks_like_product_detail(lower_text, html_meta):
         return "product"
@@ -732,9 +782,22 @@ _SECTION_ROOTS = frozenset({
 
 
 def _is_section_root(path):
-    """True for `/blog` or `/news`, false for `/blog/a-post`."""
+    """True for `/blog` or `/blogs/news`, false for `/blog/a-post`.
+
+    A retailer publishes its index at `/blogs/news`, two segments deep, so the
+    one-segment rule missed it and the index was classified as an article. The
+    report then told the shop its news index was missing Article markup and
+    generated a snippet whose `headline` was "News - <brand>" - the title of a
+    page that is a list of links to other articles. The last segment is the
+    one that names the section; the segments in front of it are the shelf it
+    sits on.
+    """
     parts = [p for p in path.strip("/").split("/") if p]
-    return len(parts) == 1 and parts[0] in _SECTION_ROOTS
+    if not parts or len(parts) > 2:
+        return False
+    if parts[-1] not in _SECTION_ROOTS:
+        return False
+    return len(parts) == 1 or parts[0].rstrip("s") in {p.rstrip("s") for p in _SECTION_ROOTS}
 
 
 def _product_signal_count(lower_text):
@@ -766,7 +829,9 @@ PRODUCT_SIGNAL_MINIMUM = 2
 DISTINCT_PRICE_CEILING = 5
 
 # A site saying "this page is a list" outranks any guess made from its text.
-_LISTING_JSONLD_TYPES = frozenset({"collectionpage", "itemlist", "searchresultspage"})
+# `Blog` is the index; `BlogPosting` is the post on it.
+_LISTING_JSONLD_TYPES = frozenset({"collectionpage", "itemlist", "searchresultspage",
+                                   "blog"})
 
 
 def _looks_like_product_detail(lower_text, html_meta):

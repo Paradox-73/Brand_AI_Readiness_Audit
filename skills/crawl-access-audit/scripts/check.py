@@ -56,8 +56,8 @@ sys.path.insert(0, _SHARED)
 from audit_common import (  # noqa: E402
     CHALLENGE_TEXT_CEILING, CONTENT_TYPES, example_urls,
     explain_fetch_error, Fetcher, FetchError, link_verdict, load_snapshot,
-    pages_of, pct, plural, REFUSED_STATUS, sample, SkillResult, strip_www,
-    USER_AGENT
+    looks_like_soft_404, pages_of, pct, plural, REFUSED_STATUS, sample,
+    SkillResult, strip_www, USER_AGENT
 )
 from robots_parser import (  # noqa: E402
     blocks_entire_site, group_for, is_disallowed, substantive_disallows,
@@ -157,7 +157,16 @@ def run(snapshot, allow_network=True, time_budget=None):
     _check_transport_and_hosts(result, snapshot, ok_pages)
 
     result.check("llms-txt-presence")
-    result.signal("llms_txt_present", bool((snapshot.get("llms_txt") or {}).get("present")))
+    llms_txt = snapshot.get("llms_txt") or {}
+    # Same rule as the sitemap above. This was recorded as "ran and found
+    # nothing wrong" on a site whose llms.txt request came back 429, which
+    # reads to a reporter as a pass on a question that was never answered.
+    if llms_txt.get("status") in REFUSED_STATUS:
+        result.skip("llms-txt-presence",
+                    "the request for /llms.txt was refused by the site's edge (HTTP {}), so "
+                    "whether one is published could not be determined".format(
+                        llms_txt.get("status")))
+    result.signal("llms_txt_present", bool(llms_txt.get("present")))
     result.signal("robots_present", robots.get("status") == 200)
     result.signal("sitemap_present", any(s.get("status") == 200 for s in snapshot.get("sitemaps") or []))
     result.signal("pages_crawled", crawl_info.get("pages_crawled", 0))
@@ -455,6 +464,25 @@ def _check_sitemaps(result, snapshot, fetcher):
     reachable = [s for s in sitemaps if s.get("status") == 200 and not s.get("parse_error")]
     broken = [s for s in sitemaps if s.get("status") == 200 and s.get("parse_error")]
 
+    # A request the edge refused is not an answer about whether the file
+    # exists. A museum's sitemap.xml returned 429 along with everything else on
+    # the site, and the report said "No XML sitemap is available" as settled
+    # fact - in the same document where it correctly hedged the identically
+    # blocked robots.txt with "absence of robots.txt is not a defect". One
+    # blocked request cannot be evidence of absence in one paragraph and
+    # evidence of nothing in another.
+    refused = [s for s in sitemaps if s.get("status") in REFUSED_STATUS]
+    if not reachable and not broken and refused:
+        result.skip("sitemap-present",
+                    "every sitemap request was refused by the site's edge (HTTP {}), so whether "
+                    "a sitemap exists could not be determined. It is reported as unchecked "
+                    "rather than as missing".format(
+                        ", ".join(str(s) for s in sorted({s["status"] for s in refused}))))
+        result.skip("sitemap-parses", "no sitemap could be fetched to parse")
+        result.skip("sitemap-urls-resolve", "no sitemap could be fetched to read URLs from")
+        result.signal("sitemap_checked", False)
+        return
+
     if not reachable and not broken:
         result.add(
             id_hint="sitemap-missing",
@@ -748,7 +776,18 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
 
     fetched = [p for p in pages if p.get("status") is not None]
     bad = [p for p in fetched if p["status"] != 200]
-    if fetched and bad:
+    # A percentage of one page is not a second observation. A museum whose
+    # homepage was blocked produced exactly one fetch, and the report carried
+    # both "The homepage refuses this crawler" (critical) and "100.0% of
+    # crawled pages refuse this crawler" (high) with separate effort estimates
+    # of several days each - one blocked request, priced twice. Below three
+    # fetches the rate says nothing the homepage finding has not already said.
+    if len(fetched) < 3 and bad:
+        result.skip(
+            "non-200-rate",
+            "only {} URL(s) were fetched before the site stopped answering, so a percentage "
+            "would restate the homepage finding rather than add to it".format(len(fetched)))
+    elif fetched and bad:
         rate = pct(len(bad), len(fetched))
         if rate >= 10:
             counts = Counter(p["status"] for p in bad)
@@ -830,12 +869,23 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
         )
 
     noindexed = []
+    soft_404s = []
     for page in ok_pages:
         if page.get("page_type") not in CONTENT_TYPES:
             continue
         directives = "{} {}".format(page.get("meta_robots", ""), page.get("x_robots_tag", "")).lower()
-        if "noindex" in directives:
-            noindexed.append(page)
+        if "noindex" not in directives:
+            continue
+        # `noindex` on a page whose own title says it is missing is the site
+        # doing the right thing. Reported as a defect, the fix - "remove
+        # `noindex` where the page should be public" - would put a broken page
+        # into the index.
+        if looks_like_soft_404(page):
+            soft_404s.append(page)
+            continue
+        noindexed.append(page)
+    if soft_404s:
+        result.signal("noindexed_soft_404s", [p["url"] for p in soft_404s])
     if noindexed:
         result.add(
             id_hint="noindex-on-content-pages",
@@ -859,7 +909,13 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
             affected_pages=[p["url"] for p in noindexed],
         )
     else:
-        result.skip("noindex-on-content-pages", "no crawled content page carries a noindex directive")
+        detail = "no crawled content page carries a noindex directive"
+        if soft_404s:
+            detail = ("the only content page(s) carrying noindex are ones whose own title "
+                      "says the page is missing ({}), which is the correct thing for a "
+                      "site to do and is not reported as a defect".format(
+                          ", ".join(example_urls([p["url"] for p in soft_404s]))))
+        result.skip("noindex-on-content-pages", detail)
 
     _check_canonicals(result, snapshot, ok_pages, fetcher)
     _check_meta_refresh(result, snapshot, ok_pages)

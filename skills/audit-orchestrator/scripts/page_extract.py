@@ -728,6 +728,15 @@ def _video(soup, text, base):
         "embed_count": len(video_embeds),
         "audio_count": len(audios) + len(audio_embeds),
         "autoplay_count": len([v for v in videos if v.has_attr("autoplay")]),
+        # `autoplay muted loop playsinline` is the standard way to ship a
+        # silent background clip - the modern replacement for an animated GIF.
+        # It does not interrupt anyone, and the fix offered for it ("mute it,
+        # or require a click") was already done on every page it fired on.
+        # Counted separately so the check can tell the two apart.
+        "intrusive_autoplay_count": len([
+            v for v in videos
+            if v.has_attr("autoplay") and not (v.has_attr("muted") and v.has_attr("loop"))
+        ]),
         "track_count": len(soup.select("video track, audio track")),
         "transcript_nearby": any(hint in lower for hint in TRANSCRIPT_HINTS),
     }
@@ -873,10 +882,31 @@ def _dates(soup, text, jsonld):
         "visible": visible,
         "copyright_years": sorted(set(copyright_years)),
         "as_of_years": sorted(set(as_of_years)),
-        "has_any": bool(machine or visible),
+        # A date signal has to be a date. `<time datetime="PT0S">` is a video
+        # player's duration and `<time>Remaining time unknown</time>` is its
+        # countdown, and both were counted as the page carrying a publication
+        # date - so a page with no date on it was excluded from the "pages
+        # with no date" list, and the reader who fixed exactly the pages named
+        # would have left that one behind believing it was already done.
+        "has_any": any(_looks_like_a_date(v) for v in list(machine) + list(visible)),
         "jsonld_date_published": _first_jsonld_date(jsonld, "datePublished"),
         "jsonld_date_modified": _first_jsonld_date(jsonld, "dateModified"),
     }
+
+
+# A year, in any of the shapes a date signal is written in. Deliberately loose
+# - freshness-corroboration-audit does the real parsing, and this only has to
+# separate "a date" from "a video duration".
+_DATE_SHAPED_RE = re.compile(
+    r"(?:19|20)\d{2}-\d{1,2}-\d{1,2}"                       # 2026-01-31
+    r"|\d{1,2}[/.]\d{1,2}[/.](?:19|20)\d{2}"                # 31/01/2026
+    r"|\b(?:19|20)\d{2}\b"                                  # a bare year in prose
+)
+
+
+def _looks_like_a_date(value):
+    """True if this could be a date, false for `PT0S` and `--:--`."""
+    return bool(_DATE_SHAPED_RE.search(str(value or "")))
 
 
 def _first_jsonld_date(jsonld, key):

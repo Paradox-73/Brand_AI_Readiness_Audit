@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """freshness-corroboration-audit: is the brand current, agreed-upon and unambiguous? (mechanism D)
 
-Reads snapshot.json, writes findings JSON. Makes at most 4 extra read-only
-requests, all to Wikidata's public search API, to count how many distinct
-entities share the brand name.
+Reads snapshot.json, writes findings JSON. Makes at most 10 extra read-only
+requests: two to Wikidata's public API (a name search, then one lookup asking
+which of the results names this site as its own website) and one HEAD per
+off-site profile link it is able to verify.
 
 `--now` fixes the reference date so a run is reproducible; it defaults to the
 current UTC date.
@@ -21,7 +22,7 @@ import os
 import re
 import sys
 import time
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -60,7 +61,7 @@ sys.path.insert(0, _SHARED)
 from audit_common import (  # noqa: E402
     CONTENT_TYPES, example_urls, Fetcher, FetchError, load_snapshot,
     pages_of, pct, plural, PROFILE_GONE_STATUS, sample, SkillResult,
-    truncate, VERIFIABLE_PROFILE_PLATFORMS
+    strip_www, truncate, VERIFIABLE_PROFILE_PLATFORMS
 )
 
 SKILL = "freshness-corroboration-audit"
@@ -89,8 +90,9 @@ AUTHORITATIVE = ("LinkedIn", "Wikipedia", "Wikidata", "Crunchbase", "GitHub",
 WIKIDATA_API = ("https://www.wikidata.org/w/api.php?action=wbsearchentities"
                 "&search={}&language=en&uselang=en&format=json&limit=10&type=item")
 
-# Four for the Wikidata name search, six for the profile links we are able
-# to verify - one per platform in VERIFIABLE_PROFILE_PLATFORMS.
+# Two for Wikidata - the name search, then one batch lookup of which item
+# claims this host as its official website - and six for the profile links
+# we are able to verify, one per platform in VERIFIABLE_PROFILE_PLATFORMS.
 MAX_EXTRA_REQUESTS = 10
 
 _ISO_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
@@ -662,6 +664,47 @@ def _check_profile_links_resolve(result, profiles, fetcher, allow_network):
     )
 
 
+WIKIDATA_ENTITIES_API = ("https://www.wikidata.org/w/api.php?action=wbgetentities"
+                         "&ids={}&props=claims&format=json")
+
+# Wikidata's property for "official website".
+WIKIDATA_OFFICIAL_SITE = "P856"
+
+
+def _own_wikidata_entity(matches, snapshot, fetcher):
+    """The Wikidata item that IS this site, if one of the matches is.
+
+    One request for every match at once, asking each item which website it
+    says is its own, and comparing that to the host being audited. Wikidata's
+    search API does not return the property, so without this the brand's own
+    entry is indistinguishable from the entities it collides with - and it was
+    counted as one of them.
+    """
+    ids = [m.get("id") for m in matches if m.get("id")][:10]
+    if not ids or fetcher is None:
+        return None
+    response = fetcher.try_get(WIKIDATA_ENTITIES_API.format("|".join(ids)))
+    if response is None:
+        return None
+    try:
+        entities = (response.json() or {}).get("entities") or {}
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+    host = strip_www(urlparse(snapshot.get("origin") or "").netloc.lower())
+    if not host:
+        return None
+    for entity_id in ids:
+        claims = ((entities.get(entity_id) or {}).get("claims") or {})
+        for claim in claims.get(WIKIDATA_OFFICIAL_SITE) or []:
+            value = (((claim.get("mainsnak") or {}).get("datavalue") or {}).get("value"))
+            if not isinstance(value, str):
+                continue
+            if strip_www(urlparse(value).netloc.lower()) == host:
+                return entity_id
+    return None
+
+
 def _check_entity_ambiguity(result, snapshot, pages, brand, profiles, fetcher, allow_network):
     """Does anything else share this name, and does the site say which one it is?"""
     result.check("entity-ambiguity")
@@ -701,6 +744,17 @@ def _check_entity_ambiguity(result, snapshot, pages, brand, profiles, fetcher, a
     matches = [m for m in (payload.get("search") or [])
                if _key(m.get("label")) == brand_key
                or brand_key in {_key(a) for a in (m.get("aliases") or [])}]
+
+    # The site's own entity is not one of the others. Wikidata returned five
+    # items for one project's name and the report said "5 other entities share
+    # the name" - one of the five was the project itself, which is not a
+    # collision but the very disambiguation the finding goes on to recommend
+    # creating. So the brand is told to go and make a thing it already has,
+    # and the count it is alarmed by is one too high.
+    own = _own_wikidata_entity(matches, snapshot, fetcher)
+    if own is not None:
+        matches = [m for m in matches if m.get("id") != own]
+        result.signal("wikidata_own_entity", own)
     result.signal("wikidata_match_count", len(matches))
     result.signal("wikidata_matches",
                   [{"id": m.get("id"), "label": m.get("label"),
@@ -736,12 +790,18 @@ def _check_entity_ambiguity(result, snapshot, pages, brand, profiles, fetcher, a
         id_hint="brand-name-collides-with-other-entities",
         title='{} other entities share the name "{}"'.format(len(matches), brand_name),
         severity="high" if len(matches) >= 4 else "medium", confidence="medium",
-        evidence='Wikidata returns {} item(s) for "{}": {}. The site declares no Wikidata or '
-                 "Wikipedia link{}.".format(
+        # The title counted every match and the evidence listed four, with
+        # nothing saying so, so a reader who counted the examples found the
+        # headline overstated by however many ran past the cut.
+        evidence='Wikidata returns {} item(s) for "{}": {}{}. The site declares no Wikidata or '
+                 "Wikipedia link{}.{}".format(
                      len(matches), brand_name,
                      "; ".join("{} ({})".format(m.get("label"), m.get("description") or "no description")
                                for m in matches[:4]),
-                     " and no alternateName" if not alternate_names else ""),
+                     "; and {} more".format(len(matches) - 4) if len(matches) > 4 else "",
+                     " and no alternateName" if not alternate_names else "",
+                     " The site's own Wikidata item was found and is not counted among these."
+                     if own is not None else ""),
         mechanism="D", root_cause="entity-ambiguity",
         summary="Publish the markers that tell a machine which of these entities you are.",
         how_to_fix=[

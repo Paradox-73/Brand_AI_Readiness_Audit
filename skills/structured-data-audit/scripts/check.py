@@ -53,9 +53,9 @@ if _SHARED is None:
 sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
-    CONTENT_TYPES, DEEP_TYPES, example_urls, find_prices, load_snapshot,
-    name_forms, pages_of, pct, plural, sample, sentences, SkillResult,
-    truncate
+    CONTENT_TYPES, DEEP_TYPES, example_urls, find_prices, is_question_heading,
+    load_snapshot, name_forms, pages_of, pct, plural, sample, sentences,
+    SkillResult, truncate
 )
 
 SKILL = "structured-data-audit"
@@ -177,6 +177,42 @@ def _prop(node, key):
 
 def _missing_props(node, props):
     return [p for p in props if not _prop(node, p)]
+
+
+# schema.org types that mean "somewhere a customer physically goes".
+_VISITABLE_TYPES = {"localbusiness", "store", "restaurant", "hotel", "cafe",
+                    "bakery", "bar", "clothingstore", "groceryStore".lower(),
+                    "healthandbeautybusiness", "medicalclinic", "dentist",
+                    "autorepair", "professionalservice", "foodestablishment"}
+
+
+def _identity_type(snapshot, pages, facts):
+    """Organization, or LocalBusiness when the site is somewhere you can go.
+
+    `LocalBusiness` was chosen whenever a postal address was found anywhere on
+    the site. Almost every organisation publishes an address, for legal
+    reasons, so this handed a paste-ready snippet declaring a global software
+    foundation and an international disaster-relief charity to be local
+    businesses - schema.org's type for a single-location storefront, clinic or
+    restaurant that customers physically visit.
+
+    `Organization` is the safe answer: it is true of every one of them, and
+    `LocalBusiness` is a narrowing claim that has to be earned. Three things
+    earn it, any one of which is the site saying so itself rather than us
+    inferring it from an address in a footer: the site already declares a
+    visitable type somewhere, it publishes opening hours, or the crawl found
+    location pages, which is what a business with premises has.
+    """
+    for page in pages:
+        if {t.lower() for t in page.get("jsonld_types") or []} & _VISITABLE_TYPES:
+            return "LocalBusiness"
+    if facts.get("opening_hours"):
+        return "LocalBusiness"
+    location_pages = [p for p in (snapshot.get("pages") or [])
+                      if p.get("page_type") == "location"]
+    if location_pages:
+        return "LocalBusiness"
+    return "Organization"
 
 
 def _site_logo(snapshot, pages):
@@ -396,15 +432,16 @@ def _org_snippet(snapshot, pages, brand):
 
     And the finding is titled "No Organization **or LocalBusiness** markup" on
     a site whose address, telephone and opening hours the audit has already
-    parsed - then emitted bare Organization every time. A business with a
-    postal address gets LocalBusiness, which is the type those facts belong to.
+    parsed - then emitted bare Organization every time. A business someone
+    visits gets LocalBusiness, which is the type those facts belong to; see
+    `_identity_type` for why an address alone is not enough to say so.
     """
     same_as = _all_same_as(pages)
     facts = _contact_facts_for_snippet(pages)
 
     payload = {
         "@context": "https://schema.org",
-        "@type": "LocalBusiness" if facts.get("has_address") else "Organization",
+        "@type": _identity_type(snapshot, pages, facts),
         "name": brand.get("name") or snapshot["site"],
         "url": snapshot["origin"].rstrip("/") + "/",
     }
@@ -709,22 +746,42 @@ FAQ_SNIPPET_MAX = 20
 
 
 def _faq_snippet(page):
-    """Every question on the page, not the first three.
+    """Every question on the page, and nothing that is not a question.
 
     The instruction printed above this snippet says "listing each question and
     its answer text verbatim". The snippet did not do what its own instruction
-    said: it dropped 40% of a five-question page, with no ellipsis and no note.
+    said. It dropped 40% of a five-question page, with no ellipsis and no note;
+    that was fixed. What it also did was take every section heading on the page
+    and file it as a `Question`, whether or not it was one, and three separate
+    real sites showed what that produces:
+
+      * a contributor style guide whose headings are policy statements
+        ("Duplication is evil", "Code style") became twenty-four `Question`
+        nodes asking nothing;
+      * a shop's help page carries a short FAQ followed by the full privacy
+        policy and terms of service, and the whole legal text was marked up as
+        question-and-answer pairs;
+      * a product page's "Solved community questions" widget supplied a
+        heading that was paired with an unrelated paragraph as its answer.
+
+    All three are the pattern Google's own FAQ guidance names as ineligible,
+    and the finding directly above the snippet warns the reader that a
+    mismatch between markup and page "is treated as spam by several
+    consumers". So only headings that are actually questions go in, and a page
+    with fewer than two of them gets the placeholder rather than a fabrication.
     """
-    sections = (page.get("sections") or [])[:FAQ_SNIPPET_MAX]
+    sections = [s for s in (page.get("sections") or [])
+                if is_question_heading(s.get("heading"))][:FAQ_SNIPPET_MAX]
     entities = []
     for section in sections:
+        answer = (section.get("first_paragraph") or "").strip()
         entities.append({
             "@type": "Question",
             "name": section["heading"],
             "acceptedAnswer": {"@type": "Answer",
-                               "text": section["first_paragraph"] or "<the answer, verbatim from the page>"},
+                               "text": answer or "<the answer, verbatim from the page>"},
         })
-    if not entities:
+    if len(entities) < 2:
         entities = [{"@type": "Question", "name": "<question as a visitor would ask it>",
                      "acceptedAnswer": {"@type": "Answer", "text": "<the answer, verbatim>"}}]
     payload = {"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": entities}

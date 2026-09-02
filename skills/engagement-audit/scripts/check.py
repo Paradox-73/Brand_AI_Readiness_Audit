@@ -819,16 +819,24 @@ def _check_interstitials(result, pages):
             signals.append("a modal or overlay is open in the delivered markup")
         if interstitial.get("modal_hints"):
             signals.append("markup for {}".format(", ".join(interstitial["modal_hints"][:2])))
-        if (page.get("video") or {}).get("autoplay_count"):
-            signals.append("{} auto-playing video element(s)".format(page["video"]["autoplay_count"]))
+        # Only autoplay that actually interrupts. A muted, looping
+        # background clip is not a page covering its own content, and
+        # calling it one produced a finding whose recommended fix - mute
+        # it - the site had already applied.
+        intrusive = (page.get("video") or {}).get("intrusive_autoplay_count")
+        if intrusive:
+            signals.append("{} auto-playing video element(s) that are not muted "
+                           "background clips".format(intrusive))
         if signals:
             offenders.append((page, "; ".join(signals)))
 
     if not offenders:
         result.skip("intrusive-interstitials",
-                    "no page ships an open overlay or auto-playing video in its initial markup. "
-                    "A cookie banner alone was not treated as a defect, because most sites are "
-                    "required to show one")
+                    "no page ships an open overlay or an interrupting auto-playing video in "
+                    "its initial markup. A cookie banner alone was not treated as a defect, "
+                    "because most sites are required to show one, and neither was a muted "
+                    "looping background clip, which is the standard way to ship a silent "
+                    "animation")
         return
 
     result.add(
