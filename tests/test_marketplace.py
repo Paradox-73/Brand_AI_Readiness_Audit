@@ -197,8 +197,14 @@ def test_no_real_domain_names_anywhere():
         "pinterest.com", "threads.net", "bsky.app", "youtube.com", "youtu.be",
         "vimeo.com", "loom.com", "twitter.com", "x.com", "instagram.com",
         "facebook.com", "tiktok.com", "goo.gl", "g.page",
-        # Crawler operators named in ai-crawler-user-agents.md.
-        "webz.io", "you.com",
+        # Crawler operators whose own documentation the agent table cites. Every
+        # row in ai-crawler-user-agents.md carries the URL of the page stating
+        # what that user agent does and the date it was read, because the
+        # alternative - a role asserted with no source - produced the worst wrong
+        # finding this audit has made. Operator documentation, never an example
+        # site, and never keyed to any brand being audited.
+        "webz.io", "you.com", "openai.com", "claude.com", "apple.com",
+        "amazon.com", "perplexity.ai", "duckduckgo.com", "commoncrawl.org",
         # Media hosts whose embed URLs the extractor recognises, so it can tell
         # a page carrying a player from a page carrying text. Same standing as
         # youtube.com and vimeo.com above: a platform we detect, never an

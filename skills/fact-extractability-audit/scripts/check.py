@@ -54,8 +54,9 @@ sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
     example_urls, has_price, language_of, load_snapshot, looks_like_soft_404,
-    name_forms, pages_of, pct, plural, prose_skip_reason, sample,
-    sells_something, sentences, SkillResult, truncate, word_count
+    name_forms, other_language_pages, pages_in_prose_language, pages_of, pct,
+    plural, prose_skip_reason, sample, sells_something, sentences, SkillResult,
+    truncate, word_count
 )
 
 SKILL = "fact-extractability-audit"
@@ -158,9 +159,17 @@ def run(snapshot):
     result.signal("site_language_source", language.get("source", ""))
 
     if language.get("prose_checks_apply"):
-        _check_entity_definition(result, snapshot, pages, brand_name, brand)
-        _check_answer_first(result, snapshot, pages, brand_name)
-        _check_long_sentences(result, pages)
+        # Only the pages that are in the language these checks reason about.
+        # The site verdict is one majority vote; a page declaring a different
+        # language is the authority on itself, and measuring German prose
+        # against an English sentence-length threshold is not a measurement.
+        prose_pages = pages_in_prose_language(pages)
+        set_aside = other_language_pages(pages)
+        if set_aside:
+            result.signal("pages_in_another_language", len(set_aside))
+        _check_entity_definition(result, snapshot, prose_pages, brand_name, brand)
+        _check_answer_first(result, snapshot, prose_pages, brand_name)
+        _check_long_sentences(result, prose_pages)
     else:
         reason = prose_skip_reason(language)
         for name in ("entity-definition", "answer-first-paragraphs", "long-sentences"):

@@ -28,8 +28,15 @@ from conftest import SCRIPTS
 # Eval 2 — "Why is my brand not showing up in ChatGPT?"
 #
 #   "On tests/fixtures/blocked-site the answer must lead with the WAF block and
-#    the four blocked answer crawlers - and must not present the training-crawler
-#    block as a problem, since that is info severity and a rights decision."
+#    the two blocked answer crawlers - and must not present the four blocked
+#    training crawlers as a problem, since that is info severity and a rights
+#    decision."
+#
+# The fixture's robots.txt names four crawlers. It used to produce "4 AI answer
+# crawlers", because GPTBot and ClaudeBot were filed as answer crawlers. They
+# are training crawlers by their operators' own documentation, so the split is
+# now two and four, and the report tells the owner that allowing GPTBot back in
+# would not buy a citation.
 # --------------------------------------------------------------------------
 
 def test_blocked_site_leads_with_the_bot_manager(audit):
@@ -41,13 +48,59 @@ def test_blocked_site_leads_with_the_bot_manager(audit):
     assert findings[0]["severity"] == "critical"
 
 
-def test_blocked_site_names_four_blocked_answer_crawlers(audit):
+def test_blocked_site_names_the_two_blocked_answer_crawlers(audit):
     result = audit("blocked-site")
     blocks = [f for f in result.report["findings"]
               if f["root_cause"] == "robots-block" and f["severity"] != "info"]
     assert blocks, "the answer-crawler block should be reported"
-    assert "4 AI answer crawlers" in blocks[0]["title"], (
-        "the eval document promises four; the report says {!r}".format(blocks[0]["title"]))
+    assert "2 AI answer crawlers" in blocks[0]["title"], (
+        "the eval document promises two; the report says {!r}".format(blocks[0]["title"]))
+    assert "OAI-SearchBot" in blocks[0]["evidence"]
+    assert "PerplexityBot" in blocks[0]["evidence"]
+
+
+def test_the_two_training_crawlers_in_that_robots_txt_are_not_in_the_defect(audit):
+    """The fixture disallows GPTBot and ClaudeBot alongside OAI-SearchBot and
+    PerplexityBot. A verification agent found the report telling owners to
+    allow-list the training pair so their pages could be cited, at rank two of
+    "Start here". Following it would have reopened the site to training
+    collection it had deliberately opted out of, for a citation gain of zero.
+    """
+    result = audit("blocked-site")
+    defect = [f for f in result.report["findings"]
+              if f["root_cause"] == "robots-block" and f["severity"] != "info"]
+    body = defect[0]["evidence"] + " " + " ".join(
+        defect[0]["suggested_action"]["how_to_fix"])
+    assert "GPTBot" not in body and "ClaudeBot" not in body, (
+        "the citation defect must not ask the owner to allow a training crawler")
+
+
+def test_the_report_names_the_agents_that_would_actually_buy_a_citation(audit):
+    """Reporting the training block is not enough on its own. The owner needs
+    told which agents from the same companies decide citation, so they do not
+    undo the opt-out looking for one."""
+    result = audit("blocked-site")
+    training = [f for f in result.report["findings"]
+                if f["root_cause"] == "robots-block" and f["severity"] == "info"]
+    assert training, "the training-crawler block should still be surfaced"
+    steps = " ".join(training[0]["suggested_action"]["how_to_fix"])
+    assert "ChatGPT-User" in steps or "Claude-User" in steps, (
+        "the info finding should name the answer-side agents of the same operators")
+
+
+def test_every_agent_the_report_names_is_described_with_its_role(audit):
+    """The old evidence line was a bare list of tokens under a sentence
+    claiming all of them fetched pages to build cited answers."""
+    result = audit("blocked-site")
+    for finding in result.report["findings"]:
+        if finding["root_cause"] != "robots-block":
+            continue
+        if "crawler" not in finding["title"]:
+            continue
+        evidence = finding["evidence"]
+        assert ("search index" in evidence or "live fetch" in evidence
+                or "model training" in evidence or "fetches nothing" in evidence), (
+            "{!r} names agents without saying what any of them does".format(evidence[:120]))
 
 
 def test_a_training_crawler_block_is_information_not_a_defect(audit):

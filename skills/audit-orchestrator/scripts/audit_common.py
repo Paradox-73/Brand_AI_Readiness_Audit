@@ -146,6 +146,11 @@ ROOT_CAUSES = frozenset({
     "robots-block", "bot-manager-block", "sitemap-missing", "sitemap-broken",
     "non-200", "redirect-chain", "meta-refresh", "noindex", "canonical-broken",
     "insecure-transport", "host-inconsistency",
+    # Distinct from `non-200`: the site answers correctly and merely takes too
+    # long. Reporting it as unreachability sent one owner to read server logs
+    # for a fault that did not exist, and the actual fix - caching, or a
+    # slow query behind the template - is nothing like restoring an outage.
+    "slow-origin",
     # Gate A/C - readability
     "js-shell", "thin-html", "image-locked-facts", "pdf-locked-facts",
     "no-transcript", "iframe-content", "uncrawlable-pagination", "alt-missing",
@@ -373,6 +378,87 @@ def primary_subtag(lang):
     return value.split("-")[0].split("_")[0] if value else ""
 
 
+
+# --------------------------------------------------------------------------
+# Language editions
+#
+# A site with one edition per language puts the language in the first path
+# segment: /de/ueber-uns, /fr/a-propos, /en-gb/about. Every URL-shaped
+# comparison then has to be made inside an edition rather than across the
+# whole site, because a German page's navigation legitimately points at
+# German URLs and shares not one path with the English menu.
+#
+# Comparing them raw reported a fully navigable German edition as pages
+# carrying no site navigation - a medium finding, on a site whose menu is
+# present, complete and translated. The fix is not a list of language codes to
+# ignore. It is to establish the site's normal chrome once per edition.
+# --------------------------------------------------------------------------
+
+# A two-letter language code, optionally with a region or script subtag.
+_LOCALE_SEGMENT_RE = re.compile(
+    r"^[a-z]{2}(?:[-_](?:[a-z]{2}|[a-z]{4}|\d{3}))?$", re.I)
+
+# Two-letter path segments that are ordinary sections on English sites, where
+# reading them as a language would split a monolingual site into editions.
+_NOT_A_LOCALE = frozenset({"us", "uk", "eu", "ac", "co", "hr", "id", "pr", "tv"})
+
+
+def _locale_candidate(url):
+    """The leading path segment, if it is shaped like a language code."""
+    path = urlparse(url).path
+    first = path.strip("/").split("/")[0].lower() if path.strip("/") else ""
+    if not first or first in _NOT_A_LOCALE:
+        return ""
+    if not _LOCALE_SEGMENT_RE.match(first):
+        return ""
+    return first
+
+
+def locale_editions(pages):
+    """Map each page URL to its language edition, or "" if the site has none.
+
+    A leading segment counts as an edition only on evidence, never on shape
+    alone. Either the page's own `lang` attribute names that language - the
+    site saying so itself, which is the strongest evidence available - or at
+    least two different language-shaped prefixes appear across the crawl, which
+    no monolingual site produces by accident.
+    """
+    candidates = {}
+    for page in pages or []:
+        if page.get("status") != 200:
+            continue
+        candidate = _locale_candidate(page.get("url") or "")
+        if candidate:
+            candidates[page["url"]] = candidate
+
+    if not candidates:
+        return {}
+
+    self_declared = set()
+    for page in pages or []:
+        candidate = candidates.get(page.get("url"))
+        if candidate and primary_subtag(page.get("lang")) == candidate.split("-")[0].split("_")[0]:
+            self_declared.add(candidate)
+
+    distinct = set(candidates.values())
+    trusted = self_declared if self_declared else (distinct if len(distinct) > 1 else set())
+    if not trusted:
+        return {}
+    return {url: code for url, code in candidates.items() if code in trusted}
+
+
+def group_by_edition(pages, editions):
+    """Pages grouped by language edition, smallest useful unit last.
+
+    Pages outside any edition - a shared root, a sitemap page, an asset
+    landing page - are their own group, because they genuinely do share one
+    chrome with each other.
+    """
+    groups = {}
+    for page in pages:
+        groups.setdefault(editions.get(page.get("url"), ""), []).append(page)
+    return groups
+
 def guess_language_from_text(text):
     """Language of a body of text from function-word frequency.
 
@@ -431,6 +517,88 @@ def language_of(snapshot):
         return value
     return detect_site_language(snapshot.get("pages") or [])
 
+
+
+
+# --------------------------------------------------------------------------
+# A name written in one script cannot be looked for in another
+# --------------------------------------------------------------------------
+
+_SCRIPT_RANGES = (
+    ("latin", ((0x41, 0x5A), (0x61, 0x7A), (0xC0, 0x24F))),
+    ("greek", ((0x370, 0x3FF),)),
+    ("cyrillic", ((0x400, 0x4FF),)),
+    ("hebrew", ((0x590, 0x5FF),)),
+    ("arabic", ((0x600, 0x6FF), (0x750, 0x77F))),
+    ("devanagari", ((0x900, 0x97F),)),
+    ("thai", ((0xE00, 0xE7F),)),
+    ("hangul", ((0xAC00, 0xD7AF), (0x1100, 0x11FF))),
+    ("kana", ((0x3040, 0x30FF),)),
+    ("han", ((0x4E00, 0x9FFF), (0x3400, 0x4DBF))),
+)
+
+
+def scripts_in(text):
+    """Which writing systems this text uses, ignoring digits and punctuation."""
+    found = set()
+    for char in text or "":
+        code = ord(char)
+        for name, ranges in _SCRIPT_RANGES:
+            if any(low <= code <= high for low, high in ranges):
+                found.add(name)
+                break
+    return found
+
+
+def written_in_the_same_script(name, text):
+    """Could this name appear in this text at all?
+
+    A page in Arabic does not contain a Latin-script company name, and its
+    absence says nothing about the markup. Reported as a conflict, an Arabic
+    edition of a foundation's site was told at high severity that its
+    structured data contradicted the page - about markup that was correct and
+    a page that was correct, on the strength of a comparison that could only
+    ever have one answer.
+
+    True when nothing can be decided from script alone: a name with no letters
+    at all, or a page whose text is too short to characterise.
+    """
+    name_scripts = scripts_in(name)
+    text_scripts = scripts_in((text or "")[:4000])
+    if not name_scripts or not text_scripts:
+        return True
+    return bool(name_scripts & text_scripts)
+
+def pages_in_prose_language(pages):
+    """Pages this audit's English prose checks are entitled to read.
+
+    Site language is one majority vote across whatever the crawl sampled, and
+    for a monolingual site that is right. On a bilingual broadcaster it was
+    decided by luck: 28 pages tagged `en`, 18 tagged `de` and five other
+    languages besides, so "English" won the vote and the English-tuned checks
+    - a 30-word sentence threshold, the "<Brand> is a ..." pattern, the
+    call-to-action verbs - then ran over every content page including the
+    German ones. One German category page scored 59% long sentences and
+    escaped a finding only because its page type was not in the allowlist.
+
+    A page that declares its own language is the authority on it. A page that
+    declares none inherits the site verdict, which is the best available
+    answer and the common case on smaller sites.
+    """
+    out = []
+    for page in pages or []:
+        declared = primary_subtag(page.get("lang"))
+        if declared and declared != PROSE_LANGUAGE:
+            continue
+        out.append(page)
+    return out
+
+
+def other_language_pages(pages):
+    """The pages `pages_in_prose_language` set aside, for saying so."""
+    return [p for p in pages or []
+            if primary_subtag(p.get("lang"))
+            and primary_subtag(p.get("lang")) != PROSE_LANGUAGE]
 
 def prose_skip_reason(language):
     """Why a prose check declined, in words a site owner can act on."""
@@ -600,10 +768,16 @@ _URL_TYPE_SLUGS = (
                  "subscribe", "membership")),
     ("contact", ("contact", "contact-us", "get-in-touch", "reach-us", "enquiries",
                  "inquiries", "enquiry")),
+    # "history" alone is not an about page. A broadcaster runs a History
+    # documentary vertical, and four of the five pages a brand-definition
+    # finding named were episodes of it - subjected to a check about what the
+    # organisation is, because a bare content word sat in this list. The
+    # qualified forms are unambiguous and the bare one never was.
     ("about", ("about", "about-us", "company", "who-we-are", "our-story", "our-team",
-               "team", "mission", "history")),
-    ("location", ("location", "locations", "store", "stores", "branch", "branches",
-                  "showroom", "find-us", "visit-us", "offices")),
+               "team", "mission", "our-history", "company-history",
+               "our-mission", "our-values", "leadership")),
+    ("location", ("location", "showroom", "find-us", "visit-us", "where-we-are",
+                  "where-to-find-us", "store-finder", "store-locator")),
     # Episodes are articles for our purposes: dated published pieces that a
     # machine should be able to read, quote and date. Without them a podcast
     # episode page classified as "other" and every content check skipped it.
@@ -627,6 +801,60 @@ _URL_TYPE_SLUGS = (
                  "capabilities", "offerings", "expertise")),
 )
 
+# Three shapes a real slug takes that a bare list of words does not match.
+# A multi-location business kept its branches at `/our-shops`, and no slug in
+# any list matched, so per-branch `LocalBusiness` markup was never recommended
+# on a site with fourteen shops. Adding "our-shops" to the location list, then
+# "our-locations", "our-stores", "store-finder" and "where-we-are" as the next
+# five sites arrived, is the sixty-patches approach. These are the rules those
+# cases share:
+#
+#   a qualifier in front    /our-shops, /the-team, /all-locations, /find-a-store
+#   a plural                /branches, /clinics, /faqs
+#   a derived noun after    /store-finder, /store-locator, /branch-directory
+#
+# Measured against the risk of over-matching: the qualifier list is closed and
+# short, the plural is `s` or `es`, and the suffix list names nouns that only
+# ever turn a place word into another place word. "-on-sponge" is still not a
+# suffix, so /products/press-on-sponge is still not a press page.
+_QUALIFIER_PREFIX = r"(?:our|the|all|my|your|find(?:-a)?|browse)-"
+
+_DERIVED_SUFFIX = (r"us|kit|centre|center|page|policy|info|list|room|"
+                   r"finder|locator|directory|map|near-me|near-you|us\.html")
+
+# Words that name a place only in the plural. `/shop` and `/store` are the way
+# into an online shop; `/shops` and `/stores` are a list of branches. `/office`
+# could be a product aisle; `/offices` is where a firm has people. The same
+# word, one letter apart, means two different kinds of page - so a singular
+# match here would have turned every e-commerce entry point into a locations
+# page, which is worse than the miss it was fixing.
+#
+# A qualifier settles it too: `/our-shop` is a place even in the singular,
+# because a shop nobody owns is a catalogue and a shop somebody owns is a room.
+_PLURAL_OR_QUALIFIED_ONLY = {
+    "location": ("shop", "store", "branch", "clinic", "venue", "office",
+                 "studio", "salon", "outlet", "dealer", "stockist", "surgery",
+                 "practice", "restaurant", "cafe", "hotel", "gym", "depot"),
+}
+
+def _url_type_pattern(page_type, slugs):
+    """One regex per page type, from the slug list and the three shape rules."""
+    boundary = r"(?:$|/|\.|-(?:{})\b)".format(_DERIVED_SUFFIX)
+    plain = r"(?:{})?(?:{})(?:e?s)?".format(
+        _QUALIFIER_PREFIX, "|".join(re.escape(slug) for slug in slugs))
+    alternatives = [plain]
+    strict = _PLURAL_OR_QUALIFIED_ONLY.get(page_type)
+    if strict:
+        words = "|".join(re.escape(slug) for slug in strict)
+        alternatives.append(r"(?:{})(?:{})(?:e?s)?".format(_QUALIFIER_PREFIX, words))
+        alternatives.append(r"(?:{})e?s".format(words))
+        # A singular counts when a derived noun follows it: `/store-finder` and
+        # `/branch-directory` are lists of places, and the word alone is not.
+        # The lookahead leaves the suffix for the shared boundary to consume.
+        alternatives.append(r"(?:{})(?=-(?:{})\b)".format(words, _DERIVED_SUFFIX))
+    return r"(?:^|/)(?:{}){}".format("|".join(alternatives), boundary)
+
+
 _URL_TYPE_PATTERNS = tuple(
     # Boundary includes `.` so `/about.html` counts, and `-` so `/about-us`
     # counts, while `/roundabout` and `/2004/Jun/29/job/`-style slugs inside
@@ -645,9 +873,7 @@ _URL_TYPE_PATTERNS = tuple(
     # follow only when what precedes it is the whole first word of the segment
     # AND the segment's remaining words do not turn it into a different noun -
     # which is what `-us`, `-kit` and `-centre` are and `-on-sponge` is not.
-    (page_type, r"(?:^|/)(?:{})(?:$|/|\.|-(?:us|kit|centre|center|page|policy|"
-                r"info|list|room|us\.html)\b)".format(
-        "|".join(re.escape(slug) for slug in slugs)))
+    (page_type, _url_type_pattern(page_type, slugs))
     for page_type, slugs in _URL_TYPE_SLUGS
 )
 
@@ -655,6 +881,12 @@ _URL_TYPE_PATTERNS = tuple(
 # that year's archive index.
 _DATED_PERMALINK_RE = re.compile(r"/(?:19|20)\d{2}(?:/[^/]+){1,}/?$")
 _YEAR_ARCHIVE_RE = re.compile(r"^/(?:19|20)\d{2}(?:/[a-z]{3,9})?/?$", re.I)
+
+# The last segment of a listing of other pages. Whole words only: `/previous`
+# is an index, `/previously-unseen-photographs` is an article.
+_ARCHIVE_INDEX_RE = re.compile(
+    r"/(?:archive|archives|previous|past|back-issues|backissues|all|index|"
+    r"list|listing|overview|browse|latest|older|earlier|more)/?$", re.I)
 
 # Buying affordances that only appear on a real product detail page. Generic
 # commerce words ("quantity", "sku") are deliberately excluded: they show up in
@@ -692,6 +924,58 @@ _SOFT_404_MARKERS = (
     "sorry, we can't find", "we couldn't find that page",
 )
 
+
+
+# A page generated from what somebody typed. `?search=Artemis`, `/search?q=...`,
+# `?s=mars` - the results exist because of the query, not because the site
+# published them, and every search-engine guideline says to keep them out of an
+# index.
+#
+# `noindex` on one of these is the site doing the right thing. Reported as a
+# defect on a space agency's site, the fix - "remove `noindex` where the page
+# should be public" - would have put five search-result URLs into the index,
+# and it was ranked second in what to fix first.
+_SEARCH_RESULT_RE = re.compile(
+    r"(?:^|[/?&])(?:search|suche|recherche|busqueda|zoeken|ricerca)(?:[/?&=]|$)"
+    r"|[?&](?:q|s|query|keyword|keywords|term|searchterm|search_query)=",
+    re.I)
+
+
+
+# How much of a page's visible text the content extractor has to find before
+# its answer can be trusted. Below this, the shortfall is more likely ours than
+# the site's.
+#
+# `text_len` is every visible character on the page; `body_text_len` is what
+# the content-region extractor kept. On an Arabic news site's liveblog template
+# the first was 1,660 and the second 89 - the extractor found the title and
+# nothing else, because the article sits in a nested `<div id="wysiwyg">` that
+# none of the content selectors reach and the whole-document fallback lost to
+# the chrome. Two findings followed: "delivered as an empty JavaScript shell"
+# and "too little text to quote", on a page that is server-rendered and
+# complete. The fix offered was several days of development work.
+#
+# The site is not obliged to use markup we recognise. When these two numbers
+# disagree by this much, the honest reading is that we failed to find the text,
+# not that the text is absent.
+EXTRACTION_TRUSTED_SHARE = 0.25
+
+
+def extraction_looks_incomplete(page):
+    """Did the content extractor find far less than the page visibly holds?
+
+    False when there is nothing to compare - a page with no visible text at all
+    really is empty, and that is a finding rather than a failure.
+    """
+    whole = page.get("text_len") or 0
+    kept = page.get("body_text_len") or 0
+    if whole < 200:
+        return False
+    return kept < EXTRACTION_TRUSTED_SHARE * whole
+
+def is_search_result_page(url):
+    """True for a page whose content is a response to a typed query."""
+    return bool(_SEARCH_RESULT_RE.search(url or ""))
 
 def looks_like_soft_404(page):
     """True for a 200 response whose own title says the page is missing.
@@ -748,12 +1032,80 @@ def declared_locations(snapshot):
     return set(forms)
 
 
+# How many pages have to carry their own address before the site is a chain.
+# Two is a head office and a shop; three distinct addresses is a pattern.
+BRANCH_PAGE_MINIMUM = 3
+
+
+
+def fold_declared_duplicates(pages):
+    """One entry per page the site itself considers distinct.
+
+    A site that serves the same page at `/thing` and `/thing/` and declares one
+    of them canonical has told the crawler they are one page. Counting both
+    inflated a duplicate-title finding on a broadcaster - two of its eleven
+    "duplicate" pairs were a URL and its own declared canonical target - and
+    inflated the denominator underneath it at the same time.
+
+    Only a canonical the crawl actually reached folds. A canonical pointing
+    somewhere the crawl never saw is a separate matter, reported by
+    `crawl-access-audit`, and folding on it would hide pages rather than count
+    them.
+    """
+    reached = {p.get("url") for p in pages if p.get("url")}
+    kept, folded = [], set()
+    for page in pages:
+        canonical = (page.get("canonical") or "").strip()
+        url = page.get("url")
+        if (canonical and canonical != url and canonical in reached
+                and canonical not in folded):
+            folded.add(url)
+            continue
+        kept.append(page)
+    return kept
+
+def pages_with_their_own_address(snapshot):
+    """Pages carrying a postal address no other page carries.
+
+    The evidence a chain leaves in its HTML whatever its markup says. A pizza
+    chain's forty-three branch pages each print their own street and postcode
+    in plain text and declare no `LocalBusiness` node at all - so both of the
+    other two signals were blind to it, and blind for the same reason the
+    finding existed: the markup that would have identified the chain is the
+    markup the chain is missing.
+
+    Reading the addresses off the pages breaks that circle.
+    """
+    seen, pages = {}, []
+    for page in snapshot.get("pages") or []:
+        facts = page.get("contact_facts") or {}
+        street = (facts.get("street_hint") or "").strip().lower()
+        postcode = (facts.get("postcode_hint") or "").strip().lower()
+        if not street or not postcode:
+            continue
+        # Keyed on the postal code alone. The street hint is a fuzzy substring
+        # match, so the same head-office address came out three slightly
+        # different ways across three pages of one single-site fixture and was
+        # counted as three branches. A postal code identifies a place; two
+        # pages carrying the same one are the same place however the street is
+        # written. The street still has to be there, as evidence that this is
+        # an address at all rather than a stray number.
+        key = re.sub(r"[^a-z0-9]", "", postcode)
+        if key in seen:
+            continue
+        seen[key] = page["url"]
+        pages.append(page)
+    return pages
+
+
 def is_multi_location(snapshot):
-    """True when the site declares more than one place you can visit."""
+    """True when the site describes more than one place you can visit."""
     if len(declared_locations(snapshot)) > 1:
         return True
-    return len([p for p in (snapshot.get("pages") or [])
-                if p.get("page_type") == "location"]) > 1
+    if len([p for p in (snapshot.get("pages") or [])
+            if p.get("page_type") == "location"]) > 1:
+        return True
+    return len(pages_with_their_own_address(snapshot)) >= BRANCH_PAGE_MINIMUM
 
 
 _COMMERCE_JSONLD_TYPES = frozenset({
@@ -817,7 +1169,20 @@ def detect_page_type(url, html_meta):
     headings = html_meta.get("headings") or {}
     h2s = headings.get("h2") or []
 
+    # `/` is the homepage, and so is `/de/` on a site with one edition per
+    # language. Only the bare root qualified, so on a path-prefixed site the
+    # audit's idea of "the homepage" snapped to whatever sat at the root -
+    # which on a bilingual broadcaster was an English redirect target - even
+    # when the audit had been pointed at `https://.../de/` explicitly. Every
+    # home-gated check then looked at the wrong page, or at no page.
     if path == "/" and not parsed.query:
+        return "home"
+    # On the page's own evidence only: the leading segment is a language code
+    # and the page declares that language. A two-letter segment alone is not
+    # enough - plenty of English sites keep an IT department at `/it`.
+    locale = _locale_candidate(url)
+    if (locale and not parsed.query and path.count("/") == 1
+            and primary_subtag(html_meta.get("lang")) == locale.split("-")[0].split("_")[0]):
         return "home"
 
     # Date-shaped paths are decided before anything else. A blog permalink such
@@ -827,6 +1192,15 @@ def detect_page_type(url, html_meta):
         return "category"
     if _DATED_PERMALINK_RE.search(path):
         return "article"
+
+    # An index of articles is not an article. `/news/previous/` is a news
+    # archive listing, and demanding `Article` markup on it produced a finding
+    # whose paste-ready snippet declared `"headline": "News archive"` - which
+    # would tell a machine the archive page is a piece of journalism published
+    # on a date. The last segment says so; the check is the same one for a
+    # blog index, a press listing and a category page.
+    if _ARCHIVE_INDEX_RE.search(path):
+        return "category"
 
     # Unambiguous URL slugs win outright. A pricing page that also carries
     # Product schema is still a pricing page, and classifying it as a product
@@ -1107,8 +1481,34 @@ class SkillResult:
         self.extra_requests_made = 0
         self.signals = {}
         self._current_check = None
-        self._group = []
+        # {check name: the function that registered it}. Keyed by caller, not
+        # a flat list, because a flat list was a run-long accumulator: a check
+        # registered in one function and answered by neither a finding nor a
+        # decline sat in it until some unrelated `add()` later in the same
+        # skill swept it up as "fired". On one site seven of seventy-one checks
+        # that ran appeared nowhere in the report at all - not as findings, not
+        # as declines, not as passes - and among them was whether robots.txt
+        # blocks AI crawlers, which is the question this audit exists to
+        # answer. A finding may only claim the checks its own function
+        # registered.
+        self._group = {}
         self.fired_checks = set()
+
+    @staticmethod
+    def _callers(depth=12):
+        """Function names on the stack above this call.
+
+        A `_check_*` function often registers its checks and then delegates
+        the finding to a helper, or the other way round. Matching on the whole
+        stack rather than one frame keeps those together while still refusing
+        to reach across into an unrelated check.
+        """
+        names = set()
+        frame = sys._getframe(2)
+        while frame is not None and len(names) < depth:
+            names.add(frame.f_code.co_name)
+            frame = frame.f_back
+        return names
 
     def check(self, name):
         # Remembered so `add()` can stamp the finding with the check that
@@ -1126,8 +1526,7 @@ class SkillResult:
         # on a site whose findings section said "No XML sitemap is available".
         #
         # A check that might have fired is never claimed as clean.
-        if name not in self._group:
-            self._group.append(name)
+        self._group.setdefault(name, sys._getframe(1).f_code.co_name)
         if name not in self.checks_run:
             self.checks_run.append(name)
 
@@ -1135,13 +1534,20 @@ class SkillResult:
         self.check(name)
         # An explicit decline is a definite answer about this one check, so it
         # leaves the group rather than being tarred by a sibling that fired.
-        self._group = [c for c in self._group if c != name]
+        self._group.pop(name, None)
         self.not_applicable.append({"check": name, "skill": self.skill, "reason": reason})
 
     def add(self, **kwargs):
         finding = make_finding(**kwargs)
         finding["check"] = getattr(self, "_current_check", None)
-        self.fired_checks.update(self._group)
+        # Only the checks this finding's own function registered. Anything
+        # registered elsewhere and left unanswered is a check that ran and
+        # found nothing, which is what the report says about it.
+        callers = self._callers()
+        mine = [name for name, owner in self._group.items() if owner in callers]
+        self.fired_checks.update(mine)
+        for name in mine:
+            self._group.pop(name, None)
         self.findings.append(finding)
 
     def signal(self, key, value):
@@ -1232,6 +1638,188 @@ def explain_fetch_error(error):
             return meaning
     return "could not be fetched ({})".format(truncate(text, 120))
 
+
+
+# --------------------------------------------------------------------------
+# A slow origin is not an outage
+#
+# One site answered every page in ten to forty seconds. Enough requests timed
+# out that the report described it as unreachable, with outage wording and a
+# fix that read "read the server log for the failing request" - on a site that
+# was up, serving correct HTML, and merely slow. The owner would have gone
+# looking for a fault that was not there and missed the one that was.
+#
+# Slowness and unreachability need telling apart wherever either is reported,
+# so the measurement lives here rather than in the check that noticed first.
+# --------------------------------------------------------------------------
+
+# Measured against real homepages: the slowest ordinary site in three samples
+# had a median of 1.9 s. Three seconds is outside anything normal, and past
+# ten an answer crawler's own timeout is the binding constraint.
+SLOW_ORIGIN_MEDIAN_MS = 3000
+VERY_SLOW_ORIGIN_MEDIAN_MS = 10000
+
+
+def response_timing(pages):
+    """Median and worst response time across the pages that answered.
+
+    `None` when nothing was timed, which is what a `--no-network` run and a
+    fully blocked site both produce; callers must not read a missing
+    measurement as a fast one.
+    """
+    times = sorted(page["elapsed_ms"] for page in pages or []
+                   if page.get("status") == 200 and (page.get("elapsed_ms") or 0) > 0)
+    if not times:
+        return None
+    return {
+        "median_ms": times[len(times) // 2],
+        "slowest_ms": times[-1],
+        "measured_on": len(times),
+    }
+
+
+def slow_origin_note(pages):
+    """A sentence to append wherever a failed fetch is being explained.
+
+    Empty string on a site that answers at a normal speed, so the caller can
+    concatenate it unconditionally.
+    """
+    timing = response_timing(pages)
+    if timing is None or timing["median_ms"] < SLOW_ORIGIN_MEDIAN_MS:
+        return ""
+    return (" This origin answers slowly rather than not at all: the median response across "
+            "the {} page(s) it did serve was {:.1f} s, and the slowest was {:.1f} s. Treat a "
+            "timeout here as the same slowness, not as an outage.".format(
+                timing["measured_on"], timing["median_ms"] / 1000.0,
+                timing["slowest_ms"] / 1000.0))
+
+
+# --------------------------------------------------------------------------
+# Whose profile is this?
+#
+# A URL of the right shape on the right platform is not the brand's profile.
+# It is somebody's profile. Counting shape alone produced a quantified, false
+# headline claim on an open-source framework's site:
+#
+#     "Distinct off-site profiles linked: Bluesky, GitHub, Wikipedia, X."
+#
+# The GitHub entry was a contributor's personal account, thanked in the
+# footer. The Wikipedia entry was `/wiki/Pure_function`, cited inside a blog
+# post about signals. The project's own org page is linked dozens of times,
+# but only ever as a repository path, so it was never counted at all - and the
+# same report said elsewhere that Wikidata returns no entity for the project,
+# contradicting the Wikipedia claim two sections away.
+#
+# The rule is the same one `sameAs` already used and nothing else did: a
+# profile corroborates a brand only if it names the brand. The check lives
+# here so both skills read the same implementation.
+# --------------------------------------------------------------------------
+
+# Words brands add around their own name in a handle.
+_HANDLE_AFFIXES = ("get", "the", "team", "official", "hq", "app", "inc", "co",
+                   "org", "global", "group", "uk", "us", "usa", "eu", "js",
+                   "hub", "labs", "io")
+
+
+# A site that names itself after its domain gives a brand name carrying the
+# TLD - "Example.org", "Example.com" - and no profile handle includes it.
+_BRAND_TLD_RE = re.compile(r"\.(?:com|org|net|io|co|ai|dev|app|uk|de|fr)$", re.I)
+
+
+def brand_key(name):
+    """A brand name reduced to comparable letters and digits."""
+    return re.sub(r"[^a-z0-9]", "", _BRAND_TLD_RE.sub("", (name or "").strip()).lower())
+
+
+def profile_names_brand(url, brand_name):
+    """Does this profile URL's handle name the brand?
+
+    Without a brand name there is nothing to compare against, and the honest
+    answer is no: an unattributed profile is not evidence about this brand.
+    """
+    key = brand_key(brand_name)
+    if not key:
+        return False
+    path = re.sub(r"[?#].*$", "", url or "").rstrip("/")
+    handle = re.sub(r"[^a-z0-9]", "", path.rsplit("/", 1)[-1].lower())
+    if not handle:
+        return False
+    if handle == key or key in handle or handle in key:
+        return True
+    for affix in _HANDLE_AFFIXES:
+        if handle.startswith(affix) and handle[len(affix):] == key:
+            return True
+        if handle.endswith(affix) and handle[: -len(affix)] == key:
+            return True
+    return False
+
+
+# Platforms whose profile URL is an opaque identifier. A Wikidata item is
+# `Q42` and a YouTube channel is `UCxxxxxxxx`; neither can be checked against
+# a brand name, so requiring one dropped a fixture's own correct Wikidata link.
+# Wikipedia is deliberately not here: `/wiki/Pure_function` is a name, which is
+# exactly why an article about a computer-science term was being counted as an
+# open-source project's own profile.
+_OPAQUE_PROFILE_RE = (
+    re.compile(r"wikidata\.org/(?:wiki|entity)/Q\d+", re.I),
+    re.compile(r"youtube\.com/channel/UC[\w-]+", re.I),
+)
+
+
+def profile_is_opaque(url):
+    """True when the URL identifies a profile by number rather than by name."""
+    return any(rule.search(url or "") for rule in _OPAQUE_PROFILE_RE)
+
+
+# Platforms whose URL states its own subject. A Wikipedia path is the title of
+# the article, so `/wiki/Pure_function` is decisively not about a JavaScript
+# framework - that is a fact about the URL, not a guess about a handle.
+#
+# Deliberately only these. The first version of this filter applied the name
+# test to every platform and immediately made a worse mistake than the one it
+# fixed: on a language's own site it dropped the foundation's LinkedIn page,
+# its X account and its conference YouTube channel - all real, all the
+# project's own - because none of the handles spells the site's name, and
+# turned "links to only 4 off-site profiles" into "links to no off-site
+# profile at all" at high severity. A handle is a name somebody chose; an
+# article title is a statement of subject. Only the second can be checked.
+_SUBJECT_IN_URL_PLATFORMS = frozenset({"Wikipedia"})
+
+
+def profiles_naming_brand(profiles, brand_name, declared=None, name_forms=()):
+    """{platform: url} for the profiles that are credibly this brand's.
+
+    Four ways a profile earns its place, in descending strength:
+
+      the site claims it     listed in the site's own `sameAs`, which is an
+                             assertion of identity and needs nothing else
+      the URL cannot lie     the platform identifies profiles by number, or by
+                             a handle somebody chose, so no subject test is
+                             possible either way and the link is taken at face
+                             value
+      it names the brand     for the platforms whose URL states its subject
+      it cannot be named     an opaque identifier
+
+    Only a Wikipedia-style article URL is ever rejected, and only when its
+    subject is something other than this brand. That was the case both
+    verification agents named: `/wiki/Pure_function` and `/wiki/Time_complexity`,
+    cited inside a blog post about signals, counted as an open-source
+    project's own profiles while its real organisation page - linked dozens of
+    times, always as a repository path - was never counted at all.
+    """
+    declared = declared or {}
+    candidates = [brand_name] + [n for n in name_forms if n]
+    out = {}
+    for platform, url in (profiles or {}).items():
+        if declared.get(platform) or profile_is_opaque(url):
+            out[platform] = url
+            continue
+        if platform not in _SUBJECT_IN_URL_PLATFORMS:
+            out[platform] = url
+            continue
+        if any(profile_names_brand(url, name) for name in candidates):
+            out[platform] = url
+    return out
 
 def example_urls(urls, limit=5):
     """The URLs a finding quotes, matching the ones it lists as affected.
@@ -1548,6 +2136,26 @@ def make_soup(html):
 _NON_CONTENT_TAGS = ("script", "style", "template", "noscript", "svg")
 
 
+
+# Joining inline elements with a space is what makes `get_text` readable, and
+# it also puts a space in front of every punctuation mark that happened to sit
+# outside a `<b>` or an `<a>`. On a database project's homepage the sentence
+# came out "a small , fast , self-contained , high-reliability , full-featured
+# , SQL database engine" - and that string went into a paste-ready
+# `Organization` description, so an owner following the advice would publish
+# their own tagline with six stray spaces in it.
+#
+# The site's words are unchanged. Only the spacing this audit introduced is
+# taken back out.
+_SPACE_BEFORE_PUNCTUATION = re.compile(r"\s+([,.;:!?)\]}%])")
+_SPACE_AFTER_OPENING = re.compile(r"([(\[{])\s+")
+
+
+def tidy_spacing(text):
+    """Undo the separator spaces `get_text` inserts around inline markup."""
+    text = _SPACE_BEFORE_PUNCTUATION.sub(r"\1", text or "")
+    return _SPACE_AFTER_OPENING.sub(r"\1", text)
+
 def visible_text(soup):
     """Text a machine would treat as page content.
 
@@ -1559,7 +2167,7 @@ def visible_text(soup):
     for tag in clone(list(_NON_CONTENT_TAGS)):
         tag.decompose()
     text = clone.get_text(separator=" ")
-    return re.sub(r"\s+", " ", text).strip()
+    return tidy_spacing(re.sub(r"\s+", " ", text).strip())
 
 
 MAIN_TEXT_SELECTORS = ("main", "article", "[role=main]", "#main", "#content", ".content")
@@ -1648,62 +2256,114 @@ def visible_soup(soup):
     return clone
 
 
+# What the page itself says is not content. A landmark element, an
+# `aria-hidden` attribute and `display:none` are declarations by the author,
+# so removing them is reading the page rather than guessing about it.
+_DECLARED_CHROME_SELECTORS = (
+    "header", "nav", "footer", "aside", "[role=navigation]", "[role=contentinfo]",
+    # Markup that says "do not show this". A restaurant chain ships an
+    # aria-hidden "you are leaving our site" modal in every page's header, and
+    # it became the first content section of twelve pages: the answer-first
+    # check read it as their opening prose, and the citation table offered the
+    # same irrelevant sentence as what an assistant would quote from the
+    # homepage, the contact page, the FAQ and every location page. A machine
+    # reading the page for facts does not read what the page has hidden.
+    "[aria-hidden=true]", "[hidden]",
+)
+
+# Guesses from a class or id name. Every one of these is a bet that a word in
+# a CSS class means the same thing on this site as it did on the last one.
+#
+# `[class*=announcement]` was written for the announcement bar that sits above
+# the header on commerce templates. On a public radio programme's site it
+# matched `<article class="node-announcement">` - the CMS's own name for the
+# content type - and deleted the page. Ten dated announcements, 3,228
+# characters, became 34, and the audit reported the page twice: once as text
+# locked in images and once as too thin to quote. Both findings were false and
+# both were about our own selector.
+#
+# The bar in the original case is real, and so is the cosmetics retailer that
+# stacks one free-shipping threshold per locale in it - "$40", "$60 CAD",
+# "$110 AUD", "R$670" all at once - which the audit read as the prices on the
+# page and reported as contradicting the product's own correct $16 markup.
+#
+# So the guesses stay, bounded: see _GUESS_MAX_SHARE.
+_GUESSED_CHROME_SELECTORS = (
+    "[class*=breadcrumb]", "[id*=breadcrumb]",
+    "[class*=announcement]", "[id*=announcement]",
+    "[class*=promo-bar]", "[class*=promobar]", "[class*=promo_bar]",
+    "[class*=announce-bar]", "[class*=top-bar]", "[class*=topbar]",
+    "[class*=usp-bar]", "[class*=marquee]", "[role=marquee]",
+)
+
+# A guess may not take more than this share of the text the page declared as
+# content. An announcement bar is a strip above the header; it is never a
+# third of the page. Anything that big is the page, whatever its class says.
+#
+# This is the general form of the fix. The next keyword guess someone adds -
+# and there will be one, because these bars carry no standard markup - is
+# bounded by the same number without anyone having to remember it.
+_GUESS_MAX_SHARE = 0.3
+
+
+def _decompose_safely(clone, selector):
+    """Remove every match, and return how many characters went with them.
+
+    `select` builds the whole list before anything is removed, so decomposing
+    a parent leaves its already-matched descendants in the list with their
+    attributes set to None. Calling `.get` on one of those raised
+    `AttributeError: 'NoneType' object has no attribute 'get'` and killed the
+    crawl outright - no snapshot, no report, just a stack trace - on two major
+    retail sites, both of which ship a hidden banner containing an
+    inline-styled child. That is ordinary markup, not an exotic case.
+    """
+    removed = 0
+    for found in clone.select(selector):
+        if getattr(found, "attrs", None) is None:
+            continue                      # already removed with its parent
+        removed += len(found.get_text(" ").strip())
+        found.decompose()
+    return removed
+
+
+def _text_length_of(selector, clone):
+    """How much text a selector would take, without taking it."""
+    total = 0
+    for found in clone.select(selector):
+        if getattr(found, "attrs", None) is None:
+            continue
+        total += len(re.sub(r"\s+", " ", found.get_text(" ")).strip())
+    return total
+
+
 def _strip_chrome(node):
     """Text of a region with scripts, navigation and breadcrumbs removed.
 
-    Breadcrumb trails repeat on every page and would otherwise show up as the
-    opening words of the "content", which distorts every first-sentence check.
+    Two tiers, and the difference matters. What the page declares as chrome -
+    a landmark element, `aria-hidden`, `display:none` - comes out
+    unconditionally. What a CSS class name merely suggests is chrome comes out
+    only while it stays small, because a guess that removes most of a page has
+    stopped being a guess about furniture and become a claim about content.
     """
     clone = make_soup(str(node))
     for tag in clone(list(_NON_CONTENT_TAGS)):
         tag.decompose()
-    for selector in ("header", "nav", "footer", "aside", "[role=navigation]",
-                     "[role=contentinfo]", "[class*=breadcrumb]", "[id*=breadcrumb]",
-                     # The announcement bar. It sits above the header on most
-                     # commerce templates, outside every landmark element, and
-                     # repeats on every page - so it is chrome by any definition
-                     # except the one this function was using.
-                     #
-                     # A cosmetics retailer stacks one free-shipping threshold
-                     # per locale in that bar and switches them client-side, so
-                     # the delivered HTML carries "$40", "$60 CAD", "$110 AUD"
-                     # and "R$670" at once. The audit read those as the prices
-                     # shown on the page, reported the product's own correct
-                     # JSON-LD price of $16 as contradicting them at high
-                     # severity - while the same report's appendix said the
-                     # product markup was complete - and then offered the
-                     # shipping sentence as what an assistant would quote from
-                     # all twelve of the pages it looked at.
-                     "[class*=announcement]", "[id*=announcement]",
-                     "[class*=promo-bar]", "[class*=promobar]", "[class*=promo_bar]",
-                     "[class*=announce-bar]", "[class*=top-bar]", "[class*=topbar]",
-                     "[class*=usp-bar]", "[class*=marquee]", "[role=marquee]",
-                     # Markup that says "do not show this". A restaurant chain
-                     # ships an aria-hidden "you are leaving our site" modal in
-                     # every page's header, and it became the first content
-                     # section of twelve pages: the answer-first check read it
-                     # as their opening prose, and the citation table offered
-                     # the same irrelevant sentence as what an assistant would
-                     # quote from the homepage, the contact page, the FAQ and
-                     # every location page. A machine reading the page for
-                     # facts does not read what the page has hidden.
-                     "[aria-hidden=true]", "[hidden]"):
-        for found in clone.select(selector):
-            found.decompose()
-    # `select` builds the whole list before anything is removed, so decomposing
-    # a parent leaves its already-matched descendants in the list with their
-    # attributes set to None. Calling `.get` on one of those raised
-    # `AttributeError: 'NoneType' object has no attribute 'get'` and killed the
-    # crawl outright - no snapshot, no report, just a stack trace - on two major
-    # retail sites, both of which ship a hidden banner containing an
-    # inline-styled child. That is ordinary markup, not an exotic case.
+    for selector in _DECLARED_CHROME_SELECTORS:
+        _decompose_safely(clone, selector)
     for found in clone.select("[style]"):
         if getattr(found, "attrs", None) is None:
             continue                      # already removed with its parent
         style = (found.get("style") or "").replace(" ", "").lower()
         if "display:none" in style or "visibility:hidden" in style:
             found.decompose()
-    return re.sub(r"\s+", " ", clone.get_text(separator=" ")).strip()
+
+    declared = len(re.sub(r"\s+", " ", clone.get_text(separator=" ")).strip())
+    budget = _GUESS_MAX_SHARE * declared
+    for selector in _GUESSED_CHROME_SELECTORS:
+        if _text_length_of(selector, clone) > budget:
+            continue                      # too big to be furniture
+        _decompose_safely(clone, selector)
+    return tidy_spacing(re.sub(r"\s+", " ", clone.get_text(separator=" ")).strip())
 
 
 def eprint(*args):

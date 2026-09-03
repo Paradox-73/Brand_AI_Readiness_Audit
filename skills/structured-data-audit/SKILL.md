@@ -60,16 +60,27 @@ from a consultancy or an author byline from a pricing page. See
    single store page out of sixty — its training subsidiary — and that became the identity for
    the whole report.
 
-3. **Product and Offer**, only if product detail pages were detected. Missing `Product` is
+3. **One LocalBusiness per branch**, when three or more pages each print a street address
+   no other page prints. **High** at five or more such pages, otherwise **medium**. This is
+   the single highest-value markup a multi-location business can add, and there was no check
+   for it: a pizza chain with sixty branches got a report that never used the word
+   `LocalBusiness`. Detect the branches by reading the addresses off the pages, never only
+   from the URL slug or from place markup the site is missing - the markup that would have
+   identified the chain is the markup the chain does not have, and gating on it means the
+   defect hides itself. Set `parentOrganization` on each branch to the site-wide
+   Organization, and never reuse the head-office address across branches: the whole point is
+   that they differ.
+
+4. **Product and Offer**, only if product detail pages were detected. Missing `Product` is
    **high**. Present but with no `offers`, or an `offers` object missing `price`,
    `priceCurrency` or `availability`, is **medium** — it answers "what is this" but not
    "what does it cost", which is the question being asked.
 
-4. **Article**, only if article pages were detected. Missing is **medium**; present but
+5. **Article**, only if article pages were detected. Missing is **medium**; present but
    lacking `datePublished`, `dateModified`, `headline` or `author` is **medium**, because
    date and author are what let a consumer decide whether to trust the writing.
 
-5. **FAQPage**, only on pages that read as an FAQ. **Medium**: question-and-answer pairs are
+6. **FAQPage**, only on pages that read as an FAQ. **Medium**: question-and-answer pairs are
    already shaped like the thing an assistant is trying to produce.
 
    A page reads as an FAQ when most of its headings are questions, not merely four of them.
@@ -81,25 +92,33 @@ from a consultancy or an author byline from a pricing page. See
    the page is treated as spam by several consumers, which the finding itself says. If fewer
    than two real questions remain, emit a placeholder rather than a fabrication.
 
-6. **BreadcrumbList** on deep pages, and **WebSite + SearchAction** on the homepage *only if
+7. **BreadcrumbList** on deep pages, and **WebSite + SearchAction** on the homepage *only if
    the site actually has search*. Both **low**. Declaring a SearchAction for search that does
    not exist would be worse than declaring nothing.
 
-7. **Agreement with the visible page.** This is the check most audits skip and the one that
+8. **Agreement with the visible page.** This is the check most audits skip and the one that
    matters most. A missing fact leaves a machine uncertain; a **contradictory** one teaches
    it something false with the confidence that structured data carries. Report **high** when:
    - an `Offer` price is not among the prices shown on the same page — compared
      **numerically**, so `480.00` and `$480` are correctly treated as the same price;
    - an `Organization` name appears nowhere in the page's title, headings or body text.
 
-8. **Metadata hygiene, last.** Missing or duplicated `<title>` and `meta description` are
+9. **Metadata hygiene, last.** Missing or duplicated `<title>` and `meta description` are
    **medium** (duplicates usually mean a template dropped its page variable, so fix the
    template). Title length is only reported when 40% or more of pages fall outside 15–75
    characters — one title a few characters long is not a defect. Missing Open Graph tags are
    **low**, and only when they affect 40%+ of pages. Missing `lang` is **low**. Microdata
    with no JSON-LD is **low**: valid, but it breaks whenever the template changes.
 
-9. **Generate the fix, do not describe it.** Every snippet in the report is pre-filled with
+**A value about the brand comes off a page about the brand.** Every snippet value is read
+from the site, and the page it is read from has to be entitled to speak for the subject. A
+restaurant's `LocalBusiness` description came out as a tote bag's marketing copy, because the
+homepage had no defining sentence and the search fell through in URL order to a product page
+where "Brawn's blue tote **is** not only bold..." matched on the word "is". The same report
+correctly said elsewhere that no page states what the brand is. Read a whole-brand claim from
+home, about or contact, and from nowhere else.
+
+10. **Generate the fix, do not describe it.** Every snippet in the report is pre-filled with
    values already extracted from the site — real brand name, real URL, real logo, real
    `sameAs` targets, real prices, real FAQ questions taken from the page's own H2s. A
    snippet the owner can paste beats an instruction to "add structured data".

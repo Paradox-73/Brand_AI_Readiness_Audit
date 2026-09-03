@@ -1,80 +1,113 @@
 # AI crawler user agents
 
-The user agents `crawl-access-audit` checks in robots.txt, split by **what blocking them
-actually costs**. That split is the point of this file: most audits report "you block AI
-crawlers" as one undifferentiated problem, when the two groups represent completely
+The user agents `crawl-access-audit` checks in robots.txt, and **what blocking each one
+actually costs**. That distinction is the point of this file: most audits report "you block
+AI crawlers" as one undifferentiated problem, when the groups below represent completely
 different decisions.
 
-> **Operators change these.** User-agent tokens are added, renamed and split as products
-> evolve, and an operator can change what a token is used for without announcement. Treat
-> the groupings below as accurate at the time of writing and worth re-checking against each
-> operator's published documentation before acting on a block.
+> **The tables below are generated from the code.** `AI_CRAWLER_AGENTS` in
+> `skills/crawl-access-audit/scripts/check.py` is the only place a role is written down, and
+> `tests/test_crawler_roles.py` fails the build if this file and that table disagree. An
+> earlier version of this file was maintained by hand beside the code and had Meta's two
+> crawlers reversed relative to it.
+
+> **Operators change these.** Tokens are added, renamed and split as products evolve, and an
+> operator can change what a token is used for without announcement. Each row carries the
+> page it came from and the date that page was read. Re-check before acting on a block.
 
 ---
 
-## Group 1: answer crawlers — blocking these costs citations
+<!-- BEGIN GENERATED: agent table, rendered from AI_CRAWLER_AGENTS in check.py -->
 
-These fetch live pages to build or support an answer a user is reading right now. A block
-here removes the brand from answers directly, which is a discoverability defect.
+## Search index agents (7)
 
-| User agent | Operator | Notes |
-|---|---|---|
-| `OAI-SearchBot` | OpenAI | Search index for ChatGPT search. The clearest citation-affecting agent OpenAI publishes. |
-| `ChatGPT-User` | OpenAI | User-triggered fetch — someone asked and ChatGPT is retrieving the page now. |
-| `GPTBot` | OpenAI | Documented primarily as a training crawler, but OpenAI states it also affects whether content can surface. Grouped here because the citation risk is real; see the note below. |
-| `ClaudeBot` | Anthropic | General crawler. |
-| `Claude-User` | Anthropic | User-triggered fetch. |
-| `Claude-SearchBot` | Anthropic | Search indexing. |
-| `anthropic-ai` | Anthropic | Legacy token; still seen in robots.txt files. |
-| `PerplexityBot` | Perplexity | Indexing for a product built around citing sources. |
-| `Perplexity-User` | Perplexity | User-triggered fetch. |
-| `Applebot` | Apple | Powers Siri and Spotlight. Distinct from `Applebot-Extended`. |
-| `Amazonbot` | Amazon | Powers Alexa answers. |
-| `Bytespider` | ByteDance | Widely reported as aggressive; blocking is often a bandwidth decision. |
-| `Meta-ExternalAgent` | Meta | Crawler for Meta AI products. |
-| `MistralAI-User` | Mistral | User-triggered fetch. |
-| `DuckAssistBot` | DuckDuckGo | Powers DuckAssist answers. |
-| `YouBot` | You.com | Indexing for a citing answer engine. |
-| `cohere-ai` | Cohere | Retrieval. |
+These index pages so the brand can be surfaced and linked in an answer. Blocking one costs citations.
 
-### The GPTBot judgement call
+| User agent | Operator | What the operator says it does | Source |
+|---|---|---|---|
+| `OAI-SearchBot` | OpenAI | surfaces websites in search results in ChatGPT's search features | [operator docs](https://developers.openai.com/api/docs/bots), read 2026-09-03 |
+| `Claude-SearchBot` | Anthropic | analyses online content to improve search result quality | [operator docs](https://support.claude.com/en/articles/8896518-does-anthropic-crawl-data-from-the-web-and-how-can-site-owners-block-the-crawler), read 2026-09-03 |
+| `PerplexityBot` | Perplexity | surfaces and links websites in Perplexity search results; explicitly not used for foundation-model training | [operator docs](https://docs.perplexity.ai/guides/bots), read 2026-09-03 |
+| `Applebot` | Apple | powers Spotlight, Siri and Safari search | [operator docs](https://support.apple.com/en-us/119829), read 2026-09-03 |
+| `Amzn-SearchBot` | Amazon | improves search experiences in Amazon products such as Alexa; does not crawl for generative AI training | [operator docs](https://developer.amazon.com/amazonbot), read 2026-09-03 |
+| `DuckAssistBot` | DuckDuckGo | gathers passages that DuckAssist cites in instant answers | [operator docs](https://duckduckgo.com/duckduckgo-help-pages/results/duckassistbot), read 2026-09-03 |
+| `YouBot` | You.com | indexes pages for an answer engine that links its sources | **no published statement** - role inferred from behaviour |
 
-`GPTBot` is genuinely ambiguous and worth being explicit about. OpenAI documents it mainly
-as the crawler whose content may be used to improve models — which is a training role — while
-`OAI-SearchBot` and `ChatGPT-User` are the retrieval-side agents.
+## Live-fetch agents (6)
 
-It sits in group 1 here because the *cost of being wrong* is asymmetric. Misclassifying it as
-training-only would mean staying silent about a block that may suppress the brand, which is
-the failure mode this audit exists to prevent. Misclassifying it the other way produces a
-`high` finding whose fix — "decide which of these you want quoting your pages" — is
-reasonable advice either way.
+These fetch one page because a person just asked a question about it. Blocking one costs that answer.
 
-The finding text never claims GPTBot is purely a search crawler, and this file is cited from
-it. Treated as an assumption throughout, not as a measured fact.
+| User agent | Operator | What the operator says it does | Source |
+|---|---|---|---|
+| `ChatGPT-User` | OpenAI | visits a web page when a user asks ChatGPT a question | [operator docs](https://developers.openai.com/api/docs/bots), read 2026-09-03 |
+| `Claude-User` | Anthropic | accesses a website when an individual asks Claude a question | [operator docs](https://support.claude.com/en/articles/8896518-does-anthropic-crawl-data-from-the-web-and-how-can-site-owners-block-the-crawler), read 2026-09-03 |
+| `Perplexity-User` | Perplexity | visits a web page to help answer a question a user just asked | [operator docs](https://docs.perplexity.ai/guides/bots), read 2026-09-03 |
+| `Amzn-User` | Amazon | supports user actions such as answering an Alexa query that needs current information; does not crawl for generative AI training | [operator docs](https://developer.amazon.com/amazonbot), read 2026-09-03 |
+| `Meta-ExternalFetcher` | Meta | fetches individual links at a user's request, including helping AI navigate sites to complete tasks | [operator docs](https://developers.facebook.com/docs/sharing/webmasters/web-crawlers/), read 2026-09-03 |
+| `MistralAI-User` | Mistral | fetches a page when a Le Chat user asks about it | **no published statement** - role inferred from behaviour |
+
+## Training crawlers (13)
+
+These collect corpora for model training. Blocking is a rights decision plenty of publishers make on purpose, and this audit reports it at `info` severity, never as a defect.
+
+| User agent | Operator | What the operator says it does | Source |
+|---|---|---|---|
+| `GPTBot` | OpenAI | crawls content that may be used in training OpenAI's foundation models | [operator docs](https://developers.openai.com/api/docs/bots), read 2026-09-03 |
+| `ClaudeBot` | Anthropic | collects web content that could contribute to model training | [operator docs](https://support.claude.com/en/articles/8896518-does-anthropic-crawl-data-from-the-web-and-how-can-site-owners-block-the-crawler), read 2026-09-03 |
+| `anthropic-ai` | Anthropic | legacy token still seen in robots.txt; superseded by the three above and no longer documented | **no published statement** - role inferred from behaviour |
+| `Amazonbot` | Amazon | fetches content for Amazon products and services, and may be used to train Amazon AI models | [operator docs](https://developer.amazon.com/amazonbot), read 2026-09-03 |
+| `Meta-ExternalAgent` | Meta | crawls for use cases such as training foundation AI models or indexing content directly | [operator docs](https://developers.facebook.com/docs/sharing/webmasters/web-crawlers/), read 2026-09-03 |
+| `Bytespider` | ByteDance | collects training data for ByteDance's models; ByteDance publishes no crawler documentation, so this role is inferred from observed behaviour | **no published statement** - role inferred from behaviour |
+| `cohere-ai` | Cohere | corpus collection; no published purpose statement | **no published statement** - role inferred from behaviour |
+| `CCBot` | Common Crawl | builds the open Common Crawl corpus that many models train on | [operator docs](https://commoncrawl.org/ccbot), read 2026-09-03 |
+| `omgilibot` | Webz.io | collects web data for licensing to model builders | **no published statement** - role inferred from behaviour |
+| `Diffbot` | Diffbot | extracts pages into a commercial knowledge graph | **no published statement** - role inferred from behaviour |
+| `Timpibot` | Timpi | builds a distributed index sold as training data | **no published statement** - role inferred from behaviour |
+| `PanguBot` | Huawei | collects training data for the PanGu models | **no published statement** - role inferred from behaviour |
+| `ImagesiftBot` | ImageSift | collects images for dataset building | **no published statement** - role inferred from behaviour |
+
+## Opt-out tokens, which are not crawlers (3)
+
+These fetch nothing. The token exists only so a site can express a training opt-out, so blocking one cannot cost a citation.
+
+| User agent | Operator | What the operator says it does | Source |
+|---|---|---|---|
+| `Applebot-Extended` | Apple | opt-out token for training Apple's foundation models; does not affect Siri or Spotlight, which follow Applebot | [operator docs](https://support.apple.com/en-us/119829), read 2026-09-03 |
+| `Google-Extended` | Google | opt-out token for Gemini training and grounding; does not affect Google Search indexing, which follows Googlebot | [operator docs](https://developers.google.com/search/docs/crawling-indexing/google-common-crawlers), read 2026-09-03 |
+| `Webzio-Extended` | Webz.io | training opt-out token for Webz.io datasets | **no published statement** - role inferred from behaviour |
+
+<!-- END GENERATED -->
 
 ---
 
-## Group 2: training crawlers — blocking these is a rights decision
+## What this replaced, and why the shape changed
 
-These collect corpora for model training rather than fetching pages to answer a live
-question. Blocking them is a legitimate choice about content rights, made by plenty of
-publishers on purpose.
+The first version of this file had two groups and named them by consequence: "answer
+crawlers" and "training crawlers". `GPTBot`, `ClaudeBot`, `Amazonbot`, `Bytespider` and
+`Meta-ExternalAgent` were in the first; `Meta-ExternalFetcher` was in the second. All six
+were wrong against their operators' own published descriptions, and the finding built on
+them told site owners, at high severity, to allow-list the five so their pages could be
+cited.
 
-| User agent | Operator | Notes |
-|---|---|---|
-| `Google-Extended` | Google | **Controls Gemini training only.** It does not affect Google Search indexing or AI Overviews eligibility — that is `Googlebot`. This is the most commonly misunderstood token in the list. |
-| `Applebot-Extended` | Apple | Training opt-out. Does **not** affect Siri or Spotlight, which follow `Applebot`. |
-| `CCBot` | Common Crawl | Feeds an open dataset many models train on. |
-| `Meta-ExternalFetcher` | Meta | Distinct from `Meta-ExternalAgent`. |
-| `omgilibot` | Webz.io | Data licensing. |
-| `Webzio-Extended` | Webz.io | Training opt-out. |
-| `Diffbot` | Diffbot | Knowledge-graph extraction. |
-| `Timpibot` | Timpi | Index building. |
-| `PanguBot` | Huawei | Training. |
-| `ImagesiftBot` | ImageSift | Image dataset collection. |
+That advice would have reopened a site to training collection its owner had deliberately
+opted out of, to fix a citation problem that did not exist. It is the most damaging thing
+this audit has been caught saying.
 
-A block on this group is reported as `info` severity: recorded so the owner can confirm it is
-intentional, never counted as a defect.
+Three things changed, and none of them is "the list was corrected":
+
+- **One role became two.** A search index and a live per-question fetch fail differently and
+  are worth telling apart, so `search` and `user-fetch` are separate. They are grouped
+  together only where the check genuinely does not care.
+- **A fourth role exists for tokens that are not crawlers.** `Google-Extended` and
+  `Applebot-Extended` fetch nothing. They are opt-out signals. Blocking one cannot cost a
+  citation, and describing them as crawlers was the reason `Google-Extended` kept being
+  confused with `Googlebot`.
+- **Each row carries its source and the date it was read**, and a row with no published
+  statement says so in the report rather than presenting an inference as the operator's
+  position.
+
+The finding's own sentences are now built from these rows rather than written beside them,
+so the report cannot describe an agent as doing something the table does not say.
 
 ---
 

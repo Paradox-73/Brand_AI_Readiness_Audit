@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Agent Skills](https://img.shields.io/badge/Agent%20Skills-agentskills.io-6E56CF?style=flat-square)
 ![Skills](https://img.shields.io/badge/Skills-7%20(1%20entrypoint)-0F9D58?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-688%20passing-2EA043?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-889%20passing-2EA043?style=flat-square)
 ![Read Only](https://img.shields.io/badge/Mode-Read--only-FF6F00?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-4169E1?style=flat-square)
 
@@ -33,8 +33,8 @@ matters if the one before it passed.
 | `freshness-corroboration-audit` | Is it current, and does anywhere else agree? Dates, staleness, off-site profile breadth, name collisions | Trusted |
 | `engagement-audit` | Does the person who clicks through stay? Orientation, dead ends, orphans, broken links, breadcrumbs, interstitials, forms | Visitor stays |
 
-Between them the six run **71 checks**, drawing on a catalogue of **77 distinct findings**
-and **55 named root causes**. A single audit reports only the ones its evidence supports —
+Between them the six run **73 checks**, drawing on a catalogue of **80 distinct findings**
+and **56 named root causes**. A single audit reports only the ones its evidence supports —
 a typical small site produces ten to twenty.
 
 Six is the number of gates there are. A test fails the build if any two skills ever claim the
@@ -103,16 +103,24 @@ site outranks a rewrite that fixes one page.
 | **Owner** | developer / content owner / marketing |
 | **Effort** | low / medium / high |
 
-Three properties worth naming.
+Four properties worth naming.
 
 **A refused request is never an absence.** Shown very little of a site, findings that would
 assert something is missing move to *Questions this audit could not answer*. And nothing in a
-snippet is invented: a value appearing nowhere in the crawl becomes a placeholder.
+snippet is invented: a value appearing nowhere in the crawl becomes a placeholder — nor
+borrowed from the wrong subject, so a sentence describing the brand may only be read off a
+page that speaks for the brand.
 
-**Silence is explained.** Every check is accounted for in the appendix. The ones that declined
-say why — *"No product detail pages were detected, so Product markup is not expected."* The
-ones that ran clean are listed as passed, so a reader can see robots.txt was fetched and was
-fine rather than wonder whether it was looked at. A check never simply goes missing.
+**Nothing about a third party is asserted without a source.** Every AI crawler this audit
+names carries its operator's own description of what it does, the URL that states it and the
+date that page was read; the report renders those rather than repeating them. The audit will
+never tell you to allow a training crawler in order to be cited. See
+`skills/crawl-access-audit/references/ai-crawler-user-agents.md`.
+
+**Silence is explained.** Every check is in exactly one of four places in the appendix: it
+produced a finding, it contributed to one, it declined and says why — *"No product detail
+pages were detected, so Product markup is not expected"* — or it ran clean. A check never
+simply goes missing, and a test over every fixture proves it.
 
 **A deliberate choice is not a fault.** Blocking AI *training* crawlers is information, not a
 problem: it is a rights decision, and calling it a defect imposes a view the brand never asked
@@ -146,10 +154,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 python -m venv .venv; .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
-Rather not change the policy? In `cmd.exe` activate with
-`.venv\Scripts\activate.bat`; in Git Bash, `source .venv/Scripts/activate`.
-
-Then run it:
+Rather not change the policy? In `cmd.exe` activate with `.venv\Scripts\activate.bat`; in Git Bash, `source .venv/Scripts/activate`. Then run it:
 
 ```bash
 # macOS / Linux
@@ -177,8 +182,8 @@ The tests, if you want them:
 
 ```bash
 pip install pytest
-python3 -m pytest -q                        # 688 tests, about 16 minutes
-python3 -m pytest -q -m "not mutation"      # 631 tests, about 4 minutes
+python3 -m pytest -q                        # 889 tests, about 17 minutes
+python3 -m pytest -q -m "not mutation"      # 830 tests, about 5 minutes
 ```
 
 > **Windows path limit.** Do not unzip into a deep directory — `pip` cannot install `lxml` if
@@ -201,54 +206,50 @@ This README is deliberately short. Everything below lives where a skill can read
 | `evals/README.md` | Three prompts a judge is likely to type, and what should happen |
 
 **One number, if you read nothing else.** Brands assistants name link to **7.2** other places
-about themselves; comparable competitors they ignore link **4.6**. The audit also confirms
-those profile links still resolve, on the six platforms that answer that question honestly.
-That separated in all six categories studied — the only measure that did — and it is the
-cheapest fix here. You cannot become famous this quarter; you can claim six profiles this week
-and put the same sentence on all of them.
+about themselves; comparable competitors they ignore link **4.6**. That separated in all six
+categories studied — the only measure that did — and it is the cheapest fix here. You cannot
+become famous this quarter; you can claim six profiles this week and put the same sentence on
+all of them. The audit also confirms those links still resolve, on the six platforms that
+answer that question honestly.
 
-*What that number is and is not:* our own study of 29 crawlable sites in six categories, matched within category. Whether an assistant "names" a brand was our prominence judgement, not a systematic query of any assistant, so this is the strongest association we found and not a proven cause. The study says so at greater length, including the measures that did **not** separate the two groups.
+*What that number is and is not:* our own study of 29 crawlable sites in six categories, matched within category. Whether an assistant "names" a brand was our prominence judgement, not a systematic query, so this is the strongest association we found and not a proven cause. The study says so at greater length, including the measures that did **not** separate the two groups.
 
 ---
 
 ## Limits, stated rather than found
 
-- **A response is read to 5 MB and no further.** Above that the page is analysed up to the
-  cap, recorded as truncated, and the report says so. The heaviest real homepage we
-  measured was 1.38 MB, so nothing ordinary comes near it.
-- **On a site that refuses HEAD, unreached link targets are unchecked.** Three of eight
-  major commercial sites answer 403 to HEAD and 200 to GET; verifying those links would mean
-  fetching each in full. The report says how many went unchecked, not that they are broken.
-- **Sixty pages is still a sample** on a large site; the report says how many it read, and
-  every finding describes only those pages. Sixty was measured: thirty pages found 16
-  problems in 84 s, sixty found 19 in 99 s, a hundred added one for another 72 s.
+- **A response is read to 5 MB and no further.** Above that the page is analysed up to the cap,
+  recorded as truncated, and the report says so. The heaviest real homepage we measured was
+  1.38 MB.
+- **On a site that refuses HEAD, unreached link targets are unchecked.** Three of eight major
+  commercial sites answer 403 to HEAD and 200 to GET. The report says how many went unchecked,
+  not that they are broken.
+- **Sixty pages is still a sample** on a large site; every finding describes only those pages.
+  Sixty was measured: thirty pages found 16 problems in 84 s, sixty found 19 in 99 s, a hundred
+  added one for another 72 s.
 - **The prose checks are English.** The definition pattern, the answer-first test, sentence
-  length and the call-to-action verbs all assume it. The crawl detects the site language once
-  and those checks **decline** on a site in another language rather than guessing. Everything
-  structural still runs.
+  length and the call-to-action verbs all assume it, so they **decline** on a page that
+  declares another language rather than guessing. Everything structural still runs.
 - **Engagement is read from markup, not analytics.** It finds structural reasons a visitor
   would leave. It cannot tell you that one did.
-- **Some sites refuse us, and we do not work around it.** Completing our HTTP headers
-  changed nothing on zero of fifteen blocked sites, and getting in would mean wearing a
-  browser's identity. A block is a finding.
+- **Some sites refuse us, and we do not work around it.** Completing our HTTP headers changed
+  nothing on zero of fifteen blocked sites, and getting in would mean wearing a browser's
+  identity. A block is a finding.
 - **Name conflicts are checked against Wikidata only.** That says how many organisations share
   a name, not which one an assistant currently prefers.
-- **Only six platforms can be asked whether a profile exists** — LinkedIn, X, YouTube,
-  GitHub, Wikipedia and Wikidata answer 404 for one that is not there. Instagram, TikTok,
-  Medium, Pinterest and Threads answer 200 for anything, and Crunchbase, Yelp, Glassdoor and
-  Trustpilot refuse every crawler; those nine are reported as unchecked.
+- **Only six platforms can be asked whether a profile exists** — LinkedIn, X, YouTube, GitHub,
+  Wikipedia and Wikidata answer 404 for one that is not there. Instagram, TikTok, Medium,
+  Pinterest and Threads answer 200 for anything, and Crunchbase, Yelp, Glassdoor and Trustpilot
+  refuse every crawler; those nine are reported as unchecked.
 - **Without Playwright the JavaScript gap is inferred, not measured**, so the homepage-shell
-  finding drops to medium confidence. With Playwright — used automatically when installed —
-  it is measured, and a homepage whose text JavaScript recovers is high rather than critical.
-  Both verdicts are correct; the difference is what was known.
-- **A robots.txt block stops the run.** The verdict explains the empty result instead of
-  presenting it as a clean bill of health.
-- **A refused request is unchecked, never an absence**, and a path robots.txt disallows is
-  never fetched — so "this disallow looks like real content" is a judgement about the path,
-  not a measurement of what is behind it. Both findings say so.
-- **The JavaScript gap is measured on five pages.** A finding naming thirty extrapolates
-  from those five, says how many were rendered, and drops to medium when the rendered ones
-  recovered their text.
+  finding drops to medium confidence. With Playwright — used automatically when installed — it
+  is measured. Both verdicts are correct; the difference is what was known.
+- **A robots.txt block stops the run**, and the verdict explains the empty result instead of
+  presenting it as a clean bill of health. A refused request is unchecked, never an absence;
+  and a path robots.txt disallows is never fetched, so "this disallow looks like real content"
+  is a judgement about the path, not a measurement of what is behind it. Both findings say so.
+- **The JavaScript gap is measured on five pages.** A finding naming thirty extrapolates from
+  those five and says how many were rendered.
 
 ---
 

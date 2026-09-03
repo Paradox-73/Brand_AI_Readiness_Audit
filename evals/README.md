@@ -72,8 +72,18 @@ declined it, rather than not looking.
   which is a different and defensible claim.
 
 **Judge test.** On `tests/fixtures/blocked-site` the answer must lead with the WAF block and
-the four blocked answer crawlers — and must *not* present the training-crawler block as a
-problem, since that is `info` severity and a rights decision.
+the **two** blocked answer crawlers — `OAI-SearchBot` and `PerplexityBot` — and must *not*
+present the four blocked training crawlers as a problem, since that is `info` severity and a
+rights decision.
+
+That split used to read four and two, because `GPTBot` and `ClaudeBot` sat in the answer
+group. They are training crawlers by their operators' own published descriptions, and the
+report built on the old grouping told owners at high severity to allow-list them so their
+pages could be cited. Following it would have reopened a site to training collection its
+owner had deliberately opted out of, for no citation gain at all. Every agent named in the
+report now carries its operator's own statement of what it does, and
+`skills/crawl-access-audit/references/ai-crawler-user-agents.md` carries the URL and the
+date that statement was read.
 
 ---
 

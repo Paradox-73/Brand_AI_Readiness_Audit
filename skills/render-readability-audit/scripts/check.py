@@ -51,8 +51,8 @@ if _SHARED is None:
 sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
-    CONTENT_TYPES, example_urls, has_price, load_snapshot, pages_of, pct,
-    plural, sample, SkillResult
+    CONTENT_TYPES, example_urls, extraction_looks_incomplete, has_price,
+    load_snapshot, pages_of, pct, plural, sample, SkillResult
 )
 
 SKILL = "render-readability-audit"
@@ -148,6 +148,20 @@ def _shell_reasons(page):
     spa = page.get("spa_shell") or {}
     scripts = page.get("scripts") or {}
     reasons = []
+
+    # A page whose text this audit failed to extract is not a page with no
+    # text. On a news site's liveblog template the extractor kept 89 of 1,660
+    # visible characters, and the report said the page was an empty JavaScript
+    # shell and too thin to quote - about server-rendered Arabic prose sitting
+    # in a nested div none of the content selectors reach. The fix offered was
+    # several days of development work.
+    #
+    # A state blob or an empty framework root is the site telling us the text
+    # arrives later, and that evidence still counts. A short extraction on its
+    # own does not.
+    if extraction_looks_incomplete(page) and not (
+            spa.get("state_blobs") or spa.get("root_selector")):
+        return []
 
     text_len = page.get("body_text_len", 0)
     script_bytes = scripts.get("inline_bytes", 0) + spa.get("state_blob_bytes", 0)
@@ -312,9 +326,14 @@ def _check_thin_pages(result, content_pages, shells):
     """
     result.check("thin-html")
     shell_urls = {p["url"] for p in shells}
+    # Same guard as the shell check, for the same reason: a page whose text
+    # this audit failed to extract is not a page with too little text. The two
+    # findings fired together on one news liveblog, and both were about our
+    # own extractor rather than about the page.
     thin = [p for p in content_pages
             if p["url"] not in shell_urls
-            and p.get("body_text_len", 0) < MIN_QUOTABLE_TEXT]
+            and p.get("body_text_len", 0) < MIN_QUOTABLE_TEXT
+            and not extraction_looks_incomplete(p)]
 
     if not thin:
         result.skip("thin-html",

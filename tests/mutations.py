@@ -144,7 +144,14 @@ mutation(
 mutation(
     "a bot manager returns 403 to a named AI crawler",
     expect={"bot-manager-block"},
-    apply=lambda site: rules(site, {"block_user_agents": ["GPTBot"]}),
+    # Blocks the two agents the probe uses. It used to block GPTBot, which is
+    # a training crawler by OpenAI's own documentation and so is no longer
+    # something this check asks about - the probe only ever sends the identity
+    # of an agent whose refusal would cost a citation, and it now asks two
+    # operators rather than one before concluding the edge treats crawlers no
+    # differently.
+    apply=lambda site: rules(
+        site, {"block_user_agents": ["OAI-SearchBot", "Claude-SearchBot"]}),
 )
 
 mutation(
@@ -700,4 +707,123 @@ mutation(
         site,
         swap(r"\$[\d,]+(?: per month| per year)?",
              "free and open source, with no licence fee")),
+)
+
+# --- Round 5: the two new checks ------------------------------------------
+
+BRANCHES = (
+    ("walmgate", "41 Walmgate, York YO1 9TT", "York"),
+    ("berwick", "51 Berwick Street, London W1F 8SJ", "London"),
+    ("parkrow", "12 Park Row, Leeds LS1 5HD", "Leeds"),
+    ("union", "9 Union Street, Bristol BS1 5EF", "Bristol"),
+)
+
+# The fixture's own header and footer, so the added pages differ from the rest
+# of the site in exactly one respect: each prints its own address and none
+# declares a visitable schema.org type. Without the chrome the mutation also
+# produced dead ends, missing breadcrumbs and inconsistent navigation - all
+# true of the pages, none of them the property under test.
+_BRANCH_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{city} branch | Brightpath Analytics</title>
+<meta name="description" content="Our {city} office: address, opening hours and how to reach the team who look after customers in the area.">
+<link rel="canonical" href="{{{{BASE}}}}/branches/{slug}.html">
+<meta property="og:title" content="{city} branch | Brightpath Analytics">
+<meta property="og:description" content="Our {city} office, its address and its hours.">
+<meta property="og:image" content="{{{{BASE}}}}/assets/og-home.png">
+<meta property="og:url" content="{{{{BASE}}}}/branches/{slug}.html">
+</head>
+<body>
+<header>
+  <a href="{{{{BASE}}}}/index.html">Brightpath Analytics</a>
+  <nav aria-label="Main">
+    <a href="{{{{BASE}}}}/services.html">Forecasting platform</a>
+    <a href="{{{{BASE}}}}/pricing.html">Pricing</a>
+    <a href="{{{{BASE}}}}/about.html">About us</a>
+    <a href="{{{{BASE}}}}/blog/index.html">Research notes</a>
+    <a href="{{{{BASE}}}}/faq.html">FAQ</a>
+    <a href="{{{{BASE}}}}/contact.html">Contact</a>
+  </nav>
+  <nav aria-label="Breadcrumb" class="breadcrumb">
+    <a href="{{{{BASE}}}}/index.html">Home</a> &gt;
+    <a href="{{{{BASE}}}}/branches/index.html">Branches</a> &gt; {city}
+  </nav>
+</header>
+<main>
+<h1>{city} branch</h1>
+<p>The {city} office is at {address}. It is open Monday to Friday from eight in the morning until six in the evening, and on Saturday from nine until one. Call 01904 5512{index} to speak to the team who look after customers in the area, or use the <a href="{{{{BASE}}}}/contact.html">contact form</a> if you would rather write.</p>
+<p>Every branch runs the same forecasting platform and the same service agreement, so a customer moving between them keeps the same account manager and the same reporting. The <a href="{{{{BASE}}}}/pricing.html">pricing page</a> covers what each plan includes, and the <a href="{{{{BASE}}}}/faq.html">FAQ</a> answers the questions we are asked most often about switching.</p>
+</main>
+<footer>
+  <nav aria-label="Footer">
+    <a href="{{{{BASE}}}}/about.html">About us</a>
+    <a href="{{{{BASE}}}}/contact.html">Contact</a>
+    <a href="{{{{BASE}}}}/branches/index.html">Branches</a>
+  </nav>
+</footer>
+</body>
+</html>
+"""
+
+
+def _add_branch_pages(site):
+    """Four pages, each printing its own address, none declaring a place type.
+
+    Linked from the homepage, because an orphan file is not crawled and the
+    point of the mutation is what the crawl sees.
+    """
+    for index, (slug, address, city) in enumerate(BRANCHES):
+        add_file(site, "branches/{}.html".format(slug),
+                 _BRANCH_TEMPLATE.format(slug=slug, address=address, city=city,
+                                         index=index))
+    listing = _BRANCH_TEMPLATE.format(
+        slug="index", address="41 Walmgate, York YO1 9TT", city="Our branches",
+        index=0)
+    listing = listing.replace(
+        "</main>",
+        "<ul>{}</ul></main>".format("".join(
+            '<li><a href="{{{{BASE}}}}/branches/{0}.html">{1}</a></li>'.format(
+                slug, city) for slug, _, city in BRANCHES)))
+    add_file(site, "branches/index.html", listing)
+    edit(site, "index.html",
+         lambda text: text.replace(
+             "</footer>",
+             '<nav aria-label="Branches">'
+             '<a href="{{BASE}}/branches/index.html">Our branches</a>'
+             "</nav></footer>"))
+
+
+mutation(
+    "branch pages each print their own address and none declares a place",
+    # The highest-value markup a multi-location business can add, and there was
+    # no check for it at all: a chain with sixty branches got a report that
+    # never used the word LocalBusiness. Its branch pages sat at a slug no
+    # location pattern matched, and the only other signal was place markup -
+    # which is exactly what a site with this defect does not have, so the
+    # defect hid itself. The addresses are read off the pages instead.
+    expect={"no-org-schema"},
+    # A real consequence of the pages, not of the property: they are deep pages
+    # carrying a visible breadcrumb and no BreadcrumbList markup, which the
+    # breadcrumb check is right to notice.
+    also={"no-breadcrumb-markup"},
+    apply=_add_branch_pages,
+)
+
+
+mutation(
+    "the navigation is shipped but hidden until a script runs",
+    # Present is not absent, and the two need opposite advice. A university
+    # department keeps thirty real destination links inside a role=dialog
+    # panel marked aria-hidden, and the report said "the primary navigation has
+    # 0 item(s), labels found: none" at high severity, then told them to "make
+    # sure the navigation is real HTML links" - which they already were, all
+    # thirty of them.
+    expect={"no-orientation"},
+    apply=lambda site: edit_all(
+        site,
+        swap(r"<nav\b([^>]*)>",
+             r'<nav\1 aria-hidden="true" role="menu">')),
 )

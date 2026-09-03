@@ -212,10 +212,25 @@ def withhold_absence_claims(findings, snapshot):
 
 # A finding's evidence already states its denominator when it contains one of
 # these shapes: "3 of 60", "12/60", "48.0%".
-_DENOMINATOR_RE = re.compile(r"\b\d+\s*(?:of|/)\s*\d+\b|\d+(?:\.\d+)?%")
+_DENOMINATOR_RE = re.compile(
+    # "3 of 12", "3 of the 12", "3/12", "25%" - the finding sizing itself
+    # outright. `the` is allowed between, because a finding that wrote its own
+    # scale in ordinary English got a second, identical sentence appended after
+    # it: "found on 54 of the 60 pages crawled. Seen on 54 of the 60 pages this
+    # crawl read."
+    r"\b\d+\s*(?:of|/)\s*(?:the\s+)?\d+\b|\d+(?:\.\d+)?%"
+    # "Checked 46 content page(s)", "across 12 product pages", "of 7 article
+    # pages" - the finding naming the population it looked at, in words the
+    # count-pair pattern does not see. Three verification agents ranked this
+    # their top or second fix: the appended sentence read "Seen on 2 of the 60
+    # pages this crawl read" one clause after the evidence said "Checked 46
+    # content page(s). None declares...", contradicting it in the same
+    # sentence and understating a site-wide gap by fifteen times.
+    r"|\b(?:checked|examined|across|among|of)\s+\d{1,4}\s+[a-z-]*\s?page",
+    re.I)
 
 
-def state_the_denominator(finding, pages_crawled):
+def state_the_denominator(finding, pages_crawled, snapshot=None):
     """Append "on N of the M pages crawled" when the evidence names no scale.
 
     The second-largest class of wrong finding was a real observation sized
@@ -240,9 +255,81 @@ def state_the_denominator(finding, pages_crawled):
         count = len(finding.get("affected_pages") or [])
     if not count or not pages_crawled or _DENOMINATOR_RE.search(evidence):
         return evidence
-    return "{} Seen on {} of the {} pages this crawl read.".format(
-        evidence.rstrip(), count, pages_crawled)
+    # The denominator is the population the check looked at, not the size of
+    # the crawl. A finding about article pages that says "7 of the 60 pages"
+    # reads as a 12% problem when it is a 100% one, and an owner triaging by
+    # that number does the wrong thing. Where every affected page is the same
+    # kind of page, that kind is the population; where they are mixed, the
+    # finding really is about the whole crawl.
+    population, unit = _population_for(finding, snapshot, pages_crawled)
+    return "{} Seen on {} of the {} {}.".format(
+        evidence.rstrip(), count, population, unit)
 
+
+def _population_for(finding, snapshot, pages_crawled):
+    """(how many pages this check could have looked at, what to call them)."""
+    types = _types_of(finding.get("affected_pages") or [], snapshot)
+    if len(types) == 1 and snapshot is not None:
+        page_type = next(iter(types))
+        same = sum(1 for page in pages_of(snapshot)
+                   if page.get("page_type") == page_type)
+        if same:
+            return same, "{} pages this crawl read".format(page_type)
+    return pages_crawled, "pages this crawl read"
+
+
+def _types_of(urls, snapshot):
+    if snapshot is None:
+        return set()
+    by_url = {page.get("url"): page.get("page_type") for page in pages_of(snapshot)}
+    return {by_url[url] for url in urls if by_url.get(url)}
+
+
+
+# The count the evidence line states about itself, as a pair. "0 of 12 product
+# pages" -> (0, 12). Only the first such pair, which is the one the sentence is
+# about; a later "3 of 5" inside an example is not the finding's own scale.
+_OWN_COUNT_RE = re.compile(r"\b(\d{1,4})\s*(?:of|/)\s*(\d{1,4})\b")
+
+
+def reconcile_the_example_with_the_claim(finding):
+    """An example must be an instance of the thing being claimed.
+
+    A finding read "2 of 60 pages omit a canonical tag", and printed underneath
+    it "Affected pages (60 total, showing up to 5)" followed by five pages that
+    all had one. The list was the whole crawl, not the offenders, so the one
+    part of the finding an owner would actually click was five wrong pages.
+
+    The check does not need to know which check produced it. The finding states
+    a numerator about itself; `affected_page_count` states another. When those
+    two disagree the per-page list cannot be a list of instances, whichever
+    number is right, so the list is withheld and the finding says so. Printing
+    nothing is strictly better than printing five compliant pages as offenders.
+
+    Returns the reason it was withheld, or "" when the finding is consistent.
+    """
+    pages = finding.get("affected_pages") or []
+    if not pages:
+        return ""
+    count = finding.get("affected_page_count") or len(pages)
+    match = _OWN_COUNT_RE.search(finding.get("evidence") or "")
+    if match is None:
+        return ""
+    claimed, population = int(match.group(1)), int(match.group(2))
+    # A rate ("3 of 12 pages") sizes the finding. A total that equals the
+    # population is the finding saying it covers everything, which is
+    # consistent with an affected list of that size.
+    if claimed == count or population == count:
+        return ""
+    # The claim may be about something other than pages - "0 of 3 declared
+    # phone numbers", "1 of 4 offers". Only reconcile when the sentence is
+    # counting pages, which is the only thing `affected_pages` can hold.
+    tail = (finding.get("evidence") or "")[match.end():match.end() + 40].lower()
+    head = (finding.get("evidence") or "")[:match.start()].lower()
+    if "page" not in tail and "page" not in head[-40:]:
+        return ""
+    return ("the finding counts {} page(s) while its per-page list holds {}, so the list "
+            "cannot be a list of instances".format(claimed, count))
 
 # Values a snippet may contain without the site having to show them: the
 # vocabulary of the format itself, and the shape of a placeholder.
@@ -457,6 +544,30 @@ def assign_ids(findings):
 # Citation simulation
 # --------------------------------------------------------------------------
 
+
+# How many pages have to carry a sentence before it is furniture rather than
+# content. Three, not the half-the-site threshold the whole-page boilerplate
+# stripper uses: a block repeated across one subsection is that subsection's
+# chrome even when it is a tenth of the crawl.
+QUOTE_REPEAT_LIMIT = 3
+
+
+def _quote_key(sentence):
+    return re.sub(r"[^a-z0-9]+", " ", (sentence or "").lower()).strip()
+
+
+def _sentences_seen_more_than_once(snapshot):
+    """Sentences repeated across pages, which no page can claim as its own."""
+    counts = {}
+    for page in pages_of(snapshot):
+        for paragraph in (page.get("paragraphs") or [])[:25]:
+            for sentence in sentences(paragraph):
+                key = _quote_key(sentence)
+                if len(key) < 25:
+                    continue
+                counts[key] = counts.get(key, 0) + 1
+    return {key for key, count in counts.items() if count >= QUOTE_REPEAT_LIMIT}
+
 def simulate_citations(snapshot, brand_name):
     """The sentence an assistant would most likely lift from each key page.
 
@@ -466,6 +577,21 @@ def simulate_citations(snapshot, brand_name):
     out = []
     key_types = ("home", "about", "pricing", "faq", "product", "service", "contact", "location")
     pattern = r"\s+".join(re.escape(t) for t in brand_name.split()) if brand_name else None
+
+    # A sentence that appears on several pages is that site's furniture, not
+    # any one page's distinct content, and a table showing the same words twice
+    # is answering a different question from the one it asks. Two real cases:
+    # a court subsection's postal address, repeated verbatim across six pages
+    # and offered as what an assistant would quote from each; and a footnote
+    # joke - "*[product] is a web product and cannot be installed by CD" -
+    # offered for both the homepage and the pricing page, over the actual
+    # headline and the actual prices.
+    #
+    # The whole-site boilerplate stripper works at half the crawl and cannot
+    # see either: six pages of sixty is ten per cent. Repetition still decides
+    # it; the denominator is just the pages that carry it.
+    repeated = _sentences_seen_more_than_once(snapshot)
+    used = set()
 
     for page in pages_of(snapshot, content_only=True):
         if page["page_type"] not in key_types:
@@ -478,7 +604,8 @@ def simulate_citations(snapshot, brand_name):
             candidates.extend(sentences(paragraph))
         if not candidates:
             candidates = sentences(page.get("body_text", ""))
-        candidates = candidates[:40]
+        candidates = [c for c in candidates[:60]
+                      if _quote_key(c) not in repeated and _quote_key(c) not in used][:40]
         best = None
         reason = ""
         # Priority 1: a definition naming the brand. That is what an assistant
@@ -501,6 +628,8 @@ def simulate_citations(snapshot, brand_name):
                 if 40 <= len(sentence) <= 300 and CONCRETE_RE.search(sentence):
                     best, reason = sentence, "defines something, though it states no figure"
                     break
+        if best is not None:
+            used.add(_quote_key(best))
         out.append({
             "url": page["url"],
             "page_type": page["page_type"],
@@ -805,8 +934,17 @@ def compose(snapshot, skill_results, audited_at=None):
         finding["suggested_action"]["priority_score"] = value
         finding["reach"] = reach
     haystack = observed_values(snapshot)
+    unreconciled = []
     for finding in findings:
-        finding["evidence"] = state_the_denominator(finding, pages_crawled)
+        # Rule 5 runs before the denominator sentence is appended, so it reads
+        # the check's own count rather than one this file just wrote.
+        mismatch = reconcile_the_example_with_the_claim(finding)
+        if mismatch:
+            unreconciled.append("{}: {}".format(finding["id_hint"], mismatch))
+            finding["affected_pages"] = []
+            finding["example_withheld"] = mismatch
+        finding["evidence"] = state_the_denominator(
+            finding, pages_crawled, snapshot)
         action = finding["suggested_action"]
         if action.get("snippet"):
             action["snippet"], invented = hold_back_invented_values(
@@ -877,6 +1015,13 @@ def compose(snapshot, skill_results, audited_at=None):
         # was fetched and the homepage answered, which are precisely what a
         # worried reader is looking for.
         "checks_passed": _checks_passed(checks_run, not_applicable, fired_checks),
+        # Checks a finding came out of, listed so that every check which ran is
+        # in exactly one of four places. Without this, a check registered
+        # alongside the one a finding names appeared in none of them: not a
+        # finding, not a decline, not a pass. Four of seventy-three on one real
+        # site, and the README promises that never happens.
+        "checks_that_found_something": _checks_that_found_something(
+            checks_run, not_applicable, fired_checks, findings),
         "not_applicable": sorted(not_applicable, key=lambda n: (n.get("skill", ""), n["check"])),
         "merged_duplicates": duplicates,
         # Questions the audit could not answer, kept separate from defects it
@@ -921,6 +1066,8 @@ def _public_finding(finding):
         "reach": finding["reach"],
         "detected_by": finding["detected_by"],
     }
+    if finding.get("example_withheld"):
+        out["example_withheld"] = finding["example_withheld"]
     if "snippet" in action:
         out["suggested_action"]["snippet"] = action["snippet"]
     if action.get("snippet_warning"):
@@ -955,6 +1102,24 @@ def _checks_passed(checks_run, not_applicable, fired):
               and (c["skill"], c["check"]) not in fired]
     return sorted(passed, key=lambda c: (c["skill"], c["check"]))
 
+
+
+def _checks_that_found_something(checks_run, not_applicable, fired, findings):
+    """Checks whose group produced a finding, and which no finding names.
+
+    A finding carries the one check that was current when it was raised. Its
+    siblings - registered in the same function, any of which the finding might
+    equally be about - are marked as having fired, which correctly keeps them
+    out of the passed list and then left them nowhere at all. They are the
+    fourth bucket, and with it every check that ran is in exactly one.
+    """
+    named = {f.get("check") for f in findings if f.get("check")}
+    declined = {(n.get("skill"), n["check"]) for n in not_applicable}
+    out = [c for c in checks_run
+           if (c["skill"], c["check"]) in fired
+           and (c["skill"], c["check"]) not in declined
+           and c["check"] not in named]
+    return sorted(out, key=lambda c: (c["skill"], c["check"]))
 
 def _llms_txt_template(snapshot, brand):
     """A starter /llms.txt listing pages that actually exist on this site.
@@ -1251,6 +1416,17 @@ def render_markdown(report):
             add("- **{}** ({})".format(item["check"], item.get("skill", "")))
         add("")
 
+    if report.get("checks_that_found_something"):
+        add("### Checks that contributed to a finding above")
+        add("")
+        add("Each of these ran in the same step as a finding in this report and is part of "
+            "why it was raised. They are listed for completeness: with them, every check that "
+            "ran appears in exactly one place in this appendix.")
+        add("")
+        for item in report["checks_that_found_something"]:
+            add("- **{}** ({})".format(item["check"], item.get("skill", "")))
+        add("")
+
     if report.get("unverifiable"):
         add("### Questions this audit could not answer")
         add("")
@@ -1327,6 +1503,10 @@ def _render_finding(finding):
         out.append("Affected pages ({} total, showing up to 5):".format(finding["affected_page_count"]))
         for url in finding["affected_pages"]:
             out.append("- {}".format(url))
+    elif finding.get("example_withheld"):
+        out.append("")
+        out.append("*No per-page list is shown: {}. The counts above stand; the list did "
+                   "not, so it is not printed.*".format(finding["example_withheld"]))
     out.append("")
     return "\n".join(out)
 

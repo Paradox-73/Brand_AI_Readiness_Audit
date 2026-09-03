@@ -13,8 +13,8 @@ from urllib.parse import urljoin, urlparse
 
 from audit_common import (
     detect_challenge, detect_page_type, find_prices, main_text, make_soup,
-    normalise_url, same_site, sentences, truncate, visible_soup, visible_text,
-    word_count,
+    normalise_url, same_site, sentences, tidy_spacing, truncate, visible_soup,
+    visible_text, word_count,
 )
 
 # Root containers frameworks mount into. An empty one means the delivered HTML
@@ -301,6 +301,7 @@ def extract_page(url, final_url, status, headers, html, redirect_chain, elapsed_
         "contact_facts": _contact_facts(page_text, soup),
         "prices": find_prices(body_text),
         "social_profiles": _social_profiles(links["external"], jsonld),
+        "declared_profiles": _declared_profiles(jsonld),
         "interstitial": _interstitial(soup),
         "newsletter_signup": _newsletter(soup, page_text),
         "readability": _readability(body_text, soup),
@@ -312,6 +313,9 @@ def extract_page(url, final_url, status, headers, html, redirect_chain, elapsed_
         "headings": headings,
         "jsonld_types": jsonld_types,
         "title": record["title"],
+        # So a localised homepage at `/de/` can be recognised as one, on the
+        # page's own declaration rather than on the shape of the path.
+        "lang": record["lang"],
     })
     return record
 
@@ -321,7 +325,14 @@ def extract_page(url, final_url, status, headers, html, redirect_chain, elapsed_
 # --------------------------------------------------------------------------
 
 def _text_or_empty(node):
-    return re.sub(r"\s+", " ", node.get_text(" ")).strip() if node else ""
+    # Same normalisation as `visible_text` and `main_text`, and it has to be
+    # the same. When only those two tidied the separator spacing, a paragraph
+    # still read "a small , fast , engine" while the page text read "a small,
+    # fast, engine" - so the definition sentence drawn from the paragraph was
+    # not found in the page, the invented-value guard called a real sentence a
+    # guess, and a correct description became a placeholder. Two normalisers
+    # for one string is one too many.
+    return tidy_spacing(re.sub(r"\s+", " ", node.get_text(" ")).strip()) if node else ""
 
 
 def _meta_tags(soup):
@@ -531,7 +542,16 @@ def main_region(soup):
 # eight-item menu in `<div class="menu mainmenu">` was read as "the primary
 # navigation has 0 items", at high severity, on a site anyone can see has one.
 NAV_SELECTOR = (
-    "nav, header nav, [role=navigation], "
+    # `role=menu` and `role=menubar` are the ARIA menu roles, and a university
+    # department's entire navigation lived in one: a `role=dialog` panel
+    # containing a `role=menu` with thirty real destination links, exposed by
+    # a JavaScript click and `aria-hidden="true"` until then. Neither this
+    # selector nor the chrome fingerprint looked at either role, so the report
+    # said "the primary navigation has 0 item(s). Labels found: none" at high
+    # severity, and told them to "make sure the navigation is real HTML links"
+    # - which it already was, thirty of them. Standards-defined roles, not
+    # another class-name guess.
+    "nav, header nav, [role=navigation], [role=menu], [role=menubar], "
     "[class*=mainmenu], [class*=main-menu], [class*=main-nav], [class*=mainnav], "
     "[class*=navbar], [class*=nav-menu], [class*=menu-main], [class*=site-nav], "
     "[class*=primary-nav], [class*=topnav], [class*=top-nav], "
@@ -568,6 +588,16 @@ def _nav_by_shape(soup):
     return [node for _count, node in candidates[:1]]
 
 
+
+def _within_hidden(node):
+    """Is this element, or any ancestor, marked as not displayed?"""
+    current = node
+    while current is not None and getattr(current, "attrs", None) is not None:
+        if _is_hidden(current):
+            return True
+        current = current.parent
+    return False
+
 def _links(soup, base, origin):
     internal, external, nav, footer = [], [], [], []
     main_region_node = main_region(soup)
@@ -575,6 +605,23 @@ def _links(soup, base, origin):
     if not nav_nodes:
         nav_nodes = _nav_by_shape(soup)
     footer_nodes = soup.select("footer, [role=contentinfo]")
+
+    # Navigation the page ships but hides. Hidden is not absent, and the two
+    # need completely different advice: one owner has to write a menu, the
+    # other has to expose the one they have to a reader without JavaScript.
+    # Counted separately, because the same link often appears in both a
+    # visible bar and a hidden dropdown of the same menu. Comparing hidden
+    # links against the deduplicated total then said "every navigation link is
+    # hidden" about a site whose main bar is plainly visible - which is the
+    # false positive this whole finding exists to avoid making in reverse.
+    hidden_nav, visible_nav = [], []
+    for node in nav_nodes:
+        bucket = hidden_nav if _within_hidden(node) else visible_nav
+        for anchor in node.find_all("a", href=True):
+            url = normalise_url(anchor["href"], base)
+            if url and same_site(url, origin):
+                bucket.append(url)
+    hidden_only = set(hidden_nav) - set(visible_nav)
 
     def collect(container, bucket):
         for anchor in container.find_all("a", href=True):
@@ -611,6 +658,8 @@ def _links(soup, base, origin):
         "internal": internal[:300],
         "external": external[:150],
         "nav": _dedupe_links(nav)[:40],
+        "nav_hidden_count": len(hidden_only),
+        "nav_visible_count": len(set(visible_nav)),
         "footer": _dedupe_links(footer)[:60],
         "main_internal_count": len(main_internal),
         "main_internal_sample": main_internal[:10],
@@ -657,18 +706,43 @@ def _scripts(soup, base):
     }
 
 
+def _is_tracking_pixel(tag, width, height):
+    """A beacon, not a picture.
+
+    A pizza chain's report said "2 images have no alt attribute" and advised
+    "write alt text that states what the image shows" and "prioritise product
+    photos". Both images were 1x1 Facebook beacons with `style="display:none"`.
+    Nothing shows, nobody can describe it, and no alt text belongs on it.
+
+    Recognised by shape rather than by host, because the shape is the whole
+    point of a beacon: it is sized so nobody sees it.
+    """
+    # The attributes have to be *there*. `_int_attr` returns 0 for a missing
+    # one, so reading the parsed values alone made every image with no width
+    # or height a beacon - which on the first fixture that exercised it was
+    # every image on the page.
+    declared = tag.get("width") is not None and tag.get("height") is not None
+    if declared and (width or 0) <= 3 and (height or 0) <= 3:
+        return True
+    style = (tag.get("style") or "").replace(" ", "").lower()
+    if "display:none" in style or "visibility:hidden" in style:
+        return True
+    return _within_hidden(tag)
+
+
 def _images(soup, base):
     all_images = soup.find_all("img")
     missing_alt, content_images = [], 0
     for tag in all_images:
         src = normalise_url(tag.get("src") or tag.get("data-src") or "", base) or ""
         alt = tag.get("alt")
-        # A decorative image is correctly marked `alt=""`; only a *missing*
-        # alt attribute hides content from a machine.
-        if alt is None:
-            missing_alt.append(src)
         width = _int_attr(tag.get("width"))
         height = _int_attr(tag.get("height"))
+        # A decorative image is correctly marked `alt=""`; only a *missing*
+        # alt attribute hides content from a machine. And a tracking beacon
+        # shows nothing to anybody, so it is not an image at all here.
+        if alt is None and not _is_tracking_pixel(tag, width, height):
+            missing_alt.append(src)
         if (width and height and width * height >= 120000) or _is_hero(tag):
             content_images += 1
     return {
@@ -984,21 +1058,60 @@ def _first_jsonld_date(jsonld, key):
     return ""
 
 
+# Words that name a number as something other than a postcode. A footer is an
+# address region, and it is also where every regulator, registrar and tax
+# authority requires a number to be printed - so shape alone read a bank's
+# Financial Services Register number as its postcode and published it inside
+# paste-ready `PostalAddress` markup.
+#
+# The rule generalises past that one case: a company registration number, a
+# VAT number, a charity number, a licence number and an item ID are all
+# five-to-six digit runs sitting in a footer behind a word that says what they
+# are. Reading the label is the only thing that separates them, and it is the
+# same read for all of them.
+_NUMBER_LABELLED_OTHERWISE_RE = re.compile(
+    r"(?:number|no\.?|nr\.?|reference|ref\.?|registration|registered|register|"
+    r"vat|gst|abn|acn|company|charity|licen[cs]e|permit|firm|policy|invoice|"
+    r"order|account|item|sku|id|code|isbn|ein|tin|duns)\W{0,12}$",
+    re.I)
+
+# ... unless the label says postcode, which settles it the other way.
+_POSTCODE_LABEL_RE = re.compile(
+    r"(?:post\s?code|postal\s?code|zip(?:\s?code)?|plz|cap|c\.?p\.?)\W{0,12}$", re.I)
+
+
+def _labelled_as_another_kind_of_number(haystack, start):
+    """Does the wording just before this number say it is not a postcode?"""
+    before = haystack[max(0, start - 60):start]
+    if _POSTCODE_LABEL_RE.search(before):
+        return False
+    return bool(_NUMBER_LABELLED_OTHERWISE_RE.search(before))
+
+
+def _postcode_in(haystack):
+    """The first postcode-shaped run the surrounding words do not disown."""
+    for match in POSTCODE_HINT_RE.finditer(haystack):
+        if not _labelled_as_another_kind_of_number(haystack, match.start()):
+            return match
+    return None
+
+
 def _postcode_hint(text, soup, street):
     """A postal code, read from somewhere that is describing an address.
 
     An address region is authoritative: whatever postcode-shaped run sits in
-    an `<address>` block or a footer is a postcode. Outside one, the shape is
-    not enough on its own - it is also an item number, an order reference and
-    a five-digit price - so the whole page counts only when a street-shaped
-    phrase on the same page corroborates it.
+    an `<address>` block or a footer is a postcode - unless the words in front
+    of it name it as a different kind of number, which in a footer they often
+    do. Outside an address region the shape is not enough on its own - it is
+    also an item number, an order reference and a five-digit price - so the
+    whole page counts only when a street-shaped phrase corroborates it.
     """
     for selector in ADDRESS_REGION_SELECTORS:
         for node in soup.select(selector):
-            match = POSTCODE_HINT_RE.search(re.sub(r"\s+", " ", node.get_text(" ")))
+            match = _postcode_in(re.sub(r"\s+", " ", node.get_text(" ")))
             if match:
                 return match
-    return POSTCODE_HINT_RE.search(text) if street else None
+    return _postcode_in(text) if street else None
 
 
 def _contact_facts(text, soup):
@@ -1063,7 +1176,20 @@ _PROFILE_PATH_RULES = {
     # being 18 characters long. What separates a profile from a post is the
     # single path segment, not how long the handle is.
     "X": re.compile(r"^https?://(?:www\.)?(?:twitter|x)\.com/[A-Za-z0-9_]{1,40}/?$", re.I),
-    "YouTube": re.compile(r"^https?://(?:www\.)?youtube\.com/(?:@[\w.-]+|c/[\w.-]+|channel/[\w-]+|user/[\w.-]+)/?$", re.I),
+    # The bare custom URL - `youtube.com/BoschGlobal`, no `/c/`, `/@` or
+    # `/channel/` - is the oldest and still the commonest form, and leaving it
+    # out cost a manufacturer one of its four real profiles. Worse, the
+    # recommendation then told them to "cover the obvious ones first:
+    # LinkedIn, Instagram, YouTube", naming a platform they already had.
+    #
+    # `_NOT_A_YOUTUBE_HANDLE` is what keeps that alternative honest: every
+    # single-segment path on the domain that is a page rather than a channel.
+    "YouTube": re.compile(
+        r"^https?://(?:www\.)?youtube\.com/"
+        r"(?:@[\w.-]+|c/[\w.-]+|channel/[\w-]+|user/[\w.-]+"
+        r"|(?!(?:watch|results|playlist|feed|shorts|embed|live|hashtag|"
+        r"about|t|redirect|account|premium|gaming|music|movies|"
+        r"channel|user|c|@)/?$)[A-Za-z0-9][\w.-]*)/?$", re.I),
     "Facebook": re.compile(r"^https?://(?:[\w-]+\.)?facebook\.com/[\w.-]+/?$", re.I),
     "Instagram": re.compile(r"^https?://(?:www\.)?instagram\.com/[\w.-]+/?$", re.I),
     "TikTok": re.compile(r"^https?://(?:www\.)?tiktok\.com/@[\w.-]+/?$", re.I),
@@ -1078,11 +1204,39 @@ _PROFILE_PATH_RULES = {
 }
 
 
+def _declared_profiles(jsonld):
+    """Profiles the site claims as its own, via `sameAs`.
+
+    `sameAs` means "these accounts are me". That is the site asserting
+    identity, and it needs no further attribution - which matters for the
+    platforms whose profile URL is an opaque identifier and can never be
+    checked against a name.
+    """
+    found = {}
+    candidates = []
+    for node in jsonld:
+        same_as = node.get("sameAs")
+        if isinstance(same_as, str):
+            candidates.append(same_as)
+        elif isinstance(same_as, list):
+            candidates.extend(str(v) for v in same_as)
+    for url in _profiles_among(candidates):
+        found.setdefault(url[0], url[1])
+    return dict(sorted(found.items()))
+
+
 def _social_profiles(external_links, jsonld):
     """Authoritative off-site profiles this page points at.
 
     Only genuine profile URLs count. Share widgets and personal profiles are
     excluded, because both would overstate how well corroborated a brand is.
+
+    Whose profile each one is cannot be decided here - the brand name is not
+    known until the crawl finishes - so this records candidates and
+    `freshness-corroboration-audit` decides attribution. `_declared_profiles`
+    records which of them the site claimed in `sameAs`, because that
+    distinction is the whole of the decision and is lost by the time the
+    snapshot is read.
     """
     found = {}
     candidates = [link["url"] for link in external_links]
@@ -1093,6 +1247,14 @@ def _social_profiles(external_links, jsonld):
         elif isinstance(same_as, list):
             candidates.extend(str(v) for v in same_as)
 
+    for platform, url in _profiles_among(candidates):
+        found.setdefault(platform, url)
+    return dict(sorted(found.items()))
+
+
+def _profiles_among(candidates):
+    """(platform, url) for every candidate that is a real profile URL."""
+    out = []
     for url in candidates:
         low = url.lower()
         if _SHARE_URL_RE.search(low):
@@ -1107,8 +1269,9 @@ def _social_profiles(external_links, jsonld):
             rule = _PROFILE_PATH_RULES.get(platform)
             if rule and not rule.search(bare):
                 continue
-            found.setdefault(platform, url)
-    return dict(sorted(found.items()))
+            out.append((platform, url))
+            break
+    return out
 
 
 def _is_hidden(node):

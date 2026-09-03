@@ -56,6 +56,11 @@ PROVED_BY_UNIT_TEST = {
     # supplies it with invented labels, so no real organisation enters the
     # test corpus.
     "entity-ambiguity": "test_unstageable_causes.py",
+    # Needs an origin that answers correctly and takes seconds to do it. The
+    # fixture server answers in milliseconds, and making it sleep would add
+    # that time to every run of the suite for one root cause. A snapshot with
+    # real timings supplies it instead.
+    "slow-origin": "test_later_rounds.py",
 }
 
 

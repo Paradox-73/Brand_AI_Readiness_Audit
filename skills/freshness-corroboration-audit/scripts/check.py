@@ -60,9 +60,9 @@ sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
     CONTENT_TYPES, example_urls, Fetcher, FetchError, load_snapshot,
-    is_multi_location, pages_of, pct, plural, PROFILE_GONE_STATUS, sample,
-    SkillResult, strip_www, truncate, VERIFIABLE_PROFILE_PLATFORMS,
-    VISITABLE_JSONLD_TYPES
+    is_multi_location, pages_of, pct, plural, PROFILE_GONE_STATUS,
+    profiles_naming_brand, sample, SkillResult, strip_www, truncate,
+    VERIFIABLE_PROFILE_PLATFORMS, VISITABLE_JSONLD_TYPES
 )
 
 SKILL = "freshness-corroboration-audit"
@@ -140,7 +140,16 @@ def newest_date(page):
 
 
 def months_between(earlier, later):
-    return (later.year - earlier.year) * 12 + (later.month - earlier.month)
+    """Whole months elapsed, never rounded up.
+
+    Counting calendar-month boundaries alone reported a 22.2-month gap as
+    "23 months old", which is a number the reader can check against a visible
+    date and find wrong. The day of the month decides the last one.
+    """
+    months = (later.year - earlier.year) * 12 + (later.month - earlier.month)
+    if later.day < earlier.day:
+        months -= 1
+    return max(0, months)
 
 
 def _deadline(time_budget):
@@ -496,9 +505,29 @@ def _check_authoritative_profiles(result, snapshot, pages):
     See references/cited-vs-uncited-study.md.
     """
     result.check("off-site-profile-breadth")
-    profiles = {}
+    candidates = {}
     for page in pages:
-        profiles.update(page.get("social_profiles") or {})
+        candidates.update(page.get("social_profiles") or {})
+
+    # A URL of the right shape on the right platform is somebody's profile,
+    # not necessarily this brand's. Counting shape alone put a contributor's
+    # personal GitHub account and a Wikipedia article about a computer-science
+    # term into an open-source project's corroboration count, while the
+    # project's own org page - linked dozens of times, always as a repository
+    # path - was never counted at all.
+    brand_name = ((snapshot.get("brand") or {}).get("name") or "")
+    declared = {}
+    for page in pages:
+        declared.update(page.get("declared_profiles") or {})
+    brand = snapshot.get("brand") or {}
+    profiles = profiles_naming_brand(
+        candidates, brand_name, declared,
+        name_forms=([brand.get("domain_token")]
+                    + list(brand.get("alternate_names") or [])
+                    + list(brand.get("authoritative_variants") or [])
+                    + list(brand.get("fallback_candidates") or [])))
+    unattributed = {k: v for k, v in candidates.items() if k not in profiles}
+    result.signal("profiles_not_naming_the_brand", sorted(unattributed))
 
     authoritative = {k: v for k, v in profiles.items() if k in AUTHORITATIVE}
     result.signal("profile_platforms", sorted(profiles.keys()))
@@ -742,7 +771,8 @@ def _check_entity_ambiguity(result, snapshot, pages, brand, profiles, fetcher, a
         return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
 
     brand_key = _key(brand_name)
-    matches = [m for m in (payload.get("search") or [])
+    everything = payload.get("search") or []
+    matches = [m for m in everything
                if _key(m.get("label")) == brand_key
                or brand_key in {_key(a) for a in (m.get("aliases") or [])}]
 
@@ -752,10 +782,23 @@ def _check_entity_ambiguity(result, snapshot, pages, brand, profiles, fetcher, a
     # collision but the very disambiguation the finding goes on to recommend
     # creating. So the brand is told to go and make a thing it already has,
     # and the count it is alarmed by is one too high.
-    own = _own_wikidata_entity(matches, snapshot, fetcher)
+    #
+    # Searched over the *unfiltered* results, which is the whole point. The
+    # exact-label filter above exists because Wikidata search matches by
+    # prefix; but Wikidata's own convention for resolving the very ambiguity
+    # this check reports is to give the item a longer, more specific label. A
+    # university department's item is "Department of Geography, University of
+    # Cambridge", and its P856 official website is that department's domain -
+    # so it was thrown away before the own-entity test could see it, and the
+    # report told the department to create an item that already exists and
+    # already points at them. The filter that made the count honest was
+    # hiding the answer.
+    own = _own_wikidata_entity(everything, snapshot, fetcher)
     if own is not None:
         matches = [m for m in matches if m.get("id") != own]
         result.signal("wikidata_own_entity", own)
+        own_label = next((m.get("label") for m in everything if m.get("id") == own), "")
+        result.signal("wikidata_own_entity_label", own_label)
     result.signal("wikidata_match_count", len(matches))
     result.signal("wikidata_matches",
                   [{"id": m.get("id"), "label": m.get("label"),
@@ -778,7 +821,10 @@ def _check_entity_ambiguity(result, snapshot, pages, brand, profiles, fetcher, a
     if len(matches) < WIKIDATA_AMBIGUITY_THRESHOLD:
         result.skip("entity-ambiguity",
                     'Wikidata returns {} entity matching "{}", so there is no obvious name '
-                    "collision to resolve".format(len(matches), brand_name))
+                    "collision to resolve{}".format(
+                        len(matches), brand_name,
+                        "; the site's own item is {} and is not counted".format(own)
+                        if own is not None else ""))
         return
     if disambiguated:
         result.skip("entity-ambiguity",
@@ -806,9 +852,12 @@ def _check_entity_ambiguity(result, snapshot, pages, brand, profiles, fetcher, a
         mechanism="D", root_cause="entity-ambiguity",
         summary="Publish the markers that tell a machine which of these entities you are.",
         how_to_fix=[
-            "Create a Wikidata item for the company if one does not exist, with the same "
-            "one-sentence description you use everywhere else, and link it from Organization "
-            "`sameAs`.",
+            ("Your Wikidata item already exists ({}). Link it from Organization `sameAs` - "
+             "that link is what tells a machine which of these entities you are, and it is "
+             "missing.".format(own) if own is not None else
+             "Create a Wikidata item for the company if one does not exist, with the same "
+             "one-sentence description you use everywhere else, and link it from Organization "
+             "`sameAs`."),
             "Add `alternateName` to Organization markup listing the other ways people write "
             "the name.",
             "Always pair the brand name with a disambiguating phrase in prose: "

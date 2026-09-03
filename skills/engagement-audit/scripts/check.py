@@ -57,8 +57,9 @@ sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
     confirm_dead, CONTENT_TYPES, DEEP_TYPES, example_urls, Fetcher, FetchError,
-    language_of, link_verdict, load_snapshot, normalise_url, pages_of, pct,
-    plural, same_site, sample, SkillResult, truncate, word_count
+    group_by_edition, language_of, link_verdict, load_snapshot, locale_editions,
+    normalise_url, pages_of, pct, plural, same_site, sample, SkillResult,
+    truncate, word_count
 )
 
 SKILL = "engagement-audit"
@@ -334,6 +335,44 @@ def _check_navigation(result, home, pages):
     labels = [label for label in labels if label.lower() not in NAV_CONTROL_LABELS]
     unique_labels = list(dict.fromkeys(labels))
     result.signal("nav_item_count", len(unique_labels))
+
+    # Present but hidden. A different problem from having no menu, and the two
+    # fixes have nothing in common - so it gets its own finding rather than
+    # being reported as an absence with advice to build what already exists.
+    links = source.get("links") or {}
+    hidden_nav = links.get("nav_hidden_count", 0)
+    visible_nav = links.get("nav_visible_count", 0)
+    if hidden_nav >= NAV_MIN and visible_nav < NAV_MIN:
+        result.add(
+            id_hint="primary-navigation-is-hidden-from-crawlers",
+            title="The navigation exists but is hidden until JavaScript runs",
+            severity="high", confidence="high",
+            evidence="{} carries {} internal navigation link(s), and every one of them sits "
+                     "inside an element marked `aria-hidden=\"true\"` or `hidden`. The links "
+                     "are real HTML, already written; a reader without JavaScript - which "
+                     "includes every AI crawler - is simply never shown them.".format(
+                         source["url"], hidden_nav),
+            mechanism="G", root_cause="no-orientation",
+            summary="Render the primary navigation visible in the delivered HTML, and let "
+                    "JavaScript collapse it rather than reveal it.",
+            how_to_fix=[
+                "Find the element wrapping the menu and remove the `aria-hidden=\"true\"` or "
+                "`hidden` attribute from the delivered HTML.",
+                "Invert the default: ship the menu open and let the script close it on small "
+                "screens, so the links are present before any script runs.",
+                "If the panel must stay hidden, put the same top-level links in a plain "
+                "`<nav>` or in the footer as well.",
+                "Check the result by fetching the page with `curl` and searching the HTML for "
+                "one of the menu labels.",
+            ],
+            effort="medium", owner="developer",
+            rationale="A hidden element is not read. The links are in the file, so nothing "
+                      "needs authoring - but to a crawler this page is a dead end, and every "
+                      "page it cannot reach from here is a page it never sees.",
+            affected_pages=[source["url"]],
+        )
+        return
+
 
     # Guard against our own selector failing. `chrome_signature` sweeps a wider
     # net (nav, header, footer, role=navigation). If that found a real menu but
@@ -723,6 +762,38 @@ def _check_title_body_drift(result, pages):
     )
 
 
+def _stranded_within(pages):
+    """Pages sharing few or none of this group's usual header/footer links.
+
+    Returns (stranded, common_count, reason_it_could_not_judge).
+    """
+    signatures = [tuple((p.get("chrome_signature") or {}).get("nav_paths") or [])
+                  for p in pages]
+    # Compare against the most common *non-empty* signature. Taking the plain
+    # mode would bail out on exactly the worst case: a site where most pages
+    # have no navigation at all, so "no chrome" is the majority.
+    counts = Counter(s for s in signatures if s)
+    if not counts:
+        return [], 0, ("no page carries header or footer navigation, which the navigation "
+                       "finding covers rather than this one")
+    common, common_count = counts.most_common(1)[0]
+    # One page with a big menu among nineteen without one does not establish a
+    # site norm, and treating it as one flagged every page including itself.
+    if common_count < 2 or common_count < len(pages) * 0.2:
+        return [], common_count, (
+            "no header or footer navigation appears on enough pages to establish what "
+            "this site's normal chrome looks like ({} of {} pages share the most "
+            "common one)".format(common_count, len(pages)))
+
+    stranded = []
+    for page, signature in zip(pages, signatures):
+        if not signature:
+            stranded.append(page)
+        elif len(set(common) & set(signature)) < max(2, len(common) // 3):
+            stranded.append(page)
+    return stranded, common_count, ""
+
+
 def _check_chrome_consistency(result, pages):
     result.check("consistent-site-chrome")
     if len(pages) < 4:
@@ -731,47 +802,57 @@ def _check_chrome_consistency(result, pages):
                     "normal navigation looks like")
         return
 
-    signatures = [tuple((p.get("chrome_signature") or {}).get("nav_paths") or []) for p in pages]
-    # Compare against the most common *non-empty* signature. Taking the plain
-    # mode would bail out on exactly the worst case: a site where most pages
-    # have no navigation at all, so "no chrome" is the majority.
-    counts = Counter(s for s in signatures if s)
-    if not counts:
+    # A German page's menu points at German URLs and shares not one path with
+    # the English menu, so the site's normal chrome has to be established once
+    # per language edition. Comparing the two raw reported a complete,
+    # translated navigation as absent. `locale_editions` returns {} unless the
+    # site gives real evidence of having editions, so a monolingual site is
+    # judged exactly as before.
+    editions = locale_editions(pages)
+    groups = group_by_edition(pages, editions) if editions else {"": list(pages)}
+    judged = {code: group for code, group in groups.items() if len(group) >= 4}
+    if not judged:
         result.skip("consistent-site-chrome",
-                    "no page carries header or footer navigation, which the navigation finding "
-                    "covers rather than this one")
-        return
-    common, common_count = counts.most_common(1)[0]
-    # One page with a big menu among nineteen without one does not establish a
-    # site norm, and treating it as one flagged every page including itself.
-    if common_count < 2 or common_count < len(pages) * 0.2:
-        result.skip("consistent-site-chrome",
-                    "no header or footer navigation appears on enough pages to establish what "
-                    "this site's normal chrome looks like ({} of {} pages share the most "
-                    "common one)".format(common_count, len(pages)))
+                    "this site is split into {} language editions and none of them was "
+                    "crawled deeply enough to establish its normal navigation".format(
+                        len(groups)))
         return
 
-    stranded = []
-    for page, signature in zip(pages, signatures):
-        if not signature:
-            stranded.append(page)
-        elif len(set(common) & set(signature)) < max(2, len(common) // 3):
-            stranded.append(page)
+    stranded, common_count, reasons = [], 0, []
+    for code, group in sorted(judged.items()):
+        found, count, why = _stranded_within(group)
+        common_count += count
+        stranded.extend(found)
+        if why:
+            reasons.append("{}{}".format("/{}: ".format(code) if code else "", why))
 
     if not stranded:
         result.skip("consistent-site-chrome",
-                    "all {} crawled pages share the same header and footer navigation".format(
-                        len(pages)))
+                    reasons[0] if reasons and not common_count else
+                    "all {} crawled pages share the same header and footer navigation{}".format(
+                        sum(len(g) for g in judged.values()),
+                        " within their own language edition ({})".format(
+                            ", ".join("/{}".format(c) for c in sorted(judged) if c))
+                        if len(judged) > 1 else ""))
         return
+
+    pages = [p for group in judged.values() for p in group]
 
     result.add(
         id_hint="pages-missing-site-navigation",
         title="{} not carry the site's normal navigation".format(
             plural(len(stranded), "page does", "pages do")),
         severity="medium", confidence="medium",
-        evidence="The site's usual header/footer links appear on {} of {} pages. These pages "
-                 "share few or none of them: {}.".format(
-                     common_count, len(pages),
+        # Three buckets, not two, and the sentence used to name only the
+        # first. "The site's usual header/footer links appear on 9 of 32
+        # pages" reads as "23 pages are broken" when 7 are: the sixteen in
+        # between share enough of the menu to be fine and were counted in
+        # neither number. A reader doing the subtraction was wrong by more
+        # than three times, and the finding gave them no way to know.
+        evidence="Of {} page(s) judged, {} carry the site's most common header/footer link "
+                 "set exactly, {} share few or none of it, and the rest share enough of it "
+                 "to be fine. These are the ones that do not: {}.".format(
+                     len(pages), common_count, len(stranded),
                      ", ".join(example_urls([p["url"] for p in stranded]))),
         mechanism="G", root_cause="inconsistent-chrome",
         summary="Apply the standard header and footer to every page template.",

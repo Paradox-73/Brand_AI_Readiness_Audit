@@ -350,7 +350,14 @@ def fetch_page(fetcher, url, depth, source, origin):
             "text": "", "text_len": 0, "html_len": 0, "headers": headers,
         }
 
-    if content_type and "html" not in content_type and "xml" not in content_type:
+    # `application/xhtml+xml` is HTML and stays; `application/rss+xml` and
+    # every other XML document is not a page anybody reads. XML used to be let
+    # through wholesale, and a news site's RSS feed was crawled as a page: it
+    # has no `<h1>` and no `<html lang>` because it has no `<html>` element at
+    # all, so the report told the newsroom to add both to a document where
+    # neither exists. Sitemaps are XML too, and they are fetched by the sitemap
+    # step rather than crawled as pages, so nothing is lost.
+    if content_type and "html" not in content_type:
         return {
             "url": url, "final_url": response.url, "status": response.status_code,
             "depth": depth, "source": source, "redirect_chain": chain,
@@ -684,6 +691,42 @@ def _resolve_scheme(fetcher, origin, seed_url, target):
     return downgraded, seed_url.replace("https://", "http://", 1), True
 
 
+def _resolve_host(fetcher, origin, seed_url, notes):
+    """Adopt the host the site itself redirects its homepage to.
+
+    `example.com` and `www.example.com` are one site to a reader and two hosts
+    to a server, and plenty of sites answer the homepage on both while serving
+    `/robots.txt` on only one. A retailer redirects `/` from the bare domain to
+    `www`, and answers 404 for `/robots.txt` there - so robots.txt and the
+    sitemap were both fetched from a host that has neither, and the report's
+    top finding was "No XML sitemap is available" about a site with a valid
+    sitemap index, referenced from a valid robots.txt, one hop away.
+
+    One HEAD request, spent only when robots.txt came back as something other
+    than 200 from a host that did answer - so a healthy site never pays for it,
+    and neither does a dead one, whose budget this probe used to consume before
+    the homepage was ever fetched. The host only moves within the same
+    registrable domain: following a redirect off-site would audit somebody
+    else's site under this one's name.
+    """
+    response = fetcher.try_get(seed_url or (origin.rstrip("/") + "/"),
+                               method="HEAD")
+    final = getattr(response, "url", None) if response is not None else None
+    if not final:
+        return origin, seed_url
+    settled = origin_of(final)
+    if not settled or settled == origin:
+        return origin, seed_url
+    if strip_www(urlparse(settled).netloc.lower()) != \
+            strip_www(urlparse(origin).netloc.lower()):
+        return origin, seed_url
+    notes.append(
+        "The homepage redirects to {}, so robots.txt, the sitemap and every page "
+        "were read from there. Auditing the host that answers is the only way to "
+        "see what the site actually serves.".format(settled))
+    return settled, normalise_url(final) or (settled.rstrip("/") + "/")
+
+
 def _follow_meta_refresh(fetcher, record, depth, source, origin, notes):
     """Audit the page a meta refresh points at, not the stub that points there.
 
@@ -735,6 +778,16 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
             "finding and is reported as one; the alternative was to return nothing."
         )
     robots = fetch_robots(fetcher, origin)
+    # Only when this host answered and had no robots.txt to give. A site that
+    # serves its homepage on `www` and answers 404 for `/robots.txt` on the
+    # bare domain is the case this exists for, and it is the only case worth
+    # spending a request on: a healthy origin never reaches here, and a host
+    # that never answered at all has already told us it is not the problem.
+    if robots.get("status") not in (200, None):
+        settled, settled_seed = _resolve_host(fetcher, origin, seed_url, notes)
+        if settled != origin:
+            origin, seed_url = settled, settled_seed
+            robots = fetch_robots(fetcher, origin)
     sitemaps, sitemap_in_robots = fetch_sitemaps(fetcher, origin, robots, deadline)
 
     llms_txt = {"url": origin.rstrip("/") + "/llms.txt", "present": False, "status": None}

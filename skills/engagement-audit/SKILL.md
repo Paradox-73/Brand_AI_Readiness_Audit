@@ -44,6 +44,15 @@ folded into the discoverability gates.
    menu. Catch-all labels ("Products", "Solutions", "More", "Resources") that name no
    specific destination are **medium**.
 
+   **Hidden is not absent.** If every navigation link on the page sits inside an element
+   marked `aria-hidden="true"` or `hidden`, the menu exists and a reader without JavaScript is
+   simply never shown it. That is **high**, and it is a different finding with a different
+   fix: expose what is there, do not write it again. A university department's entire
+   navigation - thirty real destination links - lives in a `role="dialog"` panel, and reporting
+   "the primary navigation has 0 item(s), labels found: none" with advice to "make sure the
+   navigation is real HTML links" was wrong on both counts. `role=menu` and `role=menubar` are
+   navigation containers too.
+
 3. **Dead ends.** A non-home page with fewer than three internal links in its main content
    *and* no call to action is a cul-de-sac. **Medium**. Fixing the template fixes every page
    using it.
@@ -59,7 +68,11 @@ folded into the discoverability gates.
    *unchecked* rather than broken. Only 404 and 410 count as gone. Over 20% broken is **high**, below that **medium**. At that rate it is a maintenance
    failure, not an accident.
 
-6. **Context retention.**
+6. **Context retention.** Chrome consistency is judged **once per language edition**: a
+   German page's menu points at German URLs and shares not one path with the English menu, so
+   comparing them raw reported a complete, translated navigation as absent. An edition is only
+   recognised on evidence - the page declares that language, or the crawl contains more than
+   one language-shaped prefix - so a monolingual site is judged exactly as before.
    - **Breadcrumbs** on deep pages (product, article, location, service, comparison) —
      **medium** when half or more lack one. Someone arriving from an answer lands deep with
      no history; a breadcrumb is the cheapest way to show them what section they are in.

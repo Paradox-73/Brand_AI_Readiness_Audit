@@ -16,7 +16,7 @@ import os
 import re
 import sys
 import time
-from collections import Counter
+from collections import Counter, namedtuple
 from urllib.parse import urlparse
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -56,8 +56,10 @@ sys.path.insert(0, _SHARED)
 from audit_common import (  # noqa: E402
     CHALLENGE_TEXT_CEILING, CONTENT_TYPES, example_urls,
     explain_fetch_error, Fetcher, FetchError, link_verdict, load_snapshot,
-    looks_like_soft_404, pages_of, pct, plural, REFUSED_STATUS, sample,
-    SkillResult, strip_www, USER_AGENT
+    is_search_result_page, looks_like_soft_404, pages_of, pct, plural,
+    REFUSED_STATUS,
+    response_timing, sample, SkillResult, slow_origin_note,
+    SLOW_ORIGIN_MEDIAN_MS, strip_www, USER_AGENT, VERY_SLOW_ORIGIN_MEDIAN_MS
 )
 from robots_parser import (  # noqa: E402
     blocks_entire_site, group_for, is_disallowed, substantive_disallows,
@@ -65,26 +67,238 @@ from robots_parser import (  # noqa: E402
 
 SKILL = "crawl-access-audit"
 
-# Crawlers that fetch pages in order to build or cite an answer. A block here
-# removes the brand from answers directly.
-ANSWER_CRAWLERS = (
-    "GPTBot", "OAI-SearchBot", "ChatGPT-User", "ClaudeBot", "Claude-User",
-    "Claude-SearchBot", "anthropic-ai", "PerplexityBot", "Perplexity-User",
-    "Applebot", "Amazonbot", "Bytespider", "Meta-ExternalAgent", "cohere-ai",
-    "DuckAssistBot", "MistralAI-User", "YouBot",
+# ---------------------------------------------------------------------------
+# What each AI user agent is actually for.
+#
+# Not two lists of names. A record per agent carrying the operator's own
+# stated purpose, the page that states it, and the date that page was read.
+# The two tuples the rest of this file uses are derived from it, so a role can
+# only be changed in one place and the prose cannot drift away from the data.
+#
+# Four roles, because "AI crawler" is not one thing and the owner's decision
+# differs for each:
+#
+#   search      indexes pages so the brand can be surfaced and linked in an
+#               assistant's answer. Blocking costs citations.
+#   user-fetch  fetches one page live because a person just asked about it.
+#               Blocking costs that answer.
+#   training    collects a corpus for model training. Blocking is a rights
+#               decision, not a discoverability defect.
+#   control     not a crawler at all - a token whose only function is to carry
+#               a training opt-out. It never fetches anything, so blocking it
+#               cannot cost a citation.
+#
+# An earlier version of this file listed GPTBot, ClaudeBot, Amazonbot,
+# Bytespider and Meta-ExternalAgent as answer crawlers, put
+# Meta-ExternalFetcher in the training group, and told owners to allow-list the
+# first set "so your pages can be cited". Every one of those is wrong against
+# the operator's own documentation. An owner who followed it would have
+# reopened their site to training collection they had deliberately opted out
+# of, to fix a citation problem that did not exist. `source` and `checked`
+# exist so the next person verifies rather than inherits.
+# ---------------------------------------------------------------------------
+
+SEARCH, USER_FETCH, TRAINING, CONTROL = "search", "user-fetch", "training", "control"
+
+# Roles whose block removes the brand from an answer someone is reading.
+ANSWER_ROLES = (SEARCH, USER_FETCH)
+
+CrawlerAgent = namedtuple(
+    "CrawlerAgent", "token operator role purpose source checked vendor_documented")
+
+
+def _agent(token, operator, role, purpose, source, checked="2026-09-03",
+           vendor_documented=True):
+    return CrawlerAgent(token, operator, role, purpose, source, checked,
+                        vendor_documented)
+
+
+_OPENAI = "https://developers.openai.com/api/docs/bots"
+_ANTHROPIC = ("https://support.claude.com/en/articles/8896518-does-anthropic-"
+              "crawl-data-from-the-web-and-how-can-site-owners-block-the-crawler")
+_PERPLEXITY = "https://docs.perplexity.ai/guides/bots"
+_APPLE = "https://support.apple.com/en-us/119829"
+_AMAZON = "https://developer.amazon.com/amazonbot"
+_META = "https://developers.facebook.com/docs/sharing/webmasters/web-crawlers/"
+_GOOGLE = ("https://developers.google.com/search/docs/crawling-indexing/"
+           "google-common-crawlers")
+_DUCK = "https://duckduckgo.com/duckduckgo-help-pages/results/duckassistbot"
+_COMMONCRAWL = "https://commoncrawl.org/ccbot"
+_UNDOCUMENTED = ""
+
+AI_CRAWLER_AGENTS = (
+    # --- OpenAI ---
+    _agent("OAI-SearchBot", "OpenAI", SEARCH,
+           "surfaces websites in search results in ChatGPT's search features", _OPENAI),
+    _agent("ChatGPT-User", "OpenAI", USER_FETCH,
+           "visits a web page when a user asks ChatGPT a question", _OPENAI),
+    _agent("GPTBot", "OpenAI", TRAINING,
+           "crawls content that may be used in training OpenAI's foundation models", _OPENAI),
+
+    # --- Anthropic ---
+    _agent("Claude-SearchBot", "Anthropic", SEARCH,
+           "analyses online content to improve search result quality", _ANTHROPIC),
+    _agent("Claude-User", "Anthropic", USER_FETCH,
+           "accesses a website when an individual asks Claude a question", _ANTHROPIC),
+    _agent("ClaudeBot", "Anthropic", TRAINING,
+           "collects web content that could contribute to model training", _ANTHROPIC),
+    _agent("anthropic-ai", "Anthropic", TRAINING,
+           "legacy token still seen in robots.txt; superseded by the three above and no "
+           "longer documented", _UNDOCUMENTED, vendor_documented=False),
+
+    # --- Perplexity ---
+    _agent("PerplexityBot", "Perplexity", SEARCH,
+           "surfaces and links websites in Perplexity search results; explicitly not used "
+           "for foundation-model training", _PERPLEXITY),
+    _agent("Perplexity-User", "Perplexity", USER_FETCH,
+           "visits a web page to help answer a question a user just asked", _PERPLEXITY),
+
+    # --- Apple ---
+    _agent("Applebot", "Apple", SEARCH,
+           "powers Spotlight, Siri and Safari search", _APPLE),
+    _agent("Applebot-Extended", "Apple", CONTROL,
+           "opt-out token for training Apple's foundation models; does not affect Siri or "
+           "Spotlight, which follow Applebot", _APPLE),
+
+    # --- Amazon ---
+    _agent("Amzn-SearchBot", "Amazon", SEARCH,
+           "improves search experiences in Amazon products such as Alexa; does not crawl "
+           "for generative AI training", _AMAZON),
+    _agent("Amzn-User", "Amazon", USER_FETCH,
+           "supports user actions such as answering an Alexa query that needs current "
+           "information; does not crawl for generative AI training", _AMAZON),
+    _agent("Amazonbot", "Amazon", TRAINING,
+           "fetches content for Amazon products and services, and may be used to train "
+           "Amazon AI models", _AMAZON),
+
+    # --- Meta ---
+    _agent("Meta-ExternalFetcher", "Meta", USER_FETCH,
+           "fetches individual links at a user's request, including helping AI navigate "
+           "sites to complete tasks", _META),
+    _agent("Meta-ExternalAgent", "Meta", TRAINING,
+           "crawls for use cases such as training foundation AI models or indexing content "
+           "directly", _META),
+
+    # --- Google ---
+    _agent("Google-Extended", "Google", CONTROL,
+           "opt-out token for Gemini training and grounding; does not affect Google Search "
+           "indexing, which follows Googlebot", _GOOGLE),
+
+    # --- The rest ---
+    _agent("DuckAssistBot", "DuckDuckGo", SEARCH,
+           "gathers passages that DuckAssist cites in instant answers", _DUCK),
+    _agent("YouBot", "You.com", SEARCH,
+           "indexes pages for an answer engine that links its sources", _UNDOCUMENTED,
+           vendor_documented=False),
+    _agent("MistralAI-User", "Mistral", USER_FETCH,
+           "fetches a page when a Le Chat user asks about it", _UNDOCUMENTED,
+           vendor_documented=False),
+    _agent("Bytespider", "ByteDance", TRAINING,
+           "collects training data for ByteDance's models; ByteDance publishes no crawler "
+           "documentation, so this role is inferred from observed behaviour",
+           _UNDOCUMENTED, vendor_documented=False),
+    _agent("cohere-ai", "Cohere", TRAINING,
+           "corpus collection; no published purpose statement", _UNDOCUMENTED,
+           vendor_documented=False),
+    _agent("CCBot", "Common Crawl", TRAINING,
+           "builds the open Common Crawl corpus that many models train on", _COMMONCRAWL),
+    _agent("omgilibot", "Webz.io", TRAINING,
+           "collects web data for licensing to model builders", _UNDOCUMENTED,
+           vendor_documented=False),
+    _agent("Webzio-Extended", "Webz.io", CONTROL,
+           "training opt-out token for Webz.io datasets", _UNDOCUMENTED,
+           vendor_documented=False),
+    _agent("Diffbot", "Diffbot", TRAINING,
+           "extracts pages into a commercial knowledge graph", _UNDOCUMENTED,
+           vendor_documented=False),
+    _agent("Timpibot", "Timpi", TRAINING,
+           "builds a distributed index sold as training data", _UNDOCUMENTED,
+           vendor_documented=False),
+    _agent("PanguBot", "Huawei", TRAINING,
+           "collects training data for the PanGu models", _UNDOCUMENTED,
+           vendor_documented=False),
+    _agent("ImagesiftBot", "ImageSift", TRAINING,
+           "collects images for dataset building", _UNDOCUMENTED,
+           vendor_documented=False),
 )
 
-# Corpus collectors. Blocking these is a rights decision about training data,
-# not a discoverability defect, so it is reported as info and never inflates
-# the severity counts.
-TRAINING_CRAWLERS = (
-    "Google-Extended", "Applebot-Extended", "CCBot", "omgilibot", "Diffbot",
-    "Timpibot", "Webzio-Extended", "PanguBot", "ImagesiftBot",
-    "Meta-ExternalFetcher",
+AGENT_BY_TOKEN = {agent.token.lower(): agent for agent in AI_CRAWLER_AGENTS}
+
+# Blocking one of these costs the brand an answer. Search agents come first so
+# that the live user-agent probe, which uses the first unblocked name, asks
+# with the agent whose refusal would matter most.
+ANSWER_CRAWLERS = tuple(
+    agent.token for agent in AI_CRAWLER_AGENTS if agent.role == SEARCH
+) + tuple(
+    agent.token for agent in AI_CRAWLER_AGENTS if agent.role == USER_FETCH
 )
+
+# Corpus collectors and the opt-out tokens that control them. Blocking these is
+# a rights decision about training data, not a discoverability defect, so it is
+# reported as info and never inflates the severity counts.
+TRAINING_CRAWLERS = tuple(
+    agent.token for agent in AI_CRAWLER_AGENTS if agent.role in (TRAINING, CONTROL))
+
+_ROLE_PHRASE = {
+    SEARCH: "search index",
+    USER_FETCH: "live fetch when a user asks",
+    TRAINING: "model training",
+    CONTROL: "training opt-out token, fetches nothing",
+}
+
+
+def describe_agents(tokens, limit=8):
+    """Name each agent with its operator and what that operator says it does.
+
+    The old evidence line was a bare list of tokens under a heading claiming
+    all of them fetched pages to build cited answers. Printing the role beside
+    each name means the sentence cannot outrun the data again, and the owner
+    can tell a search crawler from a training one without looking anything up.
+    """
+    tokens = list(tokens)
+    parts = []
+    for token in tokens[:limit]:
+        agent = AGENT_BY_TOKEN.get(token.lower())
+        if agent is None:
+            parts.append("`{}`".format(token))
+            continue
+        parts.append("`{}` ({}, {})".format(
+            token, agent.operator, _ROLE_PHRASE[agent.role]))
+    # A truncated list read as the whole list. A broadcaster blocks ten
+    # training crawlers; the evidence named eight and stopped, so an owner
+    # working through it would have left two they never saw. Saying how many
+    # were left out costs four words.
+    if len(tokens) > limit:
+        parts.append("and {} more".format(len(tokens) - limit))
+    return ", ".join(parts)
+
+
+
+def answer_side_counterparts(tokens):
+    """The same operators' search and live-fetch agents.
+
+    The point of the training finding is not "you blocked a training crawler".
+    It is: you blocked one, that is your right, and here are the agents from the
+    same company that actually decide whether you get cited - check those are
+    open. Blocking GPTBot costs nothing an assistant's reader sees; blocking
+    OAI-SearchBot and ChatGPT-User costs the citation.
+    """
+    operators = []
+    for token in tokens:
+        agent = AGENT_BY_TOKEN.get(token.lower())
+        if agent is not None and agent.operator not in operators:
+            operators.append(agent.operator)
+    return [agent.token for agent in AI_CRAWLER_AGENTS
+            if agent.role in ANSWER_ROLES and agent.operator in operators]
+
+def undocumented_among(tokens):
+    """Tokens whose role this audit inferred rather than read from the operator."""
+    return [token for token in tokens
+            if token.lower() in AGENT_BY_TOKEN
+            and not AGENT_BY_TOKEN[token.lower()].vendor_documented]
 
 # Demand, counted rather than assumed: the sitemap probe asks for up to 8, the
-# bot-manager comparison for 2, the canonical probe for 3. Thirteen against a
+# bot-manager comparison for 3, the canonical probe for 3. Thirteen against a
 # ceiling of ten meant the canonical probe was starved by running last, so on
 # any site with a sitemap it silently never ran. The ceiling now covers what
 # the checks actually ask for, with three spare.
@@ -97,6 +311,10 @@ MAX_EXTRA_REQUESTS = 16
 # has never been the binding constraint, and raising it would buy nothing.
 CANONICAL_PROBE_LIMIT = 3
 SITEMAP_PROBE_LIMIT = 8
+# Answer agents the bot-manager comparison will try before concluding the
+# edge treats crawlers no differently, plus one confirmation request. Two
+# operators rather than one, because bot rules are written per vendor.
+BOT_PROBE_AGENTS = 2
 
 
 def _deadline(time_budget):
@@ -232,11 +450,23 @@ def _check_challenge_pages(result, snapshot):
         how_to_fix=[
             "Open the bot-management rules in {} and find the rule that serves a JavaScript "
             "challenge to unrecognised user agents.".format(" and ".join(vendors)),
-            "Add an allow rule for the AI answer crawlers by user agent - OAI-SearchBot, "
-            "PerplexityBot, ClaudeBot and Google-Extended - keeping your rate limits in place. "
-            "These fetch a page to answer a question; they are not the traffic the rule is for.",
-            "Verify with `curl -A OAI-SearchBot https://your-site/` and confirm you get real "
-            "HTML back rather than a challenge page.",
+            # Rendered from the agent table, never written out here. This step
+            # used to name "OAI-SearchBot, PerplexityBot, ClaudeBot and
+            # Google-Extended" as crawlers that "fetch a page to answer a
+            # question". ClaudeBot is a training crawler and Google-Extended
+            # is an opt-out token that fetches nothing, so the sentence told
+            # owners to reopen a training opt-out for a citation gain of zero
+            # - while the robots.txt finding forty lines away, built from the
+            # table, got the same distinction right. A crawler name typed into
+            # a string is a claim nothing checks.
+            "Add an allow rule for these user agents, keeping your rate limits in place: "
+            "{}. Each one either indexes pages so you can be linked in an answer, or "
+            "fetches a page because someone just asked about it.".format(
+                describe_agents(ANSWER_CRAWLERS, limit=6)),
+            "Leave the training crawlers where they are. They are separate user agents, "
+            "they do not produce citations, and allowing them here buys you nothing.",
+            "Verify with `curl -A {} https://your-site/` and confirm you get real "
+            "HTML back rather than a challenge page.".format(ANSWER_CRAWLERS[0]),
         ],
         effort="medium", owner="developer",
         rationale="An assistant fetching this page receives a verification screen. "
@@ -385,55 +615,81 @@ def _check_robots_blocks(result, robots, origin):
     if blocked_answer:
         named = [name for name in blocked_answer if group_for(robots, name)
                  and name.lower() in [a for g in robots["groups"] for a in g["agents"]]]
+        inferred = undocumented_among(blocked_answer)
         result.add(
             id_hint="robots-blocks-answer-crawlers",
             title="robots.txt blocks {} AI answer crawler{} from the homepage".format(
                 len(blocked_answer), "" if len(blocked_answer) == 1 else "s"),
             severity="high" if len(blocked_answer) >= 2 else "medium",
             confidence="high",
-            evidence="Disallowed at `/`: {}. {}".format(
-                ", ".join(blocked_answer[:8]),
+            # Every name carries its operator and that operator's own statement
+            # of what it does. An earlier version printed bare tokens under a
+            # sentence claiming all of them fetched pages to build cited
+            # answers, which was false for five of them.
+            evidence="Disallowed at `/`: {}. {}{}".format(
+                describe_agents(blocked_answer),
                 "Named explicitly in robots.txt: {}.".format(", ".join(named[:8])) if named
-                else "These fall under a wildcard rule rather than being named."),
+                else "These fall under a wildcard rule rather than being named.",
+                " The role of {} is inferred from observed behaviour, not from a published "
+                "statement by its operator.".format(", ".join(inferred)) if inferred else ""),
             mechanism="A", root_cause="robots-block",
             summary="Allow the AI answer crawlers you want to be cited by; keep blocks only where "
                     "you have deliberately opted out.",
             how_to_fix=[
-                "Decide which of these you want quoting your pages: {}.".format(", ".join(blocked_answer[:6])),
+                "Decide which of these you want quoting your pages: {}.".format(
+                    describe_agents(blocked_answer, limit=6)),
                 "For each one you want, add an explicit allow group in /robots.txt (see snippet).",
                 "Leave blocks in place only where the opt-out is a deliberate rights decision, "
                 "and note that decision somewhere your team will find it later.",
+                "Allowing these does not opt you back in to model training: the training "
+                "crawlers are separate user agents and keep whatever rules you gave them.",
                 "Re-test with a robots.txt checker using each crawler's user-agent string.",
             ],
             effort="low", owner="developer",
-            rationale="These crawlers fetch live pages to build cited answers. "
-                      "A brand they cannot fetch cannot be quoted, however good the content is.",
+            rationale="Each of these either indexes pages so the brand can be linked in an "
+                      "answer, or fetches a page live because someone just asked about it. "
+                      "None of them is a training crawler. A brand they cannot fetch cannot "
+                      "be quoted, however good the content is.",
             snippet="\n\n".join(
                 "User-agent: {}\nAllow: /".format(name) for name in blocked_answer[:4]
             ),
         )
 
     if blocked_training:
+        # The useful sentence here is not "you blocked a training crawler".
+        # It is: that is your decision, and here are the agents from the same
+        # companies that decide whether you get cited - check those are open.
+        counterparts = [name for name in answer_side_counterparts(blocked_training)
+                        if name not in blocked_answer]
         result.add(
             id_hint="robots-blocks-training-crawlers",
             title="robots.txt blocks AI training crawlers (this is often deliberate)",
             severity="info", confidence="high",
-            evidence="Disallowed at `/`: {}. These collect training corpora rather than "
-                     "fetching pages to answer a live question.".format(", ".join(blocked_training[:8])),
+            evidence="Disallowed at `/`: {}. These collect training corpora, or are opt-out "
+                     "tokens that fetch nothing at all, rather than fetching pages to answer "
+                     "a live question.".format(describe_agents(blocked_training)),
             mechanism="A", root_cause="robots-block",
             summary="Confirm the training-crawler opt-out is intentional; it does not by itself "
                     "stop the brand being cited.",
             how_to_fix=[
                 "Confirm with whoever owns content rights that opting out of training corpora "
                 "is the intended policy.",
-                "If it is, no change is needed: answer crawlers are a separate group and are "
-                "governed by their own user-agent lines.",
-                "If it is not, remove these user-agent groups from /robots.txt.",
+                "If it is, no change is needed here. Do not allow these back in to fix a "
+                "citation problem - they are not the agents that produce citations.",
+                ("The agents from the same companies that do decide citation are {}, and "
+                 "robots.txt already lets them in. Keep it that way.".format(
+                     ", ".join(counterparts[:6]))
+                 if counterparts else
+                 "Every answer-side agent from these same companies is also blocked, which is "
+                 "reported separately and is the one worth reconsidering."),
+                "If the opt-out was not intended, remove these user-agent groups from "
+                "/robots.txt.",
             ],
             effort="low", owner="marketing",
             rationale="Blocking training collection limits what a model absorbs "
-                      "offline, but retrieval-time citation depends on the answer crawlers, "
-                      "which are controlled separately. Reported for awareness, not as a defect.",
+                      "offline, but retrieval-time citation depends on the search and "
+                      "live-fetch agents, which are separate user agents with their own "
+                      "rules. Reported for awareness, not as a defect.",
         )
 
     content_blocks = [rule for rule in substantive_disallows(robots, "*")
@@ -707,23 +963,40 @@ def _check_bot_manager(result, snapshot, robots, fetcher, allow_network):
                     "the homepage was not fetched, so there is no baseline to compare against")
         return
 
-    candidate = next(
-        (name for name in ANSWER_CRAWLERS if not is_disallowed(robots, name, "/")), None)
-    if candidate is None:
+    baseline = home.get("status")
+    candidates = _probe_candidates(robots)
+    if not candidates:
         result.skip("bot-manager-user-agent-comparison",
                     "robots.txt already disallows every AI answer crawler, so the robots finding "
                     "covers this and no probe request was made")
         return
 
-    response = fetcher.try_get(home_url, user_agent=_ua_string(candidate))
-    if response is None:
-        result.skip("bot-manager-user-agent-comparison",
-                    "the comparison request failed for a reason unrelated to the site's bot rules")
-        return
-
-    baseline = home.get("status")
-    if response.status_code == baseline:
+    # One agent getting through does not tell you a bot manager is off. Bot
+    # rules are per-agent and per-vendor: an edge that blocks Applebot while
+    # answering Claude-SearchBot normally is a real configuration, and probing
+    # only whichever name happened to sit first in a list reported it as clean.
+    # Two agents, from two operators, on the two different roles.
+    candidate = None
+    response = None
+    tried = []
+    unreachable = 0
+    for name in candidates:
+        attempt = fetcher.try_get(home_url, user_agent=_ua_string(name))
+        tried.append(name)
+        if attempt is None:
+            unreachable += 1
+            continue
+        if attempt.status_code != baseline:
+            candidate, response = name, attempt
+            break
+    if candidate is None:
+        if unreachable == len(tried):
+            result.skip("bot-manager-user-agent-comparison",
+                        "the comparison requests failed for a reason unrelated to the site's "
+                        "bot rules")
+            return
         result.signal("bot_manager_block", False)
+        result.signal("bot_manager_agents_probed", tried)
         return
 
     # One confirmation before reporting: a single differing response can be a
@@ -736,6 +1009,7 @@ def _check_bot_manager(result, snapshot, robots, fetcher, allow_network):
         return
 
     result.signal("bot_manager_block", True)
+    result.signal("bot_manager_agents_probed", tried)
     blocking = confirm.status_code in (401, 403, 405, 406, 429) or confirm.status_code >= 500
     result.add(
         id_hint="bot-manager-blocks-ai-crawlers",
@@ -743,8 +1017,12 @@ def _check_bot_manager(result, snapshot, robots, fetcher, allow_network):
         severity="critical" if blocking else "medium",
         confidence="high",
         evidence="{} returned HTTP {} for user agent `{}` on two consecutive requests, but "
-                 "HTTP {} for the audit user agent. robots.txt does not disallow {}.".format(
-                     home_url, confirm.status_code, candidate, baseline, candidate),
+                 "HTTP {} for the audit user agent. robots.txt does not disallow {}.{}".format(
+                     home_url, confirm.status_code, candidate, baseline, candidate,
+                     " {} answered normally, so the rule is written per agent rather than "
+                     "against every crawler.".format(
+                         ", ".join("`{}`".format(n) for n in tried if n != candidate))
+                     if len(tried) > 1 else ""),
         mechanism="A", root_cause="bot-manager-block",
         summary="Allow-list the AI answer crawlers in your CDN or WAF bot rules.",
         how_to_fix=[
@@ -764,6 +1042,81 @@ def _check_bot_manager(result, snapshot, robots, fetcher, allow_network):
     )
 
 
+
+def _probe_candidates(robots, limit=BOT_PROBE_AGENTS):
+    """Up to `limit` answer agents robots.txt permits, from different operators.
+
+    Picking one name off the front of a list made this check a lottery: on a
+    fixture whose edge blocked five named crawlers, reordering the list changed
+    the verdict from "a WAF blocks AI crawlers" to "nothing found", because the
+    new first name happened to be one the edge allowed. Bot rules are written
+    per agent and per vendor, so a second opinion from a different operator is
+    worth one request.
+    """
+    picked, operators = [], []
+    for name in ANSWER_CRAWLERS:
+        if is_disallowed(robots, name, "/"):
+            continue
+        agent = AGENT_BY_TOKEN.get(name.lower())
+        operator = agent.operator if agent else name
+        if operator in operators:
+            continue
+        picked.append(name)
+        operators.append(operator)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def _report_response_time(result, pages):
+    """A site that answers, slowly, has a problem of its own.
+
+    Every answer crawler runs on a timeout it does not publish, and a page
+    that takes half a minute is a page some of them will never see. That is a
+    real discoverability defect and it is not the outage the old wording
+    described, so it gets its own root cause and its own fix.
+    """
+    result.check("origin-response-time")
+    timing = response_timing(pages)
+    if timing is None:
+        result.skip("origin-response-time",
+                    "no page was both fetched and timed, so there is nothing to measure")
+        return
+    if timing["median_ms"] < SLOW_ORIGIN_MEDIAN_MS:
+        result.skip("origin-response-time",
+                    "the median response across {} page(s) was {:.1f} s".format(
+                        timing["measured_on"], timing["median_ms"] / 1000.0))
+        return
+
+    very_slow = timing["median_ms"] >= VERY_SLOW_ORIGIN_MEDIAN_MS
+    result.add(
+        id_hint="origin-answers-too-slowly",
+        title="The site answers, but slowly enough that crawlers will give up",
+        severity="high" if very_slow else "medium", confidence="high",
+        evidence="Median response across {} page(s) that returned 200: {:.1f} s. Slowest: "
+                 "{:.1f} s. These are server response times measured from this crawl, not "
+                 "page-load scores, and they exclude every request that failed.".format(
+                     timing["measured_on"], timing["median_ms"] / 1000.0,
+                     timing["slowest_ms"] / 1000.0),
+        mechanism="A", root_cause="slow-origin",
+        summary="Get the median server response under a second, by caching pages rather than "
+                "by making the template smaller.",
+        how_to_fix=[
+            "Measure where the time goes on one slow page: time to first byte against total "
+            "transfer. A slow first byte is the server; a slow transfer is the payload.",
+            "Put a full-page cache in front of anything a logged-out visitor sees, so a "
+            "crawler is served from cache rather than from the application.",
+            "Look for a query or a third-party call inside the page template - a stock "
+            "lookup, a reviews widget, a currency conversion - that runs per request.",
+            "Re-measure after each change. This is the one finding in this report where you "
+            "can see the effect immediately.",
+        ],
+        effort="medium", owner="developer",
+        rationale="Every AI crawler enforces a timeout it does not publish. A page slower "
+                  "than that timeout is not slow to them, it is absent, and no amount of "
+                  "markup on it can be read.",
+    )
+
 def _ua_string(name):
     """The probe identifies itself as both the crawler and this audit tool."""
     return "{} ({}; comparison probe)".format(name, USER_AGENT)
@@ -775,6 +1128,8 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
     result.check("redirect-chain-length")
     result.check("noindex-on-content-pages")
     result.check("canonical-targets")
+
+    _report_response_time(result, pages)
 
     home_url = snapshot["origin"].rstrip("/") + "/"
     home = next((p for p in pages if p["url"] == home_url), None)
@@ -788,13 +1143,14 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
             title="The homepage refuses this crawler" if looks_like_bot_block
                   else "The homepage does not return HTTP 200",
             severity="critical", confidence="high",
-            evidence="{} {}.{}".format(
+            evidence="{} {}.{}{}".format(
                 home_url,
                 "returned HTTP {}".format(status) if status
                 else explain_fetch_error(home.get("error")),
                 " The request identified itself as an audit crawler, respected robots.txt and "
                 "was rate limited, so this is a bot-management rule rather than an outage."
-                if looks_like_bot_block else ""),
+                if looks_like_bot_block else "",
+                "" if status else slow_origin_note(pages)),
             mechanism="A", root_cause="non-200",
             summary="Allow identified crawlers to fetch the homepage."
                     if looks_like_bot_block else "Restore a 200 response on the homepage.",
@@ -927,6 +1283,7 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
 
     noindexed = []
     soft_404s = []
+    search_pages = []
     duplicates = []
     for page in ok_pages:
         if page.get("page_type") not in CONTENT_TYPES:
@@ -940,6 +1297,13 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
         # into the index.
         if looks_like_soft_404(page):
             soft_404s.append(page)
+            continue
+        # A search-result page exists because somebody typed a query. Keeping
+        # it out of an index is what every search-engine guideline asks for,
+        # and telling the owner to remove the `noindex` would publish five
+        # URLs of somebody else's search history.
+        if is_search_result_page(page.get("url") or ""):
+            search_pages.append(page)
             continue
         # A filtered or sorted view of a listing carries `noindex` and a
         # canonical pointing at the listing itself. That is the textbook way to
@@ -955,6 +1319,8 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
         noindexed.append(page)
     if soft_404s:
         result.signal("noindexed_soft_404s", [p["url"] for p in soft_404s])
+    if search_pages:
+        result.signal("noindexed_search_pages", [p["url"] for p in search_pages])
     if noindexed:
         result.add(
             id_hint="noindex-on-content-pages",

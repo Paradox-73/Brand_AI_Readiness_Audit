@@ -55,8 +55,10 @@ sys.path.insert(0, _SHARED)
 from audit_common import (  # noqa: E402
     CONTENT_TYPES, DEEP_TYPES, example_urls, find_prices, is_multi_location,
     is_question_heading,
-    load_snapshot, name_forms, pages_of, pct, plural, price_value,
-    PRICE_NUMBER_RE, sample, sentences, SkillResult, truncate
+    BRANCH_PAGE_MINIMUM, fold_declared_duplicates,
+    load_snapshot, name_forms, pages_of, pages_with_their_own_address, pct,
+    plural, price_value, PRICE_NUMBER_RE, profile_names_brand, sample,
+    sentences, SkillResult, truncate, written_in_the_same_script
 )
 
 SKILL = "structured-data-audit"
@@ -116,7 +118,8 @@ def run(snapshot):
     brand = snapshot.get("brand") or {}
 
     if not pages:
-        for name in ("organization-markup", "product-markup", "article-markup",
+        for name in ("organization-markup", "per-location-markup",
+                     "product-markup", "article-markup",
                      "faq-markup", "breadcrumb-markup", "jsonld-validity",
                      "jsonld-matches-visible-text", "title-and-description",
                      "open-graph-tags", "html-lang-attribute"):
@@ -129,6 +132,7 @@ def run(snapshot):
 
     _check_jsonld_validity(result, pages)
     _check_organization(result, snapshot, pages, by_type, brand)
+    _check_per_location_markup(result, snapshot, pages)
     _check_product(result, by_type, brand)
     _check_article(result, by_type)
     _check_faq(result, by_type)
@@ -176,8 +180,47 @@ def _prop(node, key):
     return value if value is not None else ""
 
 
+# Where a property is also allowed to live. schema.org lets one value be
+# stated in more than one valid place, and a checker that reads only the
+# shortest form reports the longer, richer form as absent.
+#
+# `Offer.priceSpecification` is the case that bit: a restaurant's shop states
+# every price as
+#
+#     "offers": [{"@type": "Offer",
+#                 "priceSpecification": [{"@type": "UnitPriceSpecification",
+#                                         "price": "30.00",
+#                                         "priceCurrency": "GBP"}]}]
+#
+# which is valid, is what WooCommerce emits, and carries more than a flat
+# `price` does. Reading only `offer["price"]` reported eighteen pages of
+# correct markup as offers "missing price and priceCurrency", and the fix
+# would have had the owner flatten working data.
+_ALTERNATIVE_HOMES = {
+    "price": ("priceSpecification",),
+    "priceCurrency": ("priceSpecification",),
+    "lowPrice": ("priceSpecification",),
+    "highPrice": ("priceSpecification",),
+}
+
+
+def _prop_anywhere(node, key):
+    """The property, from the node or from a nested object allowed to hold it."""
+    direct = _prop(node, key)
+    if direct:
+        return direct
+    for holder in _ALTERNATIVE_HOMES.get(key, ()):
+        nested = node.get(holder)
+        if isinstance(nested, dict):
+            nested = [nested]
+        for candidate in nested or []:
+            if isinstance(candidate, dict) and _prop(candidate, key):
+                return _prop(candidate, key)
+    return ""
+
+
 def _missing_props(node, props):
-    return [p for p in props if not _prop(node, p)]
+    return [p for p in props if not _prop_anywhere(node, p)]
 
 
 # schema.org types that mean "somewhere a customer physically goes".
@@ -259,6 +302,29 @@ def _site_logo(snapshot, pages):
     return None
 
 
+# Pages that speak for the whole business. A sentence describing the brand can
+# only come from one of these.
+#
+# A restaurant's paste-ready LocalBusiness block came out with
+#
+#     "description": "Brawn's blue tote is not only bold in colour but also in
+#                     versatility - this bag has it all for your every day
+#                     storage needs."
+#
+# The homepage has no defining sentence, which the same report correctly said
+# in a separate finding. So the search fell through, in URL order, to a product
+# page, where "Brawn's blue tote **is** not only bold..." matched the pattern
+# on the word "is". The report simultaneously said no page states what the
+# brand is, and handed the owner markup stating that the restaurant "has it all
+# for your every day storage needs".
+#
+# The value was real, present on the site, and on the wrong subject - which is
+# a class the "only observed values" rule does not catch, because the string
+# genuinely is observed. The rule it needs is about provenance: a claim about
+# the whole brand may only be read off a page that is about the whole brand.
+_WHOLE_BRAND_PAGE_TYPES = ("home", "about", "contact")
+
+
 def _brand_definition(pages, brand):
     """The site's own sentence defining itself, if it has written one.
 
@@ -266,13 +332,18 @@ def _brand_definition(pages, brand):
     and the audit prints it in the report. The Organization snippet was still
     emitting `<one sentence: what you do, for whom>` while the answer sat two
     sections above it.
+
+    Read only from pages that speak for the business. Falling through to any
+    page that happened to contain the brand name and a copula published a
+    product blurb as the company's own description.
     """
     name = (brand or {}).get("name") or ""
     if not name:
         return ""
     lowered = name.lower()
-    home = next((p for p in pages if p.get("page_type") == "home"), None)
-    for page in filter(None, [home] + list(pages)):
+    ordered = [page for page_type in _WHOLE_BRAND_PAGE_TYPES
+               for page in pages if page.get("page_type") == page_type]
+    for page in ordered:
         for paragraph in (page.get("paragraphs") or [])[:12]:
             for sentence in sentences(paragraph):
                 text = sentence.strip()
@@ -284,10 +355,18 @@ def _brand_definition(pages, brand):
 
 
 def _site_description(pages):
-    home = next((p for p in pages if p["page_type"] == "home"), None)
-    for page in filter(None, [home] + list(pages)):
-        if page.get("meta_description"):
-            return page["meta_description"]
+    """The site's own description of itself, from a page that speaks for it.
+
+    Same provenance rule as `_brand_definition`, and the same reason: falling
+    through to any page with a meta description would put a single product's
+    marketing line into the site-wide Organization block on exactly the sites
+    whose homepage has no description - which is every site this finding
+    fires on.
+    """
+    for page_type in _WHOLE_BRAND_PAGE_TYPES:
+        for page in pages:
+            if page.get("page_type") == page_type and page.get("meta_description"):
+                return page["meta_description"]
     return ""
 
 
@@ -308,36 +387,31 @@ def _all_same_as(pages, brand=None):
     the ordinary ways - dropped spaces, a `get` or `the` prefix, an `hq` or
     `app` suffix - and anything further apart is left out rather than asserted.
     """
-    urls = set()
+    # One URL, one entry. A city's footer links its Facebook page with and
+    # without a trailing slash, and both went into `sameAs` - so the snippet
+    # asserted the same account twice and the profile count read one higher
+    # than the number of accounts. Two strings, one profile.
+    urls = {}
     for page in pages:
-        urls.update((page.get("social_profiles") or {}).values())
+        for url in (page.get("social_profiles") or {}).values():
+            urls.setdefault(re.sub(r"[?#].*$", "", url).rstrip("/").lower(), url)
+    urls = set(urls.values())
     key = re.sub(r"[^a-z0-9]", "", str((brand or {}).get("name") or "").lower())
     if len(key) < 3:
         return sorted(urls)
     return sorted(u for u in urls if _handle_matches_brand(u, key))
 
 
-_HANDLE_AFFIXES = ("get", "the", "team", "official", "hq", "app", "inc", "co", "org")
-
-
 def _handle_matches_brand(url, key):
-    """Does this profile URL's handle name the brand?"""
-    path = re.sub(r"[?#].*$", "", url).rstrip("/")
-    handle = re.sub(r"[^a-z0-9]", "", path.rsplit("/", 1)[-1].lower())
-    if not handle:
-        return False
-    for candidate in (handle, key):
-        other = key if candidate is handle else handle
-        if candidate == other:
-            return True
-    if key in handle or handle in key:
-        return True
-    for affix in _HANDLE_AFFIXES:
-        if handle.startswith(affix) and handle[len(affix):] == key:
-            return True
-        if handle.endswith(affix) and handle[: -len(affix)] == key:
-            return True
-    return False
+    """Does this profile URL's handle name the brand?
+
+    Kept as a thin wrapper: `profile_names_brand` in `audit_common` is the one
+    implementation, because the corroboration count needed the same test and
+    had none - so a contributor's personal GitHub account and a Wikipedia
+    article about a computer-science term were both counted as a brand's own
+    profiles. Two skills asking the same question must not answer it twice.
+    """
+    return profile_names_brand(url, key)
 
 
 # --------------------------------------------------------------------------
@@ -571,16 +645,63 @@ def _contact_facts_for_snippet(pages, branches=False):
     # site *mentions* something address-like, which is all `has_address` claims;
     # it is not a fact about the organisation, and only a `PostalAddress` the
     # site declared itself is.
-    declared = _declared_address(pages)
+    declared = _declared_address(pages, whole_brand_only=branches)
     if declared:
         out.update(declared)
     return out
 
 
-def _declared_address(pages):
-    """A PostalAddress the site published in its own markup, or nothing."""
+# schema.org types that describe the business rather than one of its places.
+# `LocalBusiness` and its subtypes describe a place, and a chain declares one
+# per branch - which is correct, and is exactly why their addresses must not be
+# read as the company's.
+_WHOLE_BRAND_JSONLD_TYPES = frozenset({
+    "organization", "corporation", "ngo", "educationalorganization",
+    "governmentorganization", "performinggroup", "sportsorganization",
+    "onlinestore", "onlinebusiness", "brand", "airline", "consortium",
+    "librarysystem", "medicalorganization", "newsmediaorganization",
+    "project", "researchorganization", "fundingscheme", "workersunion",
+    "politicalparty",
+})
+
+
+def _speaks_for_the_whole_brand(node):
+    """Is this node about the business, rather than about one of its places?"""
+    value = node.get("@type")
+    values = [value] if isinstance(value, str) else (value or [])
+    declared = {str(v).split("/")[-1].lower() for v in values}
+    if declared & _VISITABLE_TYPES:
+        return False
+    return bool(declared & _WHOLE_BRAND_JSONLD_TYPES)
+
+
+def _declared_address(pages, whole_brand_only=False):
+    """A PostalAddress the site published in its own markup, or nothing.
+
+    A gym chain's report offered its homepage this paste-ready Organization
+    block:
+
+        "streetAddress": "122 The Broadway", "postalCode": "SW19 1RH"
+
+    That is the Wimbledon branch's own address, lifted from the one branch page
+    the crawl happened to reach, and presented as the company's. The registered
+    office is four miles and one postcode away, printed on the site's own
+    privacy page.
+
+    The telephone reader above already refuses to do this - "a bakery with
+    three shops was offered the Cherche-Midi shop's line as the `telephone` for
+    its whole company record" - and the guard was never extended to the
+    address, which is the same mistake with a longer value.
+
+    `whole_brand_only` is set on a multi-location site, and then reads an
+    address only from a node that speaks for the business. A single-location
+    business is left alone: its one place's address really is the company's,
+    and that is the common case.
+    """
     for page in pages:
         for node in page.get("jsonld") or []:
+            if whole_brand_only and not _speaks_for_the_whole_brand(node):
+                continue
             address = node.get("address")
             if isinstance(address, list):
                 address = address[0] if address else None
@@ -647,6 +768,90 @@ def _offer_of(node):
             return nested
     return None
 
+
+
+def _check_per_location_markup(result, snapshot, pages):
+    """A page describing one branch should say so in markup.
+
+    The single highest-value structured-data fix a multi-location business can
+    make, and there was no check for it. A pizza chain with sixty branches got
+    a report that never used the word `LocalBusiness`: its branch pages each
+    print a street and a postcode in plain text, declare no place markup at
+    all, and so were invisible to every signal that would have identified the
+    site as a chain. The markup that would have found the chain was the markup
+    the chain was missing.
+
+    `pages_with_their_own_address` reads the addresses off the pages instead,
+    which is evidence the site cannot fail to provide.
+    """
+    result.check("per-location-markup")
+    branch_pages = pages_with_their_own_address(snapshot)
+    if len(branch_pages) < BRANCH_PAGE_MINIMUM:
+        result.skip("per-location-markup",
+                    "{} page(s) carry an address of their own, too few to treat this as a "
+                    "business with separate places to visit".format(len(branch_pages)))
+        return
+
+    unmarked = []
+    for page in branch_pages:
+        declared = {str(t).split("/")[-1].lower() for t in page.get("jsonld_types") or []}
+        if not declared & _VISITABLE_TYPES:
+            unmarked.append(page)
+    if not unmarked:
+        result.skip("per-location-markup",
+                    "all {} page(s) carrying their own address declare a visitable "
+                    "schema.org type".format(len(branch_pages)))
+        return
+
+    example = unmarked[0]
+    facts = example.get("contact_facts") or {}
+    result.add(
+        id_hint="branch-pages-carry-no-location-markup",
+        title="{} describe a place to visit without saying so in markup".format(
+            plural(len(unmarked), "page")),
+        severity="high" if len(unmarked) >= 5 else "medium", confidence="high",
+        evidence="{} of {} page(s) that print their own street address declare no "
+                 "LocalBusiness, Store, Restaurant or similar visitable type. Examples: "
+                 "{}. Each of those addresses is different from the others, which is what "
+                 "a business with separate branches looks like.".format(
+                     len(unmarked), len(branch_pages),
+                     ", ".join(example_urls([p["url"] for p in unmarked], 3))),
+        mechanism="C", root_cause="no-org-schema",
+        summary="Add one LocalBusiness block per branch page, each with that branch's own "
+                "address, phone and opening hours.",
+        how_to_fix=[
+            "On each branch page, add a LocalBusiness (or the closest subtype: Store, "
+            "Restaurant, Dentist) JSON-LD block naming that branch.",
+            "Give each one its own `address`, `telephone` and `openingHoursSpecification`. "
+            "Do not reuse the head-office values - the point is that they differ.",
+            "Set `parentOrganization` on each branch to the Organization block in your "
+            "site-wide template, so a machine can see they are one business.",
+            "Keep the site-wide Organization block as it is. It describes the company; these "
+            "describe the places.",
+        ],
+        effort="medium", owner="developer",
+        rationale="\"Near me\" and \"which branch\" questions are answered from per-place "
+                  "markup. A chain with one company-level block is one result; a chain with a "
+                  "block per branch is a result in every town it operates in.",
+        affected_pages=[p["url"] for p in unmarked],
+        snippet=json.dumps({
+            "@context": "https://schema.org",
+            "@type": "LocalBusiness",
+            "name": "{} - <branch name>".format(
+                (snapshot.get("brand") or {}).get("name") or "<brand>"),
+            "url": example["url"],
+            "address": {
+                "@type": "PostalAddress",
+                "streetAddress": facts.get("street_hint") or "<street>",
+                "postalCode": facts.get("postcode_hint") or "<postal code>",
+            },
+            "telephone": (facts.get("declared_phones") or ["<phone>"])[0],
+            "parentOrganization": {
+                "@type": "Organization",
+                "name": (snapshot.get("brand") or {}).get("name") or "<brand>",
+            },
+        }, indent=2),
+    )
 
 def _check_product(result, by_type, brand):
     result.check("product-markup")
@@ -1070,6 +1275,13 @@ def _check_consistency(result, pages, brand):
                 continue
             haystack = "{} {} {}".format(page.get("title", ""), text[:4000],
                                          " ".join(page.get("headings", {}).get("h1") or []))
+            # A Latin-script name cannot appear in an Arabic page, and its
+            # absence there says nothing about the markup. One foundation's
+            # Arabic edition was told at high severity that its structured
+            # data contradicted the page, about markup that was correct and a
+            # page that was correct.
+            if not written_in_the_same_script(declared, haystack):
+                continue
             # A formal name in markup and a trading name in the prose is normal
             # and correct. The conflict is when *no* form of the declared name
             # appears, not when the legal suffix is missing from the sentence.
@@ -1110,6 +1322,11 @@ def _check_consistency(result, pages, brand):
 
 def _check_titles_and_descriptions(result, pages):
     result.check("title-and-description")
+    # A URL and its own declared canonical target are one page, and the site is
+    # the authority on that. Counting both reported two of eleven "duplicate
+    # title" pairs on a broadcaster that were a URL and its canonical, and
+    # inflated the denominator underneath them at the same time.
+    pages = fold_declared_duplicates(pages)
     missing_title = [p for p in pages if not p.get("title")]
     missing_desc = [p for p in pages if not p.get("meta_description")]
 

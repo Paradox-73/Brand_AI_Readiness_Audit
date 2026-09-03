@@ -97,6 +97,7 @@
             "description": "Extension. A sample, capped at 5. Empty means the finding is site-wide by construction."
           },
           "affected_page_count": {"type": "integer", "minimum": 0, "description": "Extension."},
+          "example_withheld": {"type": "string", "description": "Extension. Present only when the per-page list could not be reconciled with the count the finding states about itself. affected_pages is then empty and this says why."},
           "reach": {
             "type": "number",
             "minimum": 0,

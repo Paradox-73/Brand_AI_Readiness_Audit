@@ -65,7 +65,26 @@ def parse_robots(text):
 
 
 def group_for(parsed, agent):
-    """The group that governs `agent`: longest matching token, else `*`."""
+    """The group that governs `agent`: longest matching token, else `*`.
+
+    Matching is a case-insensitive **prefix** test, which is what RFC 9309 and
+    Google's implementation both specify. It used to also accept the token
+    anywhere in the name, and that produced a confident, false finding on a
+    public broadcaster: a legacy blocklist entry reading
+
+        User-agent: Fetch
+        Disallow: /
+
+    was reported as blocking `Meta-ExternalFetcher` from the whole site,
+    because "fetch" occurs inside "Meta-ExternalFetcher". The group that
+    actually governs that crawler there is `*`, which disallows nothing. The
+    report told the owner to change a rule that was doing nothing, about a
+    crawler that was never blocked.
+
+    Substring matching cannot be made safe by tuning: "bot" is a substring of
+    almost every crawler name, and the shorter the stray token, the more
+    crawlers it captures. A prefix is what a crawler itself looks for.
+    """
     agent = (agent or "*").lower()
     best = None
     best_len = -1
@@ -76,9 +95,8 @@ def group_for(parsed, agent):
                 if wildcard is None:
                     wildcard = grp
                 continue
-            if agent.startswith(name) or name in agent:
-                if len(name) > best_len:
-                    best, best_len = grp, len(name)
+            if agent.startswith(name) and len(name) > best_len:
+                best, best_len = grp, len(name)
     return best if best is not None else wildcard
 
 
@@ -159,6 +177,16 @@ _BENIGN_DISALLOW = re.compile(
     r"apple-app-site-association|apple-touch-icon|humans\.txt|ads\.txt|"
     r"app-ads\.txt|security\.txt|browserconfig\.xml|crossdomain\.xml|"
     r"manifest\.json|sw\.js|service-worker|serviceworker|\.well-known|"
+    # Health endpoints. One report excluded `/api/commerce/healthcheck/` under
+    # this same rule and then listed `/healthcheck.html` as a path that looks
+    # like real content, in the same finding - the rule was right and the list
+    # it was applied to was not.
+    #
+    # Only the unambiguous endpoint names. This regex matches a prefix with no
+    # word boundary, so a bare `health` would swallow `/healthcare` and a bare
+    # `status` would swallow `/statuses-of-liberty`; on an insurance site or a
+    # gallery those are the content.
+    r"healthcheck|health-check|healthz|statusz|heartbeat|readiness|liveness|"
     # Framework and build directories, which hold code rather than prose.
     r"app_themes|app_data|app_code|app_start|controls|_next|_nuxt|_astro|"
     r"_app|_layouts|web-inf|meta-inf|bin|obj|\.git|\.svn|cgi|"
@@ -192,6 +220,25 @@ _BENIGN_ANYWHERE = re.compile(
 # was reported alongside a real content path as something to unblock.
 _NUMERIC_PATH_RE = re.compile(r"^/\d+/?$")
 
+# A copy of the site that is not the site. A broadcaster's robots.txt blocks
+# `club-preprod`, `digital-preprod`, `magazine-dev` and `magazine-test`, and
+# all eleven "paths that look like real content" in its report were of that
+# shape. Keeping a staging copy out of an index is the whole reason robots.txt
+# exists, and telling the owner to open it up would put unfinished pages into
+# answers about the brand.
+#
+# Matched anywhere in the rule, and as a whole word, because the environment
+# name is a suffix on a real section name: it is `magazine-dev`, never `/dev`.
+# Deliberately short. Every word here has to mean "environment" and nothing
+# else, because a word with a second meaning turns a real section into
+# plumbing - which is the more expensive mistake of the two. `development`
+# would swallow `/development-services`, `testing` a laboratory's `/testing`,
+# `legacy` a charity's `/legacy-giving`, `demo` a "book a demo" page, and
+# `mirror` a shop that sells mirrors. All five are left out.
+_STAGING_RE = re.compile(
+    r"(?:^|[/*?&=_.-])(?:preprod|pre-prod|staging|stage|dev|test|uat|qa|"
+    r"sandbox|backup|bak)(?:$|[/*?&=_.-])", re.I)
+
 
 def benign_disallow(rule):
     """True for the admin/cart/search/parameter paths every site blocks on purpose."""
@@ -214,7 +261,8 @@ def benign_disallow(rule):
         return True
     if rule.count("*") >= 2 and not re.search(r"[a-z]{3}", rule.replace("*", ""), re.I):
         return True
-    return bool(_BENIGN_DISALLOW.match(rule) or _BENIGN_ANYWHERE.search(rule))
+    return bool(_BENIGN_DISALLOW.match(rule) or _BENIGN_ANYWHERE.search(rule)
+                or _STAGING_RE.search(rule))
 
 
 def substantive_disallows(parsed, agent):

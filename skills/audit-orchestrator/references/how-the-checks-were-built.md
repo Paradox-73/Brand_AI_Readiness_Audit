@@ -42,7 +42,7 @@ It moved two thresholds and got nine checks deleted for firing on everything.
 
 **We break one thing at a time to prove each check is specific.** `tests/mutations.py` takes
 the clean fixture, breaks exactly one named property, and asserts the audit reports that
-property **and nothing else**. Forty-six cases. Site samples cannot do this: on a real
+property **and nothing else**. Forty-eight cases. Site samples cannot do this: on a real
 broken site twenty things are wrong at once, so a check can look correct by coincidence.
 Controlling the cause is the only way to tell detection from correlation, and it found eight
 defects the fixture suite had never touched — including one check that was documented,
@@ -184,6 +184,111 @@ Doctors Without Borders, so every finding naming it contained the word "without"
 report was withheld as unverifiable. Quoted names and the brand name now come out of the
 sentence before it is read - which is the point of testing a general rule against sites it was
 not derived from.
+
+### Two more rules the fifth round forced
+
+Two more rounds have run since the table above, on the same method and on sites the previous
+round's fixes were not derived from. Continuing it:
+
+| Round | Sites | Findings checked | Wrong or misleading |
+|---|---|---|---|
+| 4 | 8 | 77 | 40% |
+| 5 | 10 | 135 | **20%** |
+| 6 | 4 | 42 | **18%** |
+
+Round 5 covered a city government, a university department, a German manufacturer, a bilingual
+broadcaster, a national newspaper, a public radio programme, a developer-tools company, an
+open-source framework, a pizza chain and a single restaurant. Round 6 re-ran the zip built from
+round 5's fixes against four more: a gym chain with 276 branch pages, a retailer behind a bot
+manager, a humanitarian organisation serving six languages under path prefixes, and an
+Arabic-script news site.
+
+Rules 1 and 3 held on every site that exercised them. Rules 2 and 4 each had a bug of their
+own, both found by sites they were not derived from, both fixed. Two classes were left that no
+existing rule covered, and both are now rules in the same sense - one place, whole-run scope,
+inherited by checks not yet written.
+
+**5. A claim about a third party carries its source.** The worst thing this audit has ever
+said was ranked second in "Start here", marked high and "do first": *allow-list GPTBot,
+ClaudeBot, Amazonbot, Bytespider and Meta-ExternalAgent, because they fetch live pages to build
+cited answers.* All five are training crawlers by their operators' own published descriptions,
+and Meta-ExternalFetcher - which really does fetch a page because a person asked - sat in the
+training group. An owner who followed that advice would have reopened their site to training
+collection they had deliberately opted out of, to fix a citation problem that did not exist.
+
+A corrected list would have rotted the same way, so the shape changed instead. `crawl-access-audit`
+now holds one record per agent carrying the operator's own words, the URL that states them and
+the date it was read; two roles where there was one, because a search index and a live
+per-question fetch fail differently; and a fourth role for tokens like `Google-Extended` that
+are not crawlers at all and fetch nothing. Every crawler name in the report is rendered from
+that table. `tests/test_crawler_roles.py` fails the build if the reference file and the table
+disagree, and fails it again if any skill types a crawler name into a string. Four of the five
+round-5 sites exercised this; it held on all four.
+
+**6. A value must be observed *and* about the subject.** Rule 4 asks whether a value appears
+on the site. It cannot catch a value that appears on the site and is about something else. A
+restaurant's paste-ready `LocalBusiness` block came out describing the brand as *"not only
+bold in colour but also in versatility - this bag has it all for your every day storage
+needs"*: the homepage states no definition, so the search fell through in URL order to a
+product page, where a sentence about a tote bag matched on the word "is". The same report
+correctly said, in a separate finding, that no page states what the brand is.
+
+The rule is about provenance. A claim about the whole brand may only be read off a page that
+speaks for the whole brand - home, about, contact - and a profile only corroborates a brand if
+it names the brand. That second half removed a contributor's personal GitHub account and the
+Wikipedia article on pure functions from an open-source project's corroboration count, while
+its own organisation page, linked dozens of times but only ever as a repository path, had
+never been counted at all.
+
+### Two bugs worth naming separately
+
+Both were found by round 5, both were silent, and neither is a heuristic.
+
+**A robots.txt token matches by prefix, not by substring.** A broadcaster ships a legacy
+`User-agent: Fetch` blocklist entry, and because "fetch" occurs inside
+"Meta-ExternalFetcher" the report said that crawler was disallowed from the whole site. The
+group that governs it there is `*`, which disallows nothing. Substring matching cannot be
+tuned safe - "bot" is inside almost every crawler name - and prefix matching is what RFC 9309
+specifies and what a crawler itself looks for.
+
+**A comparison that can only have one answer is not a measurement.** Two of these, found on
+two different sites. A Latin-script company name cannot appear in an Arabic page, so its
+absence there says nothing - but the check that compares declared `Organization` names against
+the visible text asserted a contradiction at high severity, about markup that was correct and
+a page that was correct. And the English prose checks - the 30-word sentence threshold, the
+`<Brand> is a ...` pattern, the call-to-action verbs - ran on every content page once a
+site-wide majority vote said "English", including the German half of a bilingual broadcaster
+whose vote English won 28 pages to 18. Both now read the page's own declaration first: a name
+is looked for only where it could be written, and an English threshold measures English.
+
+**A page we failed to read is not a page with nothing on it.** The most credibility-damaging
+error this audit can make, and round 6 found it. A news site's liveblog wraps server-rendered
+Arabic prose in a nested `<div id="wysiwyg">` that none of the content selectors reach; the
+extractor kept 89 of the page's 1,660 visible characters, and two findings followed - *"the
+homepage is delivered as an empty JavaScript shell"* and *"too little text to be quoted"* -
+about a page that is complete. The fix offered was several days of development work. The
+snapshot records both numbers, so the two are now compared: a large shortfall with no state
+blob and no empty framework root is a failure of ours, and both checks stand down. A site is
+not obliged to use markup we recognise.
+
+**One branch's address is not the company's address.** A gym chain's paste-ready Organization
+block carried `"streetAddress": "122 The Broadway", "postalCode": "SW19 1RH"` - the Wimbledon
+branch's own address, taken from the single branch page a 60-page crawl reached out of 276, and
+presented as the company's. The registered office is four miles and one postcode away, printed
+on the site's own privacy page. The telephone reader three functions above already refused to
+do exactly this, for exactly this reason, and the guard had never been extended to the address.
+On a multi-location site the brand's address now comes only from a node that speaks for the
+business; a single-location business is untouched, because there its one place really is the
+company.
+
+**A finding may only claim the checks its own function registered.** The list tracking "which
+checks might this finding be about" was a run-long accumulator that only ever emptied on an
+explicit decline. A check registered in one function and answered by neither a finding nor a
+decline sat in it until some unrelated finding later in the same skill swept it up as "fired" -
+which excludes it from the passed list without putting it anywhere else. On one site, seven of
+seventy-one checks that ran appeared nowhere in the report at all, and among them was whether
+robots.txt blocks AI crawlers. The README promises every quiet check says why; those said
+nothing. Groups are now keyed by the function that registered them.
 
 **We held out three samples and wrote the prediction down first.** The 36 study sites are
 training data: every threshold moved after looking at them. So we drew fresh samples in
