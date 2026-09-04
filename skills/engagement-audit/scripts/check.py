@@ -58,7 +58,8 @@ sys.path.insert(0, _SHARED)
 from audit_common import (  # noqa: E402
     confirm_dead, CONTENT_TYPES, DEEP_TYPES, example_urls, Fetcher, FetchError,
     group_by_edition, language_of, link_verdict, load_snapshot, locale_editions,
-    normalise_url, pages_of, pct, plural, same_site, sample, SkillResult,
+    normalise_url, pages_of, pct, plural, same_site, sample, sitemap_scope,
+    sitemap_total_phrase, SkillResult,
     truncate, word_count
 )
 
@@ -498,9 +499,11 @@ def _check_orphans(result, snapshot, pages):
     crawled_count = len(pages_of(snapshot))
     if snapshot.get("crawl", {}).get("budget_exhausted") or len(sitemap_urls) > crawled_count * 3:
         result.skip("orphan-pages",
-                    "the sitemap lists {} URLs but only {} pages were crawled, so an absent "
+                    "the sitemap lists {} but only {} pages were crawled, so an absent "
                     "internal link is more likely to reflect the crawl budget than a genuine "
-                    "orphan".format(len(sitemap_urls), crawled_count))
+                    "orphan".format(
+                        sitemap_total_phrase(sitemap_scope(snapshot.get("sitemaps")), "URLs"),
+                        crawled_count))
         return
 
     linked = set()

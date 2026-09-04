@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import re
+from urllib.parse import urljoin
 import sys
 from collections import Counter, defaultdict
 
@@ -1207,16 +1208,35 @@ def _check_website_searchaction(result, by_type):
         result.skip("website-searchaction-markup", "the homepage already declares WebSite markup")
         return
 
+    # What the page's own search form says, rather than a guess at it.
+    form = next((f for f in (home.get("forms") or []) if f.get("is_search")), {})
+    action = (form.get("action") or "").strip()
+    field = (form.get("query_field") or "").strip()
+    if action and field:
+        target = "{}{}{}={{search_term_string}}".format(
+            urljoin(home["url"], action), "&" if "?" in action else "?", field)
+        read_from_page = True
+    else:
+        target = home["url"].rstrip("/") + "/search?q={search_term_string}"
+        read_from_page = False
+
     result.add(
         id_hint="no-website-searchaction",
         title="On-site search exists but is not described in WebSite markup",
         severity="low", confidence="medium",
         evidence="{} contains a search form but declares no WebSite type with a "
-                 "potentialAction.".format(home["url"]),
+                 "potentialAction.{}".format(
+                     home["url"],
+                     " The snippet below uses the target and query field this page's own "
+                     "search form declares." if read_from_page else
+                     " The page's search form declares no action and field name that could "
+                     "be read, so the target in the snippet below is a placeholder."),
         mechanism="C", root_cause="no-website-schema",
         summary="Add WebSite JSON-LD with a SearchAction to the homepage.",
         how_to_fix=[
             "Add the snippet below to the homepage head.",
+            "Check the target URL against a real search: run one and compare the address."
+            if read_from_page else
             "Replace the target URL with your real search URL pattern.",
         ],
         effort="low", owner="developer",
@@ -1229,8 +1249,8 @@ def _check_website_searchaction(result, by_type):
             "url": home["url"],
             "potentialAction": {
                 "@type": "SearchAction",
-                "target": home["url"].rstrip("/") + "/search?q={search_term_string}",
-                "query-input": "required name=search_term_string",
+                "target": target,
+                "query-input": "required name={}".format(field or "search_term_string"),
             },
         }, indent=2) + "\n</script>",
     )

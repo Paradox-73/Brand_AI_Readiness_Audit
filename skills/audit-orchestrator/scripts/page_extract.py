@@ -12,9 +12,9 @@ import re
 from urllib.parse import urljoin, urlparse
 
 from audit_common import (
-    detect_challenge, detect_page_type, find_prices, main_text, make_soup,
-    normalise_url, same_site, sentences, tidy_spacing, truncate, visible_soup,
-    visible_text, word_count,
+    content_soup, detect_challenge, detect_page_type, find_prices, main_text,
+    make_soup, normalise_url, same_site, sentences, tidy_spacing, truncate,
+    visible_soup, visible_text, without_other_peoples_words, word_count,
 )
 
 # Root containers frameworks mount into. An empty one means the delivered HTML
@@ -87,7 +87,13 @@ DATE_TEXT_RE = re.compile(
     r"|\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?"
     r"\s+(?:19|20)\d{2}"
     r"|(?:19|20)\d{2}-\d{2}-\d{2}"
-    r"|\d{1,2}/\d{1,2}/(?:19|20)\d{2})\b",
+    r"|\d{1,2}/\d{1,2}/(?:19|20)\d{2})\b"
+    # Year-month-day with the units named, which is how Japanese and Chinese
+    # pages write a date. A national postal group's article showed
+    # "2015年4月6日" directly under its headline and the report said the page
+    # carried no date at all - a finding about our own patterns, printed as a
+    # finding about the site. Korean uses the same shape with 년 월 일.
+    r"|(?:19|20)\d{2}\s?[\u5e74\ub144]\s?\d{1,2}\s?[\u6708\uc6d4]\s?\d{1,2}\s?[\u65e5\uc77c]",
     re.I,
 )
 COPYRIGHT_YEAR_RE = re.compile(r"(?:©|\(c\)|copyright)\s*(?:\d{4}\s*[-–—]\s*)?((?:19|20)\d{2})", re.I)
@@ -169,10 +175,30 @@ STREET_CAPITALISED_RE = re.compile(
 )
 
 
+# A Japanese address, which is ordered the other way round from the two
+# patterns above: prefecture first, then ward or city, then the block numbers.
+# There is no word for "street" in it to match on, so the units themselves are
+# the pattern - 都/道/府/県 for the prefecture, 市/区/町/村 for the
+# municipality, 丁目/番地/番/号 for the block.
+#
+# A national postal group's contact page carries
+# "所在地 〒100-8791 東京都千代田区大手町二丁目3番1号", and the report said no
+# postal address was found anywhere on the site.
+JP_STREET_RE = re.compile(
+    r"[\u3040-\u30ff\u4e00-\u9fff]{2,12}[\u90fd\u9053\u5e9c\u770c]"
+    r"[\u3040-\u30ff\u4e00-\u9fff]{1,12}[\u5e02\u533a\u753a\u6751]"
+    r"[^\s]{0,24}?(?:\u4e01\u76ee|\u756a\u5730|\u756a|\u53f7)")
+
+# The postal mark. It exists to say "a postcode follows", so unlike a bare run
+# of digits it needs no corroboration.
+JP_POSTCODE_RE = re.compile(r"\u3012\s?\d{3}-\d{4}")
+
+
 def _street_hint(text):
     """The earliest street-shaped phrase, whichever pattern finds it."""
     matches = [m for m in (STREET_TYPE_RE.search(text),
-                           STREET_CAPITALISED_RE.search(text)) if m]
+                           STREET_CAPITALISED_RE.search(text),
+                           JP_STREET_RE.search(text)) if m]
     return min(matches, key=lambda m: m.start()) if matches else None
 
 # A call to action is a link that asks the visitor to do something next.
@@ -231,7 +257,17 @@ def extract_page(url, final_url, status, headers, html, redirect_chain, elapsed_
     shown = visible_soup(soup)
 
     page_text = visible_text(soup)
-    body_text = main_text(soup)
+    # The same document with reader comments, reviews and testimonials taken
+    # out, but the chrome left in. Contact details and dates are read from
+    # this: a footer telephone number is the site's, a commenter's is not.
+    ours = without_other_peoples_words(soup)
+    own_page_text = visible_text(ours) if ours is not soup else page_text
+    # One cleaned copy, used for the body text and for the readability
+    # statistics measured on it.
+    content = content_soup(soup)
+    content_text = tidy_spacing(re.sub(r"\s+", " ",
+                                       content.get_text(separator=" ")).strip())
+    body_text = main_text(soup, prepared=content_text)
     jsonld, jsonld_errors = _extract_jsonld(soup)
     jsonld_types = _jsonld_types(jsonld)
     headings = _headings(shown)
@@ -283,7 +319,12 @@ def extract_page(url, final_url, status, headers, html, redirect_chain, elapsed_
         "body_text_len": len(body_text),
         "word_count": word_count(body_text),
         "above_fold_text": truncate(body_text, 1500),
-        "paragraphs": _paragraphs(shown),
+        # From the content copy, not the whole visible document. The report's
+        # "what an assistant would quote" table offered a documentation site
+        # the sentence "Skip to main content ... get PyCharm for 30% off!" as
+        # its best line: a skip link and a sponsor's banner, which is what the
+        # page says to a reader who is not reading it.
+        "paragraphs": _paragraphs(content),
         "links": links,
         "scripts": scripts,
         "images": images,
@@ -292,19 +333,24 @@ def extract_page(url, final_url, status, headers, html, redirect_chain, elapsed_
         "video": _video(soup, page_text, final_url),
         "pdf_links": _pdf_links(soup, final_url),
         "spa_shell": _spa_shell(soup, html, page_text),
-        "challenge": detect_challenge(html, page_text),
+        "challenge": detect_challenge(html, page_text, status, headers),
         "noscript_text": truncate(" ".join(n.get_text(" ") for n in soup.select("noscript")), 400),
         "breadcrumb": _breadcrumb(soup, jsonld_types),
         "has_search": _has_search(soup),
         "cta": _cta(soup, body_text, origin, final_url),
-        "dates": _dates(soup, page_text, jsonld),
-        "contact_facts": _contact_facts(page_text, soup),
+        "dates": _dates(ours, own_page_text, jsonld),
+        "contact_facts": _contact_facts(own_page_text, ours),
         "prices": find_prices(body_text),
         "social_profiles": _social_profiles(links["external"], jsonld),
         "declared_profiles": _declared_profiles(jsonld),
         "interstitial": _interstitial(soup),
         "newsletter_signup": _newsletter(soup, page_text),
-        "readability": _readability(body_text, soup),
+        # The paragraph and subheading counts are about how the page is
+        # written, so they are measured on what the page wrote. Counting the
+        # `<p>` tags of the whole document made a recipe post's 549 reader
+        # comments into five paragraphs over 200 words, and the page was
+        # reported as written in blocks too large to skim.
+        "readability": _readability(body_text, content),
         "chrome_signature": _chrome_signature(soup, origin, final_url),
     }
 
@@ -389,10 +435,26 @@ def _canonical(soup, base):
     return normalise_url(link["href"], base) or ""
 
 
+def _heading_text(tag):
+    """The words a heading contributes, including an image's alt text.
+
+    A great many sites mark up the site name as `<h1><a><img alt="..."></a></h1>`
+    on the homepage. Read for text alone, that is an empty heading, and a
+    postal group's English homepage was listed among pages with no H1 while
+    carrying `<h1><a href="/en/"><img alt="Japan Post Holdings"></a></h1>` -
+    which is a heading, is machine-readable, and says what the page is.
+    """
+    text = _text_or_empty(tag)
+    if text:
+        return text
+    alts = [(image.get("alt") or "").strip() for image in tag.find_all("img")]
+    return tidy_spacing(" ".join(alt for alt in alts if alt))
+
+
 def _headings(soup):
     out = {}
     for level in ("h1", "h2", "h3"):
-        out[level] = [_text_or_empty(h) for h in soup.find_all(level) if _text_or_empty(h)]
+        out[level] = [_heading_text(h) for h in soup.find_all(level) if _heading_text(h)]
     return out
 
 
@@ -400,7 +462,7 @@ def _heading_sequence(soup):
     """Ordered `(level, text)` pairs, used to spot skipped levels."""
     seq = []
     for tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
-        text = _text_or_empty(tag)
+        text = _heading_text(tag)
         if text:
             seq.append([int(tag.name[1]), truncate(text, 120)])
     return seq
@@ -706,6 +768,28 @@ def _scripts(soup, base):
     }
 
 
+# The ways a framework writes an alt attribute it fills in at runtime. The
+# rendered page has real alt text; the delivered HTML has the binding.
+#
+# A retailer's report listed 51 images with no alt attribute. Every one was a
+# copy of the same three components - a mini-cart thumbnail, a quick-add modal
+# and a country flag - each declaring `:alt="product.title"`, and their `src`
+# was a JavaScript expression rather than an image. The advice was to write
+# alt text for 51 distinct images that do not exist.
+_DYNAMIC_ALT_ATTRS = (
+    ":alt", "v-bind:alt", "x-bind:alt", "[alt]", "bind:alt", "data-alt",
+    "*ngIf-alt", "alt.bind",
+)
+
+
+def _declares_alt_dynamically(tag):
+    """Does this image bind its alt text from a template?"""
+    for name in _DYNAMIC_ALT_ATTRS:
+        if tag.get(name) is not None:
+            return True
+    return False
+
+
 def _is_tracking_pixel(tag, width, height):
     """A beacon, not a picture.
 
@@ -741,7 +825,8 @@ def _images(soup, base):
         # A decorative image is correctly marked `alt=""`; only a *missing*
         # alt attribute hides content from a machine. And a tracking beacon
         # shows nothing to anybody, so it is not an image at all here.
-        if alt is None and not _is_tracking_pixel(tag, width, height):
+        if alt is None and not _declares_alt_dynamically(tag) \
+                and not _is_tracking_pixel(tag, width, height):
             missing_alt.append(src)
         if (width and height and width * height >= 120000) or _is_hero(tag):
             content_images += 1
@@ -788,6 +873,12 @@ def _forms(soup):
             "required_count": len(required),
             "is_search": _form_is_search(form, text),
             "is_newsletter": any(hint in text for hint in NEWSLETTER_HINTS),
+            # The name of the box someone types into. With the action above,
+            # it is the whole of a SearchAction target - and the report was
+            # guessing `search?q=` and `search_term_string` while the form
+            # declaring `action="/search/"` and `name="query"` sat in the same
+            # HTML the crawler had already read.
+            "query_field": next((i.get("name") for i in visible if i.get("name")), ""),
         })
         if len(out) >= 15:
             break
@@ -1090,6 +1181,9 @@ def _labelled_as_another_kind_of_number(haystack, start):
 
 def _postcode_in(haystack):
     """The first postcode-shaped run the surrounding words do not disown."""
+    declared = JP_POSTCODE_RE.search(haystack)
+    if declared:
+        return declared          # 〒 says what the number is; nothing to infer
     for match in POSTCODE_HINT_RE.finditer(haystack):
         if not _labelled_as_another_kind_of_number(haystack, match.start()):
             return match
@@ -1114,8 +1208,29 @@ def _postcode_hint(text, soup, street):
     return _postcode_in(text) if street else None
 
 
+# A URL is not prose, and the digits inside one are not facts about the
+# business. A recipe blog's contact detail was reported as the telephone
+# number 3922587923, which is the middle of a photo-sharing URL ending
+# `/photos/<user>/39225879230/` - an image id, printed as the site's way of
+# getting in touch, and enough on its own to suppress the finding that the
+# site states no contact method at all. Filenames go too, for the same
+# reason: `IMG_20240115_094433.jpg` is a date and a time, and neither is
+# about anybody.
+_URL_OR_FILENAME_RE = re.compile(
+    r"(?:https?://|www\.)\S+"
+    r"|\S+\.(?:com|org|net|edu|gov|io|co|uk|jp|de|fr)/\S*"
+    r"|\S+\.(?:jpg|jpeg|png|gif|webp|svg|pdf|mp4|json|js|css)\b",
+    re.I)
+
+
+def text_without_urls(text):
+    """Page text with web addresses and filenames taken out."""
+    return _URL_OR_FILENAME_RE.sub(" ", text or "")
+
+
 def _contact_facts(text, soup):
     """Plain-text facts an assistant would try to quote for "where/how" questions."""
+    text = text_without_urls(text)
     emails = sorted(set(EMAIL_RE.findall(text)))[:5]
     tel_links = [a.get("href", "")[4:].strip() for a in soup.select('a[href^="tel:"]')][:5]
     phones = tel_links or [

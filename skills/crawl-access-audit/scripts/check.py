@@ -58,7 +58,8 @@ from audit_common import (  # noqa: E402
     explain_fetch_error, Fetcher, FetchError, link_verdict, load_snapshot,
     is_search_result_page, looks_like_soft_404, pages_of, pct, plural,
     REFUSED_STATUS,
-    response_timing, sample, SkillResult, slow_origin_note,
+    response_timing, sample, sitemap_scope, sitemap_total_phrase, SkillResult,
+    slow_origin_note,
     SLOW_ORIGIN_MEDIAN_MS, strip_www, USER_AGENT, VERY_SLOW_ORIGIN_MEDIAN_MS
 )
 from robots_parser import (  # noqa: E402
@@ -355,7 +356,7 @@ def run(snapshot, allow_network=True, time_budget=None):
     home_url = origin.rstrip("/") + "/"
     home = next((p for p in pages if p["url"] == home_url), None)
     if home is not None and home.get("status") is None and not pages_of(snapshot):
-        _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher)
+        _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher, UA_UNTESTED)
         for name in ("robots-txt-reachable", "robots-blocks-all-crawlers",
                      "robots-blocks-ai-answer-crawlers", "sitemap-present",
                      "sitemap-parses", "sitemap-urls-resolve", "canonical-targets",
@@ -370,8 +371,8 @@ def run(snapshot, allow_network=True, time_budget=None):
     _check_robots_reachable(result, robots)
     _check_robots_blocks(result, robots, origin)
     _check_sitemaps(result, snapshot, fetcher)
-    _check_bot_manager(result, snapshot, robots, fetcher, allow_network)
-    _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher)
+    ua_verdict = _check_bot_manager(result, snapshot, robots, fetcher, allow_network)
+    _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher, ua_verdict)
     _check_transport_and_hosts(result, snapshot, ok_pages)
 
     result.check("llms-txt-presence")
@@ -730,8 +731,23 @@ def _check_robots_blocks(result, robots, origin):
                       "so the content behind it cannot be retrieved or cited.",
         )
     else:
+        # The finding's evidence lists the three kinds of rule it set aside.
+        # This line did not, and said instead that the only disallowed paths
+        # were the standard ones - on a hospital site whose robots.txt closes
+        # `/health/video`, `/health/video-archive` and a department's
+        # patient-guide documents to every crawler. A sentence saying nothing
+        # was found may only describe what was looked at.
+        set_aside = sorted(set(substantive_disallows(robots, "*"))
+                           - set(content_blocks) - {"/", "/*"})
         result.skip("robots-blocks-content-paths",
-                    "the only disallowed paths are standard admin, cart, account or search routes")
+                    "no whole top-level section is closed to all crawlers. {}".format(
+                        "{} deeper or wildcard rule(s) were set aside as too specific to "
+                        "judge from the path alone, among them {} - they were not fetched, "
+                        "so what is behind them is unverified".format(
+                            len(set_aside), ", ".join(set_aside[:3]))
+                        if set_aside else
+                        "the only disallowed paths are the standard admin, cart, account "
+                        "and search routes"))
 
 
 def _check_sitemaps(result, snapshot, fetcher):
@@ -810,11 +826,28 @@ def _check_sitemaps(result, snapshot, fetcher):
         return
 
     if broken:
+        # Which file is broken decides how much this matters. A law firm's
+        # report led with "An XML sitemap is published but does not parse",
+        # marked do-first, about `/sitemap.xml` - a zero-byte orphan nothing
+        # references. Its real sitemap is the index robots.txt declares, which
+        # was fetched in the same run, parsed, and holds thirty-two working
+        # sub-sitemaps. A file the site never points at is not the site's
+        # sitemap, and telling an owner their sitemap is broken when it is not
+        # sends them to fix the wrong thing.
+        declared_ok = [s for s in reachable if s.get("referenced_in_robots")]
+        stray = [s for s in broken if not s.get("referenced_in_robots")]
+        orphan_only = bool(declared_ok) and len(stray) == len(broken)
         result.add(
             id_hint="sitemap-does-not-parse",
-            title="An XML sitemap is published but does not parse",
-            severity="medium", confidence="high",
-            evidence="{}: {}".format(broken[0]["url"], broken[0]["parse_error"]),
+            title="An unreferenced file at the conventional sitemap location does not parse"
+                  if orphan_only else "An XML sitemap is published but does not parse",
+            severity="low" if orphan_only else "medium", confidence="high",
+            evidence="{}: {}.{}".format(
+                broken[0]["url"], broken[0]["parse_error"],
+                " Your working sitemap is the one robots.txt declares, {}, which parsed and "
+                "lists {}. This file is a leftover, not your sitemap.".format(
+                    declared_ok[0]["url"], sitemap_total_phrase(sitemap_scope(declared_ok)))
+                if orphan_only else ""),
             mechanism="A", root_cause="sitemap-broken",
             summary="Fix the XML so the sitemap can be read.",
             how_to_fix=[
@@ -827,9 +860,17 @@ def _check_sitemaps(result, snapshot, fetcher):
                       "the site believes its pages are being advertised when they are not.",
         )
 
-    total_urls = sum(s.get("url_count", 0) for s in reachable)
-    total_lastmod = sum(s.get("lastmod_count", 0) for s in reachable)
+    scope = sitemap_scope(sitemaps)
+    total_urls = scope["urls_counted"]
+    total_lastmod = scope["lastmods_counted"]
     result.signal("sitemap_url_count", total_urls)
+    # Whether that number is the site's total or this audit's subtotal. Three
+    # reports in one round published a subtotal as a total, and two of them
+    # then divided by it.
+    result.signal("sitemap_count_complete", scope["complete"])
+    if not scope["complete"]:
+        result.signal("sitemap_children_unread",
+                      scope["children_declared"] - scope["children_read"])
 
     if not any(s.get("referenced_in_robots") for s in sitemaps) and reachable:
         result.add(
@@ -957,11 +998,11 @@ def _check_bot_manager(result, snapshot, robots, fetcher, allow_network):
     if not allow_network or fetcher is None:
         result.skip("bot-manager-user-agent-comparison",
                     "extra network requests were disabled for this run")
-        return
+        return UA_UNTESTED
     if home is None or home.get("status") is None:
         result.skip("bot-manager-user-agent-comparison",
                     "the homepage was not fetched, so there is no baseline to compare against")
-        return
+        return UA_UNTESTED
 
     baseline = home.get("status")
     candidates = _probe_candidates(robots)
@@ -969,7 +1010,17 @@ def _check_bot_manager(result, snapshot, robots, fetcher, allow_network):
         result.skip("bot-manager-user-agent-comparison",
                     "robots.txt already disallows every AI answer crawler, so the robots finding "
                     "covers this and no probe request was made")
-        return
+        return UA_UNTESTED
+
+    # The baseline is this tool's own response, and when that is itself a
+    # refusal the comparison is between two refused requests. It recorded
+    # "no differential" and passed, on a hospital site where every page was
+    # blocked - blind in exactly the case the check exists for. Asking the
+    # question the other way round still answers something useful: if the
+    # refusal follows the request under two crawler names as well, it is not
+    # the name that is being refused.
+    if baseline in REFUSED_STATUS:
+        return _probe_a_refusal(result, fetcher, home_url, baseline, candidates)
 
     # One agent getting through does not tell you a bot manager is off. Bot
     # rules are per-agent and per-vendor: an edge that blocks Applebot while
@@ -994,10 +1045,10 @@ def _check_bot_manager(result, snapshot, robots, fetcher, allow_network):
             result.skip("bot-manager-user-agent-comparison",
                         "the comparison requests failed for a reason unrelated to the site's "
                         "bot rules")
-            return
+            return UA_UNTESTED
         result.signal("bot_manager_block", False)
         result.signal("bot_manager_agents_probed", tried)
-        return
+        return UA_UNTESTED
 
     # One confirmation before reporting: a single differing response can be a
     # rate limiter or a transient edge error.
@@ -1006,7 +1057,7 @@ def _check_bot_manager(result, snapshot, robots, fetcher, allow_network):
         result.skip("bot-manager-user-agent-comparison",
                     "the first probe differed but the confirmation request matched the baseline; "
                     "treated as transient rather than a bot block")
-        return
+        return UA_UNTESTED
 
     result.signal("bot_manager_block", True)
     result.signal("bot_manager_agents_probed", tried)
@@ -1040,7 +1091,44 @@ def _check_bot_manager(result, snapshot, robots, fetcher, allow_network):
                   "in an answer even though the site looks open on paper.",
         affected_pages=[home_url],
     )
+    return UA_KEYED
 
+
+def _probe_a_refusal(result, fetcher, home_url, baseline, candidates):
+    """We were refused. Is it the name we sent, or the request itself?
+
+    Not a finding of its own - the homepage-refusal finding already says the
+    site refused us, and saying it twice was a separate bug. This decides
+    which cause that finding is allowed to name.
+    """
+    seen = {}
+    for name in candidates:
+        attempt = fetcher.try_get(home_url, user_agent=_ua_string(name))
+        if attempt is not None:
+            seen[name] = attempt.status_code
+    result.signal("refusal_probe", seen)
+
+    if not seen:
+        result.skip("bot-manager-user-agent-comparison",
+                    "the homepage refused this crawler (HTTP {}), and the comparison requests "
+                    "failed too, so whether the refusal is keyed to the user agent could not be "
+                    "determined".format(baseline))
+        return UA_UNTESTED
+
+    got_through = sorted(name for name, status in seen.items() if status == 200)
+    if got_through:
+        result.skip("bot-manager-user-agent-comparison",
+                    "the homepage refused this crawler (HTTP {}) but answered {} normally, so "
+                    "the edge is reading the user agent and this tool is the one being "
+                    "turned away".format(baseline, describe_agents(tuple(got_through), limit=2)))
+        return UA_KEYED
+
+    result.skip("bot-manager-user-agent-comparison",
+                "the homepage refused this crawler (HTTP {}) and refused the same request under "
+                "{} as well, so the refusal is not keyed to the user agent and a comparison "
+                "cannot show which rule causes it".format(
+                    baseline, describe_agents(tuple(sorted(seen)), limit=2)))
+    return UA_BLIND
 
 
 def _probe_candidates(robots, limit=BOT_PROBE_AGENTS):
@@ -1117,12 +1205,100 @@ def _report_response_time(result, pages):
                   "markup on it can be read.",
     )
 
+# What the user-agent comparison was able to establish about a refusal.
+#
+# The homepage-refusal finding used to assert the answer rather than ask for
+# it. Its evidence sentence read "the request identified itself as an audit
+# crawler ... so this is a bot-management rule", and its first fix was
+# "allow-list the AI answer crawlers by user agent" - on three sites in one
+# round, every one of them ranked critical and first in "Start here".
+#
+# All three were checked by hand afterwards. A museum's edge returned 429 to a
+# desktop browser string, to plain curl, and to GPTBot and ClaudeBot alike. A
+# hospital's returned 200 to curl and 403 to this tool sending the same user
+# agent, so the discriminator was the client and not the name. A law firm's
+# 403 could not be reproduced at all in twelve requests. In none of the three
+# would allow-listing a crawler name have changed anything, and in the first
+# two the report sent the owner to the wrong setting entirely.
+#
+# The comparison that answers this already exists. What it lacked was a way to
+# say "I could not tell", and a caller that asked.
+UA_KEYED = "ua-keyed"          # named crawlers refused where this tool is not
+UA_BLIND = "ua-blind"          # refused whatever the request calls itself
+UA_UNTESTED = "ua-untested"    # no comparison was possible
+
+
 def _ua_string(name):
     """The probe identifies itself as both the crawler and this audit tool."""
     return "{} ({}; comparison probe)".format(name, USER_AGENT)
 
 
-def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=None):
+def _refusal_cause_note(verdict):
+    """One sentence saying what was, and was not, established about the cause."""
+    if verdict == UA_BLIND:
+        return (" The same request was refused under two AI answer crawlers' user agents as "
+                "well, so the refusal is not keyed to the user agent: allow-listing crawler "
+                "names will not change it.")
+    if verdict == UA_KEYED:
+        return (" Two AI answer crawlers' user agents were served normally on the same "
+                "request, so the edge is reading the user agent.")
+    return (" Which rule causes it was not established: the comparison requests that would "
+            "separate a user-agent rule from a network-level one could not be made.")
+
+
+def _refusal_summary(verdict):
+    if verdict == UA_BLIND:
+        return "Find the edge rule that refuses this request; it is not reading the user agent."
+    if verdict == UA_KEYED:
+        return "Allow the AI answer crawlers to fetch the homepage."
+    return "Find out why the edge refuses this request before changing any bot rule."
+
+
+def _refusal_steps(verdict):
+    """What to do, given only what was actually observed.
+
+    Three different first moves. Sending an owner to the crawler allow-list
+    when the block is at the network level costs them the afternoon and leaves
+    the site exactly as invisible as it was.
+    """
+    if verdict == UA_KEYED:
+        return [
+            "Open your CDN or WAF bot rules. A blanket block on unrecognised user agents "
+            "also blocks every AI answer crawler.",
+            "Allow-list the AI answer crawlers by user agent, keeping rate limits in place: "
+            "{}.".format(describe_agents(ANSWER_CRAWLERS, limit=4)),
+            "Verify by requesting the homepage with each crawler's user-agent string and "
+            "confirming a 200 with real HTML rather than a challenge page.",
+        ]
+    if verdict == UA_BLIND:
+        return [
+            "Check whether your CDN has a blanket challenge or an attack mode switched on. "
+            "One refuses every client that does not run JavaScript, which is every AI "
+            "crawler, whatever name it sends.",
+            "Ask your CDN for the block reason recorded against these requests. IP "
+            "reputation, autonomous-system rules, TLS fingerprinting and rate limits all "
+            "produce this response and none of them is visible from outside.",
+            "Re-test from a different network before changing anything. This audit ran from "
+            "one address, and a rule about that address looks identical to a rule about "
+            "crawlers.",
+            "Do not start with the crawler allow-list. The same request was refused under "
+            "two crawler names as well, so the names are not what is being read.",
+        ]
+    return [
+        "Request the homepage twice from outside your network, once with your browser's "
+        "user agent and once with an AI crawler's, and compare the two responses. That one "
+        "comparison decides everything below it.",
+        "If only the crawler is refused, allow-list the AI answer crawlers by user agent in "
+        "your CDN or WAF, keeping rate limits in place.",
+        "If both are refused, the rule is not about the user agent: ask your CDN for the "
+        "block reason recorded against the request.",
+        "Read the CDN log for the failing request rather than the origin log. A request the "
+        "edge refuses never reaches the origin, so the origin log will show nothing.",
+    ]
+
+
+def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=None,
+                                   ua_verdict=UA_UNTESTED):
     result.check("homepage-reachable")
     result.check("non-200-rate")
     result.check("redirect-chain-length")
@@ -1147,24 +1323,21 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
                 home_url,
                 "returned HTTP {}".format(status) if status
                 else explain_fetch_error(home.get("error")),
+                # The status says this is a rule and not an outage; that much
+                # is readable from the response. What the rule keys on is not,
+                # and the sentence used to name it anyway.
                 " The request identified itself as an audit crawler, respected robots.txt and "
-                "was rate limited, so this is a bot-management rule rather than an outage."
+                "was rate limited, so this is a rule about who is asking rather than an "
+                "outage.{}".format(_refusal_cause_note(ua_verdict))
                 if looks_like_bot_block else "",
                 "" if status else slow_origin_note(pages)),
             mechanism="A", root_cause="non-200",
-            summary="Allow identified crawlers to fetch the homepage."
-                    if looks_like_bot_block else "Restore a 200 response on the homepage.",
-            how_to_fix=[
-                "Check your CDN or WAF bot rules: a blanket block on unrecognised user agents "
-                "also blocks every AI answer crawler." if looks_like_bot_block
-                else "Request the homepage and read the server or CDN log for the failing request.",
-                "Allow-list the AI answer crawlers by user agent, keeping rate limits in place."
-                if looks_like_bot_block
-                else "If the homepage has moved, return a 301 to the new location rather than an error.",
-                "Verify by requesting the homepage with each crawler's user-agent string and "
-                "confirming a 200 with real HTML rather than a challenge page."
-                if looks_like_bot_block
-                else "Check whether a CDN rule or origin health check is failing.",
+            summary=_refusal_summary(ua_verdict) if looks_like_bot_block
+                    else "Restore a 200 response on the homepage.",
+            how_to_fix=_refusal_steps(ua_verdict) if looks_like_bot_block else [
+                "Request the homepage and read the server or CDN log for the failing request.",
+                "If the homepage has moved, return a 301 to the new location rather than an error.",
+                "Check whether a CDN rule or origin health check is failing.",
             ],
             effort="high", owner="developer",
             rationale="The homepage is the entry point almost every crawler and "

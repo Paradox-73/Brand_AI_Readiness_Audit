@@ -66,7 +66,12 @@ describe your brand.
    section that is over 70% link text: judging a related-links block for not opening with a
    number would penalise exactly the wayfinding this marketplace recommends elsewhere.
 
-5. **The four core facts.** Each is either found — with the URL — or missing:
+5. **The four core facts.** Each is either found — with the URL *and the sentence that
+   states it* — or missing. A fact recorded as found without a quotable sentence is not
+   found: "feel free to call" contains "free" and was read as a stated price, "practice
+   areas" as a stated service area, and each false pass silently removed the true finding
+   underneath it. When the check passes, print the sentences in the not-applicable reason,
+   so a coincidence of vocabulary is visible in the report instead of hidden behind a pass.
    - **Price**, or an explicit "contact us for pricing" statement. Missing on a site that
      *has* a pricing page is **high**; missing entirely is **medium**. An explicit refusal to
      publish prices is quotable; silence is not.

@@ -25,7 +25,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from audit_common import (  # noqa: E402
+from audit_common import (
+    sitemap_scope, sitemap_total_phrase, words_are_separated,  # noqa: E402
     EFFORT_DIVISOR, MECHANISMS, SEVERITY_RANK, SEVERITY_WEIGHT, VERSION,
     load_snapshot, pages_of, plural, read_json, sentences, truncate, write_json,
 )
@@ -61,6 +62,19 @@ EFFORT_TIME = {
 }
 
 NUMERIC_RE = re.compile(r"\d|[$€£¥₹]")
+# A line that is a price, and a line that is a way to reach somebody. Both are
+# shorter than a sentence and both are what people ask assistants for.
+PRICE_LINE_RE = re.compile(
+    r"[$€£¥₹]\s?\d|\b\d[\d,.]*\s?(?:USD|EUR|GBP|INR|AUD|CAD|SGD|AED|JPY)\b", re.I)
+CONTACT_LINE_RE = re.compile(
+    r"[\w.+-]+@[\w-]+\.[\w.]{2,}"
+    r"|\+\d[\d\s().-]{7,}\d"
+    r"|\b(?:call|email|phone|contact) (?:us|our)\b", re.I)
+# How short a sentence may be and still be worth quoting. The second is for
+# scripts that write without spaces between words, where the same amount of
+# meaning fits in far fewer characters.
+QUOTE_MIN_CHARS = 40
+QUOTE_MIN_CHARS_UNSPACED = 16
 CONCRETE_RE = re.compile(
     r"\d|[$€£¥₹]|\b(?:is|are)\s+(?:an?|the)\b|\b(?:means|refers to|defined as)\b", re.I)
 
@@ -264,6 +278,46 @@ def state_the_denominator(finding, pages_crawled, snapshot=None):
     population, unit = _population_for(finding, snapshot, pages_crawled)
     return "{} Seen on {} of the {} {}.".format(
         evidence.rstrip(), count, population, unit)
+
+
+# Sentences that claim the whole site rather than the pages that were read.
+_SITE_WIDE_RE = re.compile(
+    r"anywhere on the site|across the site|site-wide|\bno page\b|\bnowhere\b"
+    r"|the site never|never states|on any crawled page|any page", re.I)
+
+# Below this the crawl is a fair sample of the site and the sentence would be
+# noise. A crawl that read sixty of sixty-two pages has read the site.
+COVERAGE_DISCLOSURE_RATIO = 2.0
+
+
+def state_the_coverage(evidence, snapshot, pages_crawled):
+    """Append how much of the site the crawl saw, to a claim about all of it.
+
+    `state_the_denominator` sizes a finding against the pages this audit read.
+    This sizes the pages it read against the site, which is a different number
+    and the one a reader assumes when a sentence says "anywhere on the site".
+
+    A global law firm's report said "No Organization or LocalBusiness markup
+    anywhere on the site" and "too few pages carry an address to treat this as
+    a business with separate places to visit". The crawl read 60 pages. The
+    firm's own sitemap lists 2,692 lawyer profiles and its site lists 31
+    offices in 26 countries, none of which the crawl reached. Both sentences
+    were true of the sample and neither was true of the site.
+
+    A gym chain's report was the same shape from the other end: 276 branch
+    pages exist, the crawl reached one, and the report described per-location
+    markup as though it had seen the chain.
+    """
+    if not evidence or not pages_crawled or not _SITE_WIDE_RE.search(evidence):
+        return evidence
+    scope = sitemap_scope(snapshot.get("sitemaps") if snapshot else None)
+    listed = scope["urls_counted"]
+    if not listed or listed < pages_crawled * COVERAGE_DISCLOSURE_RATIO:
+        return evidence
+    return "{} The sitemap lists {}; this crawl read {}, so this describes the pages it " \
+           "reached and not every page of the site.".format(
+               evidence.rstrip(), sitemap_total_phrase(scope, "URLs"),
+               plural(pages_crawled, "of them"))
 
 
 def _population_for(finding, snapshot, pages_crawled):
@@ -616,16 +670,40 @@ def simulate_citations(snapshot, brand_name):
                         r"\b(?:is|are|was|provides|offers|helps|builds|makes)\b", sentence, re.I):
                     best, reason = sentence, "names the brand and says what it is"
                     break
-        # Priority 2: a self-contained sentence carrying a number or a price.
+        # How long a sentence has to be before it is worth quoting depends on
+        # the script it is written in. Forty characters is a clause in
+        # English and a whole sentence in Japanese, and the floor rejected
+        # complete, fact-stating Japanese sentences on three pages of one
+        # site, each reported as having nothing quotable.
+        floor = QUOTE_MIN_CHARS if words_are_separated(
+            page.get("body_text", "")) else QUOTE_MIN_CHARS_UNSPACED
+
+        # Priority 2: a price or a contact detail. Both are short by nature
+        # and both are exactly what somebody asks an assistant for. A
+        # software company's pricing page - "Basic $10 per user/month" - and
+        # its contact page - "For other questions, email us hello@..." - were
+        # both reported as having nothing an assistant could quote, in a table
+        # printed directly under a finding about the site being hard to quote.
         if best is None:
             for sentence in candidates:
-                if 40 <= len(sentence) <= 300 and NUMERIC_RE.search(sentence):
+                if len(sentence) > 300:
+                    continue
+                if PRICE_LINE_RE.search(sentence):
+                    best, reason = sentence, "states a price a reader could act on"
+                    break
+                if CONTACT_LINE_RE.search(sentence):
+                    best, reason = sentence, "states a way to make contact"
+                    break
+        # Priority 3: a self-contained sentence carrying a number.
+        if best is None:
+            for sentence in candidates:
+                if floor <= len(sentence) <= 300 and NUMERIC_RE.search(sentence):
                     best, reason = sentence, "states a number a reader could act on"
                     break
-        # Priority 3: any self-contained sentence that defines something.
+        # Priority 4: any self-contained sentence that defines something.
         if best is None:
             for sentence in candidates:
-                if 40 <= len(sentence) <= 300 and CONCRETE_RE.search(sentence):
+                if floor <= len(sentence) <= 300 and CONCRETE_RE.search(sentence):
                     best, reason = sentence, "defines something, though it states no figure"
                     break
         if best is not None:
@@ -943,8 +1021,9 @@ def compose(snapshot, skill_results, audited_at=None):
             unreconciled.append("{}: {}".format(finding["id_hint"], mismatch))
             finding["affected_pages"] = []
             finding["example_withheld"] = mismatch
-        finding["evidence"] = state_the_denominator(
-            finding, pages_crawled, snapshot)
+        finding["evidence"] = state_the_coverage(
+            state_the_denominator(finding, pages_crawled, snapshot),
+            snapshot, pages_crawled)
         action = finding["suggested_action"]
         if action.get("snippet"):
             action["snippet"], invented = hold_back_invented_values(
@@ -1385,9 +1464,23 @@ def render_markdown(report):
 
     add("## Appendix: what was checked")
     add("")
-    add("{} checks were run across {} skills. The audit made {} extra read-only requests beyond "
-        "the crawl, used the user agent `{}`, and rendered in `{}` mode.".format(
+    # The arithmetic, rather than a promise that the arithmetic works.
+    #
+    # This paragraph used to end "every check that ran appears in exactly one
+    # place in this appendix", which is not true and cannot be: a check named
+    # by a finding appears in the finding, above the appendix. A reader who
+    # counted the three lists on a hospital site got 67 against a stated 68
+    # and had no way to tell whether a check had gone missing or the sentence
+    # was loose. Printing where all of them went lets them add it up.
+    named_by_finding = len({f.get("check") for f in report["findings"] if f.get("check")})
+    add("{} checks were run across {} skills: {} named by a finding above, {} that did not "
+        "apply, {} that ran and found nothing wrong, and {} that contributed to a finding "
+        "without being named by one. The audit made {} extra read-only requests beyond the "
+        "crawl, used the user agent `{}`, and rendered in `{}` mode.".format(
             len(report["checks_run"]), len({c["skill"] for c in report["checks_run"]}),
+            named_by_finding, len(report["not_applicable"]),
+            len(report.get("checks_passed") or []),
+            len(report.get("checks_that_found_something") or []),
             report["crawl"]["extra_requests_made"], report["crawl"]["user_agent"],
             report["crawl"]["render_mode"]))
     add("")
@@ -1420,8 +1513,8 @@ def render_markdown(report):
         add("### Checks that contributed to a finding above")
         add("")
         add("Each of these ran in the same step as a finding in this report and is part of "
-            "why it was raised. They are listed for completeness: with them, every check that "
-            "ran appears in exactly one place in this appendix.")
+            "why it was raised. They are listed for completeness: with them, every check "
+            "that ran is accounted for in the count at the top of this appendix.")
         add("")
         for item in report["checks_that_found_something"]:
             add("- **{}** ({})".format(item["check"], item.get("skill", "")))

@@ -94,7 +94,11 @@ from a consultancy or an author byline from a pricing page. See
 
 7. **BreadcrumbList** on deep pages, and **WebSite + SearchAction** on the homepage *only if
    the site actually has search*. Both **low**. Declaring a SearchAction for search that does
-   not exist would be worse than declaring nothing.
+   not exist would be worse than declaring nothing. Take the target URL and the query
+   parameter from the search form on the page - its `action` and the `name` of the box
+   people type into are the whole of the target - rather than guessing the common
+   `search?q=` shape. Where the form declares neither, say in the finding that the target
+   in the snippet is a placeholder.
 
 8. **Agreement with the visible page.** This is the check most audits skip and the one that
    matters most. A missing fact leaves a machine uncertain; a **contradictory** one teaches

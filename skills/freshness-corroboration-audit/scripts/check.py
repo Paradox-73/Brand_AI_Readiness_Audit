@@ -20,6 +20,7 @@ import datetime as dt
 import json
 import os
 import re
+from urllib.parse import urlparse
 import sys
 import time
 from urllib.parse import quote, urlparse
@@ -61,7 +62,8 @@ sys.path.insert(0, _SHARED)
 from audit_common import (  # noqa: E402
     CONTENT_TYPES, example_urls, Fetcher, FetchError, load_snapshot,
     is_multi_location, pages_of, pct, plural, PROFILE_GONE_STATUS,
-    profiles_naming_brand, sample, SkillResult, strip_www, truncate,
+    profiles_naming_brand, sample, sitemap_scope, sitemap_total_phrase,
+    SkillResult, strip_www, truncate,
     VERIFIABLE_PROFILE_PLATFORMS, VISITABLE_JSONLD_TYPES
 )
 
@@ -273,13 +275,39 @@ def _check_article_freshness(result, pages, now):
     )
 
 
+def _section_of(url):
+    """The path a page sits in: `/changelog/x` -> `/changelog`."""
+    path = urlparse(url).path or "/"
+    return path.rsplit("/", 1)[0] if path.count("/") >= 2 else ""
+
+
 def _check_date_signals(result, pages):
     """No date at all is a distinct problem from having an old date."""
     result.check("date-signals-present")
-    expect_dates = [p for p in pages if p["page_type"] in ("article", "press")]
+    # Which pages are supposed to carry a date, without asking whether they
+    # do - that question is the check itself.
+    #
+    # Dated posts whose URLs the type table does not recognise are typed
+    # `other`, and this list came back empty on a site the crawl had just read
+    # twelve of them from: `/changelog/...` and `/now/...`, each with a
+    # headline and a publication date. The two freshness checks then skipped
+    # with the reason "no article or press pages were crawled".
+    #
+    # A section is what settles it. If any page under `/changelog/` is dated,
+    # `/changelog/` is a dated section, and a page there without a date is
+    # missing one - which is exactly what this check is for, and is not
+    # circular, because the page being judged is not the page that established
+    # the section.
+    dated_sections = {_section_of(p["url"]) for p in pages
+                      if (p.get("dates") or {}).get("has_any")}
+    dated_sections.discard("")
+    expect_dates = [p for p in pages
+                    if p["page_type"] in ("article", "press")
+                    or _section_of(p["url"]) in dated_sections]
     if not expect_dates:
         result.skip("date-signals-present",
-                    "no article or press pages were crawled, and dates are not expected on "
+                    "no article or press page was crawled, and no section of the site holds "
+                    "dated pages; dates are not expected on "
                     "evergreen pages such as pricing or contact")
         result.signal("no_date_signals", False)
         return
@@ -289,13 +317,15 @@ def _check_date_signals(result, pages):
 
     if not undated:
         result.skip("date-signals-present",
-                    "every article and press page carries at least one date signal")
+                    "every page where a date is expected - articles, press pages, and pages "
+                    "in sections whose other pages are dated - carries at least one")
         return
 
     result.add(
         id_hint="content-pages-carry-no-date",
         title="{} of {} carry no date at all".format(
-            len(undated), plural(len(expect_dates), "article page")),
+            len(undated), plural(len(expect_dates), "page where one is expected",
+                                 "pages where one is expected")),
         severity="medium", confidence="high",
         evidence="Pages with no <time> element, no datePublished/dateModified property and no "
                  "visible date in the text: {}.".format(
@@ -428,8 +458,9 @@ def _check_sitemap_lastmod(result, snapshot, now):
             id_hint="sitemap-lastmod-sparse",
             title="Most sitemap entries carry no <lastmod> date",
             severity="low", confidence="high",
-            evidence="{} of {} sitemap entries ({}%) have a <lastmod> value.".format(
-                len(entries), total_urls, pct(len(entries), total_urls)),
+            evidence="{} of {} ({}%) have a <lastmod> value.".format(
+                len(entries), sitemap_total_phrase(sitemap_scope(snapshot.get("sitemaps"))),
+                pct(len(entries), total_urls)),
             mechanism="D", root_cause="no-date-signal",
             summary="Emit an accurate <lastmod> for every sitemap entry.",
             how_to_fix=[

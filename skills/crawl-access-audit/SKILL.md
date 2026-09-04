@@ -35,8 +35,10 @@ described badly, or when someone reports "our pages exist but nothing ever cites
    real commercial homepages, one returns HTTP 202 with zero characters of readable text and
    another returns 200 with thirty-two, both carrying a vendor's challenge script. Detect the
    vendor by its own scaffolding - AWS WAF, Akamai Bot Manager, Cloudflare, DataDome,
-   PerimeterX, Imperva or Distil - gated on the page carrying under 800 characters, so an
-   article *about* bot management is never mistaken for one. Name the vendor in the finding:
+   PerimeterX, Imperva or Distil - or by the mitigation header the vendor sets on its own
+   challenge response, which names the product where no scaffolding is served at all. Gate
+   the phrase-matching on the page carrying under 800 characters, so an article *about* bot
+   management is never mistaken for one. Name the vendor in the finding:
    the fix is an allow rule in that specific product. Those pages are then excluded from
    every content check, because a challenge describes the crawler's reception and not the
    site. Without this the audit reports a JavaScript shell, absent structured data, no
@@ -114,6 +116,15 @@ described badly, or when someone reports "our pages exist but nothing ever cites
    reader knows the rule is per-agent rather than against every crawler. Skip the probe
    entirely if robots.txt already disallows every answer crawler, because the robots finding
    covers it. Maximum three requests.
+
+   **When the baseline itself was refused, the cause is still untested.** A 403 to every
+   request has two common causes with opposite first moves: a bot manager reading the user
+   agent, and an edge rule that refuses this address whatever it claims to be. Asserting
+   one of them from the status code produced a Critical "do first" step that was wrong half
+   the time. Send one further request under a different agent: a different status means the
+   agent is being read, an identical one means it is not, and the finding then says which
+   of the two was tested. Where the second request is not possible, say the cause is
+   unknown and do not open with the crawler allow-list.
 
 8. **Slow is not down.** Take the median server response across the pages that answered
    200. Over 3 s is **medium**, over 10 s is **high**, and it is its own root cause

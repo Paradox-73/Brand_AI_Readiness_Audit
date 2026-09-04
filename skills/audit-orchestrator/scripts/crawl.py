@@ -146,11 +146,26 @@ def _tag(element):
     return element.tag.split("}")[-1].lower()
 
 
+# How many children of a sitemap index to fetch, and how many sitemap records
+# to keep in all. Five children rather than three because a site that splits
+# its sitemap by language has one per language, and reading one of twelve made
+# the sample as lopsided as the total was wrong. The ceiling stays low on
+# purpose: the deadline is checked every iteration, and a full inventory of a
+# 32,000-URL sitemap is not what any check here needs.
+SITEMAP_INDEX_CHILDREN = 5
+SITEMAP_RECORDS = 8
+
+
 def fetch_sitemaps(fetcher, origin, robots_record, deadline):
     """Fetch sitemaps referenced in robots plus the conventional location.
 
-    Follows one level of sitemap index, capped at three children, because the
-    goal is a representative URL sample, not a full inventory.
+    Follows one level of sitemap index, capped at `SITEMAP_INDEX_CHILDREN`,
+    because the goal is a representative URL sample, not a full inventory.
+
+    Every record keeps the full child list whether or not the child was
+    fetched, so `sitemap_scope` can say how much of the index the totals
+    actually cover. Reporting a partial sum as the site's total was worth
+    three wrong numbers in one round of testing.
     """
     queue = list(dict.fromkeys(robots_record.get("sitemaps") or []))
     default_url = origin.rstrip("/") + "/sitemap.xml"
@@ -161,7 +176,7 @@ def fetch_sitemaps(fetcher, origin, robots_record, deadline):
     results = []
     seen = set()
     index_children_fetched = 0
-    while queue and len(results) < 5 and time.monotonic() < deadline:
+    while queue and len(results) < SITEMAP_RECORDS and time.monotonic() < deadline:
         url = queue.pop(0)
         if url in seen:
             continue
@@ -222,8 +237,8 @@ def fetch_sitemaps(fetcher, origin, robots_record, deadline):
                     child_url = normalise_url(loc.text.strip(), origin)
                     if child_url:
                         record["child_sitemaps"].append(child_url)
-            for child_url in record["child_sitemaps"][:3]:
-                if index_children_fetched < 3:
+            for child_url in record["child_sitemaps"][:SITEMAP_INDEX_CHILDREN]:
+                if index_children_fetched < SITEMAP_INDEX_CHILDREN:
                     queue.append(child_url)
                     index_children_fetched += 1
         else:

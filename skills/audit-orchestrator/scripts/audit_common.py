@@ -459,6 +459,411 @@ def group_by_edition(pages, editions):
         groups.setdefault(editions.get(page.get("url"), ""), []).append(page)
     return groups
 
+
+# --------------------------------------------------------------------------
+# Language editions
+#
+# A site with one edition per language puts the language in the first path
+# segment: /de/ueber-uns, /fr/a-propos, /en-gb/about. Every URL-shaped
+# comparison then has to be made inside an edition rather than across the
+# whole site, because a German page's navigation legitimately points at
+# German URLs and shares not one path with the English menu.
+#
+# Comparing them raw reported a fully navigable German edition as pages
+# carrying no site navigation - a medium finding, on a site whose menu is
+# present, complete and translated. The fix is not a list of language codes to
+# ignore. It is to establish the site's normal chrome once per edition.
+# --------------------------------------------------------------------------
+
+# A two-letter language code, optionally with a region or script subtag.
+_LOCALE_SEGMENT_RE = re.compile(
+    r"^[a-z]{2}(?:[-_](?:[a-z]{2}|[a-z]{4}|\d{3}))?$", re.I)
+
+# Two-letter path segments that are ordinary sections on English sites, where
+# reading them as a language would split a monolingual site into editions.
+_NOT_A_LOCALE = frozenset({"us", "uk", "eu", "ac", "co", "hr", "id", "pr", "tv"})
+
+
+def _locale_candidate(url):
+    """The leading path segment, if it is shaped like a language code."""
+    path = urlparse(url).path
+    first = path.strip("/").split("/")[0].lower() if path.strip("/") else ""
+    if not first or first in _NOT_A_LOCALE:
+        return ""
+    if not _LOCALE_SEGMENT_RE.match(first):
+        return ""
+    return first
+
+
+def locale_editions(pages):
+    """Map each page URL to its language edition, or "" if the site has none.
+
+    A leading segment counts as an edition only on evidence, never on shape
+    alone. Either the page's own `lang` attribute names that language - the
+    site saying so itself, which is the strongest evidence available - or at
+    least two different language-shaped prefixes appear across the crawl, which
+    no monolingual site produces by accident.
+    """
+    candidates = {}
+    for page in pages or []:
+        if page.get("status") != 200:
+            continue
+        candidate = _locale_candidate(page.get("url") or "")
+        if candidate:
+            candidates[page["url"]] = candidate
+
+    if not candidates:
+        return {}
+
+    self_declared = set()
+    for page in pages or []:
+        candidate = candidates.get(page.get("url"))
+        if candidate and primary_subtag(page.get("lang")) == candidate.split("-")[0].split("_")[0]:
+            self_declared.add(candidate)
+
+    distinct = set(candidates.values())
+    trusted = self_declared if self_declared else (distinct if len(distinct) > 1 else set())
+    if not trusted:
+        return {}
+    return {url: code for url, code in candidates.items() if code in trusted}
+
+
+def group_by_edition(pages, editions):
+    """Pages grouped by language edition, smallest useful unit last.
+
+    Pages outside any edition - a shared root, a sitemap page, an asset
+    landing page - are their own group, because they genuinely do share one
+    chrome with each other.
+    """
+    groups = {}
+    for page in pages:
+        groups.setdefault(editions.get(page.get("url"), ""), []).append(page)
+    return groups
+
+
+# --------------------------------------------------------------------------
+# Language editions
+#
+# A site with one edition per language puts the language in the first path
+# segment: /de/ueber-uns, /fr/a-propos, /en-gb/about. Every URL-shaped
+# comparison then has to be made inside an edition rather than across the
+# whole site, because a German page's navigation legitimately points at
+# German URLs and shares not one path with the English menu.
+#
+# Comparing them raw reported a fully navigable German edition as pages
+# carrying no site navigation - a medium finding, on a site whose menu is
+# present, complete and translated. The fix is not a list of language codes to
+# ignore. It is to establish the site's normal chrome once per edition.
+# --------------------------------------------------------------------------
+
+# A two-letter language code, optionally with a region or script subtag.
+_LOCALE_SEGMENT_RE = re.compile(
+    r"^[a-z]{2}(?:[-_](?:[a-z]{2}|[a-z]{4}|\d{3}))?$", re.I)
+
+# Two-letter path segments that are ordinary sections on English sites, where
+# reading them as a language would split a monolingual site into editions.
+_NOT_A_LOCALE = frozenset({"us", "uk", "eu", "ac", "co", "hr", "id", "pr", "tv"})
+
+
+def _locale_candidate(url):
+    """The leading path segment, if it is shaped like a language code."""
+    path = urlparse(url).path
+    first = path.strip("/").split("/")[0].lower() if path.strip("/") else ""
+    if not first or first in _NOT_A_LOCALE:
+        return ""
+    if not _LOCALE_SEGMENT_RE.match(first):
+        return ""
+    return first
+
+
+def locale_editions(pages):
+    """Map each page URL to its language edition, or "" if the site has none.
+
+    A leading segment counts as an edition only on evidence, never on shape
+    alone. Either the page's own `lang` attribute names that language - the
+    site saying so itself, which is the strongest evidence available - or at
+    least two different language-shaped prefixes appear across the crawl, which
+    no monolingual site produces by accident.
+    """
+    candidates = {}
+    for page in pages or []:
+        if page.get("status") != 200:
+            continue
+        candidate = _locale_candidate(page.get("url") or "")
+        if candidate:
+            candidates[page["url"]] = candidate
+
+    if not candidates:
+        return {}
+
+    self_declared = set()
+    for page in pages or []:
+        candidate = candidates.get(page.get("url"))
+        if candidate and primary_subtag(page.get("lang")) == candidate.split("-")[0].split("_")[0]:
+            self_declared.add(candidate)
+
+    distinct = set(candidates.values())
+    trusted = self_declared if self_declared else (distinct if len(distinct) > 1 else set())
+    if not trusted:
+        return {}
+    return {url: code for url, code in candidates.items() if code in trusted}
+
+
+def group_by_edition(pages, editions):
+    """Pages grouped by language edition, smallest useful unit last.
+
+    Pages outside any edition - a shared root, a sitemap page, an asset
+    landing page - are their own group, because they genuinely do share one
+    chrome with each other.
+    """
+    groups = {}
+    for page in pages:
+        groups.setdefault(editions.get(page.get("url"), ""), []).append(page)
+    return groups
+
+
+# --------------------------------------------------------------------------
+# Language editions
+#
+# A site with one edition per language puts the language in the first path
+# segment: /de/ueber-uns, /fr/a-propos, /en-gb/about. Every URL-shaped
+# comparison then has to be made inside an edition rather than across the
+# whole site, because a German page's navigation legitimately points at
+# German URLs and shares not one path with the English menu.
+#
+# Comparing them raw reported a fully navigable German edition as pages
+# carrying no site navigation - a medium finding, on a site whose menu is
+# present, complete and translated. The fix is not a list of language codes to
+# ignore. It is to establish the site's normal chrome once per edition.
+# --------------------------------------------------------------------------
+
+# A two-letter language code, optionally with a region or script subtag.
+_LOCALE_SEGMENT_RE = re.compile(
+    r"^[a-z]{2}(?:[-_](?:[a-z]{2}|[a-z]{4}|\d{3}))?$", re.I)
+
+# Two-letter path segments that are ordinary sections on English sites, where
+# reading them as a language would split a monolingual site into editions.
+_NOT_A_LOCALE = frozenset({"us", "uk", "eu", "ac", "co", "hr", "id", "pr", "tv"})
+
+
+def _locale_candidate(url):
+    """The leading path segment, if it is shaped like a language code."""
+    path = urlparse(url).path
+    first = path.strip("/").split("/")[0].lower() if path.strip("/") else ""
+    if not first or first in _NOT_A_LOCALE:
+        return ""
+    if not _LOCALE_SEGMENT_RE.match(first):
+        return ""
+    return first
+
+
+def locale_editions(pages):
+    """Map each page URL to its language edition, or "" if the site has none.
+
+    A leading segment counts as an edition only on evidence, never on shape
+    alone. Either the page's own `lang` attribute names that language - the
+    site saying so itself, which is the strongest evidence available - or at
+    least two different language-shaped prefixes appear across the crawl, which
+    no monolingual site produces by accident.
+    """
+    candidates = {}
+    for page in pages or []:
+        if page.get("status") != 200:
+            continue
+        candidate = _locale_candidate(page.get("url") or "")
+        if candidate:
+            candidates[page["url"]] = candidate
+
+    if not candidates:
+        return {}
+
+    self_declared = set()
+    for page in pages or []:
+        candidate = candidates.get(page.get("url"))
+        if candidate and primary_subtag(page.get("lang")) == candidate.split("-")[0].split("_")[0]:
+            self_declared.add(candidate)
+
+    distinct = set(candidates.values())
+    trusted = self_declared if self_declared else (distinct if len(distinct) > 1 else set())
+    if not trusted:
+        return {}
+    return {url: code for url, code in candidates.items() if code in trusted}
+
+
+def group_by_edition(pages, editions):
+    """Pages grouped by language edition, smallest useful unit last.
+
+    Pages outside any edition - a shared root, a sitemap page, an asset
+    landing page - are their own group, because they genuinely do share one
+    chrome with each other.
+    """
+    groups = {}
+    for page in pages:
+        groups.setdefault(editions.get(page.get("url"), ""), []).append(page)
+    return groups
+
+
+# --------------------------------------------------------------------------
+# Language editions
+#
+# A site with one edition per language puts the language in the first path
+# segment: /de/ueber-uns, /fr/a-propos, /en-gb/about. Every URL-shaped
+# comparison then has to be made inside an edition rather than across the
+# whole site, because a German page's navigation legitimately points at
+# German URLs and shares not one path with the English menu.
+#
+# Comparing them raw reported a fully navigable German edition as pages
+# carrying no site navigation - a medium finding, on a site whose menu is
+# present, complete and translated. The fix is not a list of language codes to
+# ignore. It is to establish the site's normal chrome once per edition.
+# --------------------------------------------------------------------------
+
+# A two-letter language code, optionally with a region or script subtag.
+_LOCALE_SEGMENT_RE = re.compile(
+    r"^[a-z]{2}(?:[-_](?:[a-z]{2}|[a-z]{4}|\d{3}))?$", re.I)
+
+# Two-letter path segments that are ordinary sections on English sites, where
+# reading them as a language would split a monolingual site into editions.
+_NOT_A_LOCALE = frozenset({"us", "uk", "eu", "ac", "co", "hr", "id", "pr", "tv"})
+
+
+def _locale_candidate(url):
+    """The leading path segment, if it is shaped like a language code."""
+    path = urlparse(url).path
+    first = path.strip("/").split("/")[0].lower() if path.strip("/") else ""
+    if not first or first in _NOT_A_LOCALE:
+        return ""
+    if not _LOCALE_SEGMENT_RE.match(first):
+        return ""
+    return first
+
+
+def locale_editions(pages):
+    """Map each page URL to its language edition, or "" if the site has none.
+
+    A leading segment counts as an edition only on evidence, never on shape
+    alone. Either the page's own `lang` attribute names that language - the
+    site saying so itself, which is the strongest evidence available - or at
+    least two different language-shaped prefixes appear across the crawl, which
+    no monolingual site produces by accident.
+    """
+    candidates = {}
+    for page in pages or []:
+        if page.get("status") != 200:
+            continue
+        candidate = _locale_candidate(page.get("url") or "")
+        if candidate:
+            candidates[page["url"]] = candidate
+
+    if not candidates:
+        return {}
+
+    self_declared = set()
+    for page in pages or []:
+        candidate = candidates.get(page.get("url"))
+        if candidate and primary_subtag(page.get("lang")) == candidate.split("-")[0].split("_")[0]:
+            self_declared.add(candidate)
+
+    distinct = set(candidates.values())
+    trusted = self_declared if self_declared else (distinct if len(distinct) > 1 else set())
+    if not trusted:
+        return {}
+    return {url: code for url, code in candidates.items() if code in trusted}
+
+
+def group_by_edition(pages, editions):
+    """Pages grouped by language edition, smallest useful unit last.
+
+    Pages outside any edition - a shared root, a sitemap page, an asset
+    landing page - are their own group, because they genuinely do share one
+    chrome with each other.
+    """
+    groups = {}
+    for page in pages:
+        groups.setdefault(editions.get(page.get("url"), ""), []).append(page)
+    return groups
+
+
+# --------------------------------------------------------------------------
+# Language editions
+#
+# A site with one edition per language puts the language in the first path
+# segment: /de/ueber-uns, /fr/a-propos, /en-gb/about. Every URL-shaped
+# comparison then has to be made inside an edition rather than across the
+# whole site, because a German page's navigation legitimately points at
+# German URLs and shares not one path with the English menu.
+#
+# Comparing them raw reported a fully navigable German edition as pages
+# carrying no site navigation - a medium finding, on a site whose menu is
+# present, complete and translated. The fix is not a list of language codes to
+# ignore. It is to establish the site's normal chrome once per edition.
+# --------------------------------------------------------------------------
+
+# A two-letter language code, optionally with a region or script subtag.
+_LOCALE_SEGMENT_RE = re.compile(
+    r"^[a-z]{2}(?:[-_](?:[a-z]{2}|[a-z]{4}|\d{3}))?$", re.I)
+
+# Two-letter path segments that are ordinary sections on English sites, where
+# reading them as a language would split a monolingual site into editions.
+_NOT_A_LOCALE = frozenset({"us", "uk", "eu", "ac", "co", "hr", "id", "pr", "tv"})
+
+
+def _locale_candidate(url):
+    """The leading path segment, if it is shaped like a language code."""
+    path = urlparse(url).path
+    first = path.strip("/").split("/")[0].lower() if path.strip("/") else ""
+    if not first or first in _NOT_A_LOCALE:
+        return ""
+    if not _LOCALE_SEGMENT_RE.match(first):
+        return ""
+    return first
+
+
+def locale_editions(pages):
+    """Map each page URL to its language edition, or "" if the site has none.
+
+    A leading segment counts as an edition only on evidence, never on shape
+    alone. Either the page's own `lang` attribute names that language - the
+    site saying so itself, which is the strongest evidence available - or at
+    least two different language-shaped prefixes appear across the crawl, which
+    no monolingual site produces by accident.
+    """
+    candidates = {}
+    for page in pages or []:
+        if page.get("status") != 200:
+            continue
+        candidate = _locale_candidate(page.get("url") or "")
+        if candidate:
+            candidates[page["url"]] = candidate
+
+    if not candidates:
+        return {}
+
+    self_declared = set()
+    for page in pages or []:
+        candidate = candidates.get(page.get("url"))
+        if candidate and primary_subtag(page.get("lang")) == candidate.split("-")[0].split("_")[0]:
+            self_declared.add(candidate)
+
+    distinct = set(candidates.values())
+    trusted = self_declared if self_declared else (distinct if len(distinct) > 1 else set())
+    if not trusted:
+        return {}
+    return {url: code for url, code in candidates.items() if code in trusted}
+
+
+def group_by_edition(pages, editions):
+    """Pages grouped by language edition, smallest useful unit last.
+
+    Pages outside any edition - a shared root, a sitemap page, an asset
+    landing page - are their own group, because they genuinely do share one
+    chrome with each other.
+    """
+    groups = {}
+    for page in pages:
+        groups.setdefault(editions.get(page.get("url"), ""), []).append(page)
+    return groups
+
 def guess_language_from_text(text):
     """Language of a body of text from function-word frequency.
 
@@ -538,16 +943,54 @@ _SCRIPT_RANGES = (
 )
 
 
-def scripts_in(text):
-    """Which writing systems this text uses, ignoring digits and punctuation."""
-    found = set()
+# Writing systems that put no space between one word and the next. Splitting
+# on spaces there does not merely lose precision: 86 characters of Japanese -
+# about forty words of English - count as seven, and an entire page counts as
+# one sentence. Every threshold in this audit written in words is therefore
+# unmeasurable on these scripts, and the checks that use one say so rather
+# than reporting the number they would have got.
+UNSPACED_SCRIPTS = frozenset({"han", "kana", "thai"})
+
+# Below this many letters, no script is dominant enough to decide anything.
+SCRIPT_SAMPLE_MINIMUM = 20
+
+
+def script_counts(text):
+    """How many letters of each writing system this text holds."""
+    counts = {}
     for char in text or "":
         code = ord(char)
         for name, ranges in _SCRIPT_RANGES:
             if any(low <= code <= high for low, high in ranges):
-                found.add(name)
+                counts[name] = counts.get(name, 0) + 1
                 break
-    return found
+    return counts
+
+
+def scripts_in(text):
+    """Which writing systems this text uses, ignoring digits and punctuation."""
+    return set(script_counts(text))
+
+
+def dominant_script(text):
+    """The writing system most of this text is in, or None if it is too short.
+
+    A page of English quoting one Japanese product name is English. The answer
+    is the script holding most of the letters, not every script present.
+    """
+    counts = script_counts(text)
+    if sum(counts.values()) < SCRIPT_SAMPLE_MINIMUM:
+        return None
+    return max(sorted(counts), key=counts.get)
+
+
+def words_are_separated(text):
+    """True when counting the words in this text means what it usually means.
+
+    True as well when the script cannot be decided, so a short string is
+    measured rather than silently skipped.
+    """
+    return dominant_script(text) not in UNSPACED_SCRIPTS
 
 
 def written_in_the_same_script(name, text):
@@ -740,10 +1183,30 @@ def word_count(text):
     return len(re.findall(r"\b[\w'’-]+\b", text or ""))
 
 
+# Three ways a sentence ends, because one of them only works in English.
+#
+# The first branch is the Latin case: a full stop, a space, and something that
+# is not the continuation of the same sentence - the lookahead is what keeps
+# "Dr. Smith" together. It used to require a capital letter next, which meant
+# it never fired in a script that has no capitals. An Arabic news site and a
+# Japanese one were each reported as a single sentence hundreds of words long,
+# and the check that measures sentence length skipped with the reason "no page
+# has enough prose to measure" - about sites that are nothing but prose.
+#
+# The second and third branches are terminators that end a sentence on their
+# own, with no space and no capital to look for: the full-width stops used
+# with Chinese, Japanese and Korean text, and the Indic danda, Urdu full stop
+# and Arabic question mark.
+_SENTENCE_SPLIT = re.compile(
+    r"(?<=[.!?])\s+(?![a-z\d])"
+    r"|(?<=[。！？])\s*"
+    r"|(?<=[।॥۔؟])\s*")
+
+
 def sentences(text):
     """Rough sentence split. Good enough for length statistics."""
-    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z(\"'])", (text or "").strip())
-    return [p.strip() for p in parts if p.strip()]
+    parts = _SENTENCE_SPLIT.split((text or "").strip())
+    return [p.strip() for p in parts if p and p.strip()]
 
 
 # --------------------------------------------------------------------------
@@ -1884,12 +2347,59 @@ CHALLENGE_MARKERS = {
 CHALLENGE_TEXT_CEILING = 800
 
 
-def detect_challenge(html, page_text):
+# What a verification page says about itself, in the words it shows a human
+# who lands on one. These are about the checking, never about the site, and
+# they are what lets a challenge be recognised from a vendor nobody has added
+# to the table yet.
+#
+# Deliberately not "enable javascript": a single-page app ships that sentence
+# in a `<noscript>` and is a genuine finding this audit must keep reporting.
+# Every phrase here names the verification itself.
+_CHALLENGE_PHRASES = (
+    "verifying your browser", "checking your browser", "verify you are human",
+    "verify you are a human", "are you a robot", "security checkpoint",
+    "please wait while we verify", "checking if the site connection is secure",
+    "additional security check", "human verification",
+    "enable javascript and cookies to continue", "ddos protection by",
+    "your request has been blocked", "access to this page has been denied",
+)
+
+# A header the edge sets to say it interfered with the request. Matched by
+# shape, because every vendor spells its own name into the header and the
+# point is not to have to know them all.
+_MITIGATION_HEADER_RE = re.compile(r"mitigat|challenge|bot-?(?:block|score)", re.I)
+
+
+def _vendor_from_headers(headers):
+    """`x-vercel-mitigated` -> `Vercel`. The name is in the header itself."""
+    for name in headers or ():
+        if not _MITIGATION_HEADER_RE.search(name):
+            continue
+        parts = [p for p in re.split(r"[-_]", name)
+                 if p and p.lower() not in ("x", "mitigated", "mitigation", "challenge")]
+        if parts:
+            return parts[0].capitalize()
+    return "the site's edge"
+
+
+def detect_challenge(html, page_text, status=None, headers=None):
     """Which bot manager served a verification page here, if any.
 
-    Returns the vendor name, or None. The name matters: the fix is to
-    allow-list crawlers in that product, and naming it saves the site owner
-    the first hour of the job.
+    Returns a name, or None. The name matters: the fix is to allow-list
+    crawlers in that product, and naming it saves the site owner the first
+    hour of the job.
+
+    Three ways to recognise one, in order of how much they tell you. A vendor
+    marker names the product. A mitigation header names the vendor too, in the
+    header's own spelling. A phrase the page shows the visitor names nothing,
+    but still says this is a verification screen and not the site.
+
+    The vendor table alone was not enough. A museum's homepage answered 429
+    with the title "Vercel Security Checkpoint" and the header
+    `x-vercel-mitigated: challenge`, and because that vendor was not in the
+    table the appendix reported "no page answered with a bot-manager
+    verification page in place of its content" - the exact opposite of what
+    the snapshot beside it recorded.
     """
     if len(page_text or "") > CHALLENGE_TEXT_CEILING:
         return None
@@ -1897,7 +2407,137 @@ def detect_challenge(html, page_text):
     for vendor, markers in sorted(CHALLENGE_MARKERS.items()):
         if any(marker in low for marker in markers):
             return vendor
+    if headers and any(_MITIGATION_HEADER_RE.search(name) for name in headers):
+        return _vendor_from_headers(headers)
+    text = (page_text or "").lower()
+    if any(phrase in low or phrase in text for phrase in _CHALLENGE_PHRASES):
+        return _vendor_from_headers(headers)
     return None
+
+
+# --------------------------------------------------------------------------
+# Showing the words
+#
+# A check that reports a fact as MISSING already has to quote what it looked
+# at. A check that reports a fact as PRESENT had no such rule, and a pass here
+# is not a quiet outcome: it suppresses the finding that would otherwise be
+# raised, and prints a sentence saying the site states something.
+#
+# Across eight sites in one round, five had a fact recorded as found on the
+# strength of a regular expression that had matched something else:
+#
+#   - a customer's testimonial, "We save close to $30,000 per year", read as
+#     the site's own pricing, on a page with no price on it
+#   - a sponsor's blurb about a different company, "powers 70+ million
+#     accounts worldwide", read as this site's service area
+#   - the idiom "feel free to use those" read as a statement that the software
+#     costs nothing
+#   - the word "employees" inside a hidden terms-of-use block that appears on
+#     every page, read as the site's team facts
+#   - the digits inside a photo-sharing URL, `/photos/<user>/39225879230/`,
+#     read as a telephone number
+#
+# Each one printed a sentence claiming the site states a fact it does not, and
+# each one stopped a true finding from being raised.
+#
+# So: a claim that something is present carries the words that make it
+# present. If a check cannot produce the sentence, it has not found the thing.
+# --------------------------------------------------------------------------
+
+# Enough of a sentence to be worth printing, and short enough to print.
+EVIDENCE_SENTENCE_MIN = 15
+EVIDENCE_SENTENCE_MAX = 220
+
+
+def sentence_with(text, pattern):
+    """The sentence in `text` that `pattern` matches, or None.
+
+    None when the pattern does not match, and also when it matches something
+    too short to be a sentence - a fragment of a menu, a lone word in a table
+    cell - because a fragment cannot be judged by the reader the report is
+    written for.
+    """
+    if not text:
+        return None
+    match = pattern.search(text)
+    if match is None:
+        return None
+    for sentence in sentences(text):
+        if match.group(0) in sentence:
+            sentence = truncate(sentence.strip(), EVIDENCE_SENTENCE_MAX)
+            return sentence if len(sentence) >= EVIDENCE_SENTENCE_MIN else None
+    return None
+
+
+# First person, or the brand's own name. Everything else on a page can be
+# about somebody else: a customer, a sponsor, a case study, a client's deal.
+_SELF_REFERENCE_RE = re.compile(
+    r"\b(?:we|we're|we've|our|ours|us|the (?:company|firm|practice|team))\b", re.I)
+
+
+def speaks_about_itself(sentence, brand_name=""):
+    """Is this sentence about the site, or about someone the site mentions?
+
+    The distinction the four false passes above all turned on. A page may
+    carry a number, a place and a date that belong to a client, a sponsor or a
+    quoted customer, and a pattern cannot tell whose they are. A sentence in
+    the first person, or one naming the brand, can be attributed; one that
+    does neither cannot.
+    """
+    if not sentence:
+        return False
+    if _SELF_REFERENCE_RE.search(sentence):
+        return True
+    key = brand_key(brand_name) if brand_name else ""
+    return bool(key) and key.lower() in sentence.lower()
+
+
+# --------------------------------------------------------------------------
+# How much of the sitemap we actually read
+#
+# A sitemap index names its children but does not contain them, and this audit
+# fetches a few of the children and stops - deliberately, because the point is
+# a representative sample of URLs and not a full inventory.
+#
+# What was wrong was reporting the sample's total as the site's total. A
+# documentation site was told it publishes 7,033 sitemap entries; it publishes
+# 32,820 across twelve language sitemaps, of which three were read. A
+# retailer's report said its sitemap lists 470 URLs, against a real 2,139. In
+# both cases the number was then reused: as the denominator of the lastmod
+# coverage percentage, and as the population the orphan-page finding compared
+# the crawl against.
+#
+# The index says how many children exist without anyone having to fetch them,
+# so the honest number is always available for free.
+# --------------------------------------------------------------------------
+
+def sitemap_scope(sitemaps):
+    """What the sitemap counts cover, and what they leave out."""
+    declared, read, counted, lastmods = set(), set(), 0, 0
+    for record in sitemaps or ():
+        declared.update(record.get("child_sitemaps") or [])
+        if record.get("status") == 200:
+            read.add(record.get("url"))
+            counted += record.get("url_count", 0)
+            lastmods += record.get("lastmod_count", 0)
+    unread = declared - read
+    return {
+        "urls_counted": counted,
+        "lastmods_counted": lastmods,
+        "children_declared": len(declared),
+        "children_read": len(declared & read),
+        "complete": not unread,
+    }
+
+
+def sitemap_total_phrase(scope, noun="entries"):
+    """`32,820 entries`, or `at least 7,033 entries` with the reason attached."""
+    if scope["complete"]:
+        return "{:,} {}".format(scope["urls_counted"], noun)
+    return ("at least {:,} {} - the sitemap index names {} sub-sitemaps and this audit read "
+            "{} of them, so the real total is higher").format(
+                scope["urls_counted"], noun, scope["children_declared"],
+                scope["children_read"])
 
 
 def plural(count, singular, plural_form=None):
@@ -1911,6 +2551,41 @@ def plural(count, singular, plural_form=None):
     if plural_form is None:
         plural_form = singular + "s"
     return "{} {}".format(count, singular if count == 1 else plural_form)
+
+
+# How much text an unclassified page needs before it counts as content.
+# Above a paragraph or two with a heading over it, whatever the URL says.
+UNCLASSIFIED_CONTENT_MIN_CHARS = 400
+
+
+def looks_like_content(page):
+    """A page the type table did not recognise, but which is plainly content.
+
+    `page_type` is decided mostly from URL slugs, and a site whose URLs do not
+    use those words gets everything typed `other` - which `content_only` then
+    drops, so the checks see a slice and the report describes the site.
+
+    Measured on one software company's crawl: twelve dated posts under
+    `/changelog/` and `/now/`, each with a headline, a publication date and
+    several paragraphs, were all typed `other`. The two freshness checks
+    skipped with the reason "no article or press pages were crawled" - about a
+    crawl that had just read twelve of them - and the shell check never looked
+    at the page that turned out to be 246 KB of JavaScript and no text at all.
+
+    Adding slugs to the table fixes one site. Asking the page what it holds
+    fixes the ones nobody has run this on yet.
+    """
+    page_type = page.get("page_type")
+    if page_type in CONTENT_TYPES:
+        return True
+    # Only for `other`, which means "not recognised". Every other type outside
+    # CONTENT_TYPES is a type this audit recognised and excluded on purpose -
+    # a privacy policy, a careers listing - and inspecting the text would
+    # bring those back in, which is the opposite of what naming them was for.
+    if page_type != "other":
+        return False
+    return (page.get("body_text_len", 0) >= UNCLASSIFIED_CONTENT_MIN_CHARS
+            and bool((page.get("headings") or {}).get("h1")))
 
 
 def pages_of(snapshot, types=None, content_only=False, ok_only=True,
@@ -1945,7 +2620,7 @@ def pages_of(snapshot, types=None, content_only=False, ok_only=True,
             continue
         if not include_challenged and page.get("challenge"):
             continue
-        if content_only and page.get("page_type") not in CONTENT_TYPES:
+        if content_only and not looks_like_content(page):
             continue
         if types and page.get("page_type") not in types:
             continue
@@ -2191,7 +2866,7 @@ MAIN_TEXT_MIN_CHARS = 200
 MAIN_TEXT_COMPLETE_SHARE = 0.85
 
 
-def main_text(soup):
+def main_text(soup, prepared=None):
     """Text of the main content region, falling back to the whole body.
 
     Header/nav/footer chrome repeats on every page and would otherwise mask a
@@ -2204,8 +2879,15 @@ def main_text(soup):
     as chrome, where the whole-document fallback is the one that loses text.
     So both candidates are measured and the fuller one wins, with the region
     preferred while it is within `MAIN_TEXT_COMPLETE_SHARE` of the best.
+
+    `prepared` is the whole-document text when the caller has already built
+    the cleaned copy, which the page extractor has, because the readability
+    statistics need the same one. Building it twice parsed every page an extra
+    time for nothing.
     """
-    whole = _strip_chrome(soup)
+    whole = (prepared if prepared is not None
+             else tidy_spacing(re.sub(r"\s+", " ",
+                                      content_soup(soup).get_text(separator=" ")).strip()))
     best = ""
     for selector in MAIN_TEXT_SELECTORS:
         node = soup.select_one(selector)
@@ -2336,14 +3018,69 @@ def _text_length_of(selector, clone):
     return total
 
 
-def _strip_chrome(node):
-    """Text of a region with scripts, navigation and breadcrumbs removed.
+# Text that is on the page and is not the page's own words.
+#
+# Chrome is furniture the site repeats. This is different: it is content,
+# written by somebody who is not the site, sitting inside the content region
+# where every check reads it as the page speaking.
+#
+# A recipe blog's 549 reader comments were counted as the author's prose -
+# 30,184 words on one page, reported as writing too dense to skim. One
+# commenter's id, 598456, was published as the site's postcode. The word
+# "Reply" in a reply link became a street name. And on a project-tracking
+# company's site a customer's testimonial, "We save close to $30,000 per
+# year", was recorded as the company's own pricing, which suppressed the
+# finding that the site never states a price - while its real per-seat prices
+# sat unexamined on the pricing page.
+_NOT_OUR_WORDS_SELECTORS = (
+    "#comments", "#respond", "#disqus_thread", "#comment-list",
+    "[class*=comment-list]", "[class*=comments-area]", "[class*=comment-respond]",
+    "[itemprop=comment]", "[class*=review-list]", "[class*=testimonial]",
+)
 
-    Two tiers, and the difference matters. What the page declares as chrome -
-    a landmark element, `aria-hidden`, `display:none` - comes out
-    unconditionally. What a CSS class name merely suggests is chrome comes out
-    only while it stays small, because a guess that removes most of a page has
-    stopped being a guess about furniture and become a claim about content.
+# Unless taking them out leaves nothing. A forum thread, a question-and-answer
+# page and a review site *are* their user content; removing it there would not
+# be reading the page more carefully, it would be deleting the page - the same
+# mistake `_GUESS_MAX_SHARE` exists to stop, arrived at from the other side.
+_OWN_WORDS_FLOOR = 300
+
+
+def without_other_peoples_words(node):
+    """A copy of this document with reader comments and testimonials removed.
+
+    `content_soup` also removes the chrome, which is wrong for the facts that
+    legitimately live in the chrome: the telephone number in the footer is the
+    site's telephone number. This view keeps the furniture and drops only what
+    somebody else wrote, so a commenter's id cannot become the site's postcode
+    and a 2019 comment cannot date the page.
+
+    No floor here, unlike `content_soup`. A page that is nothing but comments
+    still has no contact details of its own, so there is nothing to protect.
+
+    Returns the document itself when there is nothing to remove. Parsing the
+    HTML again costs about as much as parsing it the first time, and most
+    pages carry no comments at all: added unconditionally, this one line put
+    roughly half again on the crawl, which is spent out of a five-minute
+    budget that the report's own promise depends on.
+    """
+    if not any(node.select_one(selector) for selector in _NOT_OUR_WORDS_SELECTORS):
+        return node
+    clone = make_soup(str(node))
+    for selector in _NOT_OUR_WORDS_SELECTORS:
+        _decompose_safely(clone, selector)
+    return clone
+
+
+def content_soup(node):
+    """A copy of this region with everything that is not its content removed.
+
+    Three tiers, and the differences matter. What the page declares as chrome
+    - a landmark element, `aria-hidden`, `display:none` - comes out
+    unconditionally. What is content but is not the page's own words comes out
+    too, unless that empties the page. What a CSS class name merely suggests
+    is chrome comes out only while it stays small, because a guess that
+    removes most of a page has stopped being a guess about furniture and
+    become a claim about content.
     """
     clone = make_soup(str(node))
     for tag in clone(list(_NON_CONTENT_TAGS)):
@@ -2358,12 +3095,33 @@ def _strip_chrome(node):
             found.decompose()
 
     declared = len(re.sub(r"\s+", " ", clone.get_text(separator=" ")).strip())
+
+    # Measured by removing them, not by adding up what they hold: these
+    # selectors nest - a `.comment-list` sits inside `#comments` - so summing
+    # their lengths counts the same text twice, and on the page this was
+    # written for the doubled total came out larger than the page itself. The
+    # removal then never happened, which is a quiet failure: the code looked
+    # like it was guarding a floor and was in fact guarding nothing.
+    if any(clone.select_one(selector) for selector in _NOT_OUR_WORDS_SELECTORS):
+        trimmed = make_soup(str(clone))
+        for selector in _NOT_OUR_WORDS_SELECTORS:
+            _decompose_safely(trimmed, selector)
+        remaining = len(re.sub(r"\s+", " ", trimmed.get_text(separator=" ")).strip())
+        if remaining >= _OWN_WORDS_FLOOR:
+            clone, declared = trimmed, remaining
+
     budget = _GUESS_MAX_SHARE * declared
     for selector in _GUESSED_CHROME_SELECTORS:
         if _text_length_of(selector, clone) > budget:
             continue                      # too big to be furniture
         _decompose_safely(clone, selector)
-    return tidy_spacing(re.sub(r"\s+", " ", clone.get_text(separator=" ")).strip())
+    return clone
+
+
+def _strip_chrome(node):
+    """Text of a region with scripts, navigation and other people's words out."""
+    return tidy_spacing(
+        re.sub(r"\s+", " ", content_soup(node).get_text(separator=" ")).strip())
 
 
 def eprint(*args):

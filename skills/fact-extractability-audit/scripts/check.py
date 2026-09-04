@@ -53,13 +53,18 @@ if _SHARED is None:
 sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
-    example_urls, has_price, language_of, load_snapshot, looks_like_soft_404,
-    name_forms, other_language_pages, pages_in_prose_language, pages_of, pct,
-    plural, prose_skip_reason, sample, sells_something, sentences, SkillResult,
-    truncate, word_count
+    example_urls, find_prices, has_price, language_of, load_snapshot,
+    looks_like_soft_404, name_forms, other_language_pages,
+    pages_in_prose_language, pages_of, pct, plural, prose_skip_reason, sample,
+    sells_something, sentence_with, sentences, SkillResult,
+    speaks_about_itself, truncate, word_count
 )
 
 SKILL = "fact-extractability-audit"
+
+# Page types whose job is to state what something costs. A figure here is the
+# site's own price; a figure anywhere else has to say whose it is.
+PRICE_BEARING_TYPES = ("pricing", "product", "category", "collection", "home", "location")
 
 # Thresholds and why they sit here.
 DEFINITION_WINDOW_WORDS = 150   # an assistant reads the top of a page first; a definition below this is rarely used
@@ -87,6 +92,21 @@ ANSWER_FIRST_TYPES = ("pricing", "faq", "product", "service", "location", "compa
 
 COPULAR_RE_TEMPLATE = r"\b{brand}\b\s+(?:is|are|was|remains)\s+(?:an?|the)?\s*(?P<rest>[^.!?]{{{minlen},400}})"
 
+# The other shape a definition comes in. A tagline set off from the name by a
+# dash, a colon or a pipe is the same sentence with the verb left out, and it
+# is how a great many sites write theirs:
+#
+#     Django - The web framework for perfectionists with deadlines.
+#
+# Read only for the copular form, that page was reported as never stating in
+# one sentence what the brand is, at medium severity, with a fix telling its
+# owners to write the sentence they had already written. The separator has to
+# be a real one - an en or em dash, a colon, a pipe, or a hyphen with spaces
+# around it - so "Marks-and-Spencer" is not read as a definition of "Marks".
+APPOSITIVE_RE_TEMPLATE = (
+    r"\b{brand}\b\s*[\u2013\u2014:|]\s*(?P<rest>[^.!?\u2013\u2014|]{{{minlen},300}})"
+    r"|\b{brand}\b\s+-\s+(?P<dashrest>[^.!?|]{{{minlen},300}})")
+
 CONCRETE_VALUE_RE = re.compile(
     r"\d"                                                    # any number
     r"|[$€£¥₹]"                                              # any currency mark
@@ -113,7 +133,7 @@ QUOTE_ON_REQUEST_RE = re.compile(
     r"|talk to sales|get a quote|poa)\b", re.I)
 COSTS_NOTHING_RE = re.compile(
     r"\b(?:free (?:and )?open[- ]source|open[- ]source(?: and)? free"
-    r"|completely free|entirely free|always free|free to (?:use|download|install)"
+    r"|completely free|entirely free|always free|(?<!feel )free to (?:use|download|install)"
     r"|no (?:cost|charge|licence fee|license fee)|free of charge"
     r"|costs? nothing|zero cost)\b", re.I)
 
@@ -126,9 +146,17 @@ TEAM_FACT_RE = re.compile(
     r"\b(?:our team|the team|founder|co-founder|chief executive|ceo|managing director|"
     r"employees|people work|staff of|headed by|led by|partners?)\b", re.I)
 
+# "across the" matched "across the board". Bare "worldwide" matched a
+# sponsor's blurb about a different company on an open-source documentation
+# site, and that one match was printed as the project's own stated service
+# area. What is left still has to be attributed - see `speaks_about_itself` at
+# the caller - because a place name on a page belongs to whoever the sentence
+# is about.
 SERVICE_AREA_RE = re.compile(
     r"\b(?:serving|we serve|available (?:in|across|throughout)|operating (?:in|across)|"
-    r"customers (?:in|across)|nationwide|worldwide|across the|based in|located in)\b", re.I)
+    r"customers (?:in|across)|based in|located in|headquartered in"
+    r"|(?:operat|serv|deliver|ship|trad)\w*\s+(?:nationwide|worldwide|internationally"
+    r"|globally))\b", re.I)
 
 STOPWORDS = frozenset("""
 a an the and or but for nor so yet of to in on at by with from as is are was were be been being
@@ -240,15 +268,16 @@ def _find_definition(text, brand_name, brand=None):
     Tried against every form the site could use for itself, longest first, so a
     match reports the most specific subject the sentence actually used.
     """
-    for form in _brand_forms(brand_name, brand or {}):
-        pattern = _brand_pattern(form)
-        if not pattern:
-            continue
-        regex = re.compile(
-            COPULAR_RE_TEMPLATE.format(brand=pattern, minlen=MIN_DEFINITION_PREDICATE), re.I)
-        match = regex.search(text)
-        if match:
-            return truncate(match.group(0), 300)
+    for template in (COPULAR_RE_TEMPLATE, APPOSITIVE_RE_TEMPLATE):
+        for form in _brand_forms(brand_name, brand or {}):
+            pattern = _brand_pattern(form)
+            if not pattern:
+                continue
+            regex = re.compile(
+                template.format(brand=pattern, minlen=MIN_DEFINITION_PREDICATE), re.I)
+            match = regex.search(text)
+            if match:
+                return truncate(match.group(0), 300)
     return None
 
 
@@ -275,15 +304,45 @@ def _check_entity_definition(result, snapshot, pages, brand_name, brand=None):
     for page in identity:
         definition = _find_definition(_top_words(page), brand_name, brand)
         if definition:
-            found = (page, definition)
+            found = (page, definition, "at the top of")
             break
+
+    # The title of this finding is "No page states in one sentence what the
+    # brand is", and it was raised about sites that state it on a page this
+    # search never looked at. Only the home and about pages are searched
+    # first, because that is where the sentence belongs and where an assistant
+    # looks; but before claiming no page has one, look at all of them, and at
+    # the whole of them rather than the opening.
+    if found is None:
+        for page in identity:
+            definition = _find_definition(page.get("body_text", ""), brand_name, brand)
+            if definition:
+                found = (page, definition, "further down")
+                break
+    if found is None:
+        for page in pages:
+            if page in identity:
+                continue
+            definition = _find_definition(_top_words(page), brand_name, brand)
+            if definition:
+                found = (page, definition, "on")
+                break
 
     result.signal("entity_definition_found", bool(found))
     if found:
-        page, definition = found
+        page, definition, where = found
         result.signal("entity_definition", definition)
+        if where == "at the top of":
+            result.skip("entity-definition",
+                        'a quotable definition is present on {}: "{}"'.format(
+                            page["url"], definition))
+            return
+        # Present, but not where it does the most good. Worth saying, and not
+        # worth a finding claiming the sentence does not exist.
         result.skip("entity-definition",
-                    'a quotable definition is present on {}: "{}"'.format(page["url"], definition))
+                    'a quotable definition exists {} {} - "{}" - though not in the opening of '
+                    'the homepage, which is the part an assistant reads first'.format(
+                        where, page["url"], definition))
         return
 
     # Distinguish "the brand is named but never defined" from "the brand is
@@ -609,6 +668,36 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
     missing = []
     found = {}
 
+    def stated(pattern, among=None):
+        """The page and the sentence on it that state this, or (None, None).
+
+        The sentence is the point. A claim that the site states something has
+        to be able to show the words, and a pattern that matches a fragment -
+        a menu label, a word in a table cell - has not found a statement.
+
+        Deciding whose fact it is was tried here and taken out again. The
+        first version required the sentence to be in the first person or to
+        name the brand, which rejected "The studio was founded in 2015 by Nell
+        Achterberg" - an ordinary founding sentence, on the about page, in the
+        third person, as most of them are. Guessing at the subject of a
+        sentence with a regular expression is the same move that produced the
+        bugs this rule exists to stop. What is left is structural: the text
+        this reads has already had the parts that are not the page's own words
+        removed - other people's quotations, blocks repeated across the site,
+        reader comments - so a testimonial's number and a sponsor's blurb are
+        not in it to be matched.
+        """
+        for page in (among if among is not None else pages):
+            sentence = sentence_with(page.get("body_text", ""), pattern)
+            if sentence is not None:
+                return page, sentence
+        return None, None
+
+    def note(url, sentence, aside=""):
+        """What the report prints for a fact it found: where, and the words."""
+        where = "{}{}".format(url, " {}".format(aside) if aside else "")
+        return '{} - "{}"'.format(where, sentence) if sentence else where
+
     # 1. Price, or an explicit statement that pricing is on request.
     #
     # "Does the site sell anything" is asked first, before "is there a currency
@@ -620,18 +709,35 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
     # difference. What the site is is knowable; what a stray figure means is
     # not.
     sells = sells_something(snapshot, pages)
-    price_page = next((p for p in pages
-                       if has_price(p.get("body_text", ""))), None) if sells else None
-    on_request = next((p for p in pages
-                       if QUOTE_ON_REQUEST_RE.search(p.get("body_text", ""))), None)
-    free_page = next((p for p in pages
-                      if COSTS_NOTHING_RE.search(p.get("body_text", ""))), None)
+    price_page = price_quote = None
+    if sells:
+        for page in pages:
+            prices = page.get("prices") or find_prices(page.get("body_text", ""))
+            if not prices:
+                continue
+            quote = sentence_with(page.get("body_text", ""),
+                                  re.compile(re.escape(prices[0])))
+            # A figure on a page whose job is prices is the site's price. A
+            # figure anywhere else has to say whose it is. A project-tracking
+            # company's report recorded "pricing on /asks" - where the only
+            # figure on the page is a customer saying "We save close to
+            # $30,000 per year" - and that reading suppressed the finding,
+            # while the real per-seat prices sat unexamined on /pricing.
+            if page.get("page_type") in PRICE_BEARING_TYPES:
+                price_page, price_quote = page, quote
+                break
+            if quote and speaks_about_itself(quote, brand_name):
+                price_page, price_quote = page, quote
+                break
+    free_page, free_quote = stated(COSTS_NOTHING_RE)
+    request_page, request_quote = stated(QUOTE_ON_REQUEST_RE)
     if price_page:
-        found["pricing"] = price_page["url"]
+        found["pricing"] = note(price_page["url"], price_quote)
     elif free_page:
-        found["pricing"] = "{} (states that it costs nothing)".format(free_page["url"])
-    elif on_request:
-        found["pricing"] = "{} (states pricing is on request)".format(on_request["url"])
+        found["pricing"] = note(free_page["url"], free_quote, "(states that it costs nothing)")
+    elif request_page:
+        found["pricing"] = note(request_page["url"], request_quote,
+                                "(states pricing is on request)")
     elif not sells:
         # "This site never states its pricing" is only a defect if the site has
         # a price. A medical charity was told it, and handed a fix reading
@@ -650,14 +756,16 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
     address_page = next((p for p in pages if (p.get("contact_facts") or {}).get("has_address")), None)
     # Also an English pattern ("serving", "based in", "available across"), so
     # it only speaks where it can read the language.
-    area_page = next((p for p in pages
-                      if SERVICE_AREA_RE.search(p.get("body_text", ""))), None) if english else None
+    area_page, area_quote = stated(SERVICE_AREA_RE) if english else (None, None)
     local_signals = bool(by_type.get("location")) or any(
         "localbusiness" in {t.lower() for t in p.get("jsonld_types") or []} for p in pages)
     if address_page:
-        found["location"] = address_page["url"]
+        facts = address_page.get("contact_facts") or {}
+        found["location"] = note(address_page["url"], truncate(
+            " ".join(part for part in (facts.get("street_hint"),
+                                       facts.get("postcode_hint")) if part), 160))
     elif area_page:
-        found["service area"] = area_page["url"]
+        found["service area"] = note(area_page["url"], area_quote)
     elif not english:
         found["location"] = ("not checked - no postal address was found, and the pattern for "
                              "a stated service area is English while this site is not")
@@ -672,7 +780,11 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
                          or (p.get("contact_facts") or {}).get("has_phone")), None)
     form_page = next((p for p in pages if (p.get("contact_facts") or {}).get("has_contact_form")), None)
     if contact_page:
-        found["contact"] = contact_page["url"]
+        facts = contact_page.get("contact_facts") or {}
+        # The address or the number itself, not a sentence: a contact detail
+        # is usually printed on its own line and has no sentence to sit in.
+        detail = next(iter((facts.get("emails") or []) + (facts.get("phones") or [])), "")
+        found["contact"] = note(contact_page["url"], truncate(detail, 80))
     elif form_page:
         found["contact"] = "{} (form only, no email or phone in text)".format(form_page["url"])
     else:
@@ -692,19 +804,17 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
     #
     #    Everything else in this check is structural - a price is a number, a
     #    telephone is a `tel:` link - so only this pair is language-gated.
-    fact_page = team_page = None
+    fact_page = fact_quote = team_page = team_quote = None
     if english:
-        fact_page = next((p for p in pages
-                          if FOUNDING_FACT_RE.search(p.get("body_text", ""))), None)
-        team_page = next((p for p in pages
-                          if TEAM_FACT_RE.search(p.get("body_text", ""))), None)
+        fact_page, fact_quote = stated(FOUNDING_FACT_RE)
+        team_page, team_quote = stated(TEAM_FACT_RE)
     if not english:
         found["founding facts"] = ("not checked - the patterns for a founding year and a "
                                    "named team are English, and this site is not in English")
     elif fact_page:
-        found["founding facts"] = fact_page["url"]
+        found["founding facts"] = note(fact_page["url"], fact_quote)
     elif team_page:
-        found["team facts"] = team_page["url"]
+        found["team facts"] = note(team_page["url"], team_quote)
     else:
         missing.append(("founding or team facts", "medium",
                         "no founding year and no named team or leadership detail appears in "
@@ -715,8 +825,9 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
 
     if not missing:
         result.skip("core-facts-present",
-                    "all four core facts are stated in plain text: {}".format(
-                        "; ".join("{} on {}".format(k, v) for k, v in sorted(found.items()))))
+                    "all four core facts are stated in plain text. {}".format(
+                        " ".join("{}: {}.".format(k.capitalize(), v)
+                                 for k, v in sorted(found.items()))))
         return
 
     for name, severity, why in missing:

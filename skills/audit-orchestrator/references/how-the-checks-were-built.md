@@ -195,6 +195,7 @@ round's fixes were not derived from. Continuing it:
 | 4 | 8 | 77 | 40% |
 | 5 | 10 | 135 | **20%** |
 | 6 | 4 | 42 | **18%** |
+| 7 | 8 | 84 | 43% |
 
 Round 5 covered a city government, a university department, a German manufacturer, a bilingual
 broadcaster, a national newspaper, a public radio programme, a developer-tools company, an
@@ -289,6 +290,79 @@ which excludes it from the passed list without putting it anywhere else. On one 
 seventy-one checks that ran appeared nowhere in the report at all, and among them was whether
 robots.txt blocks AI crawlers. The README promises every quiet check says why; those said
 nothing. Groups are now keyed by the function that registered them.
+
+### Two more rules the seventh round forced
+
+Round 7 ran the shipped zip against eight sites no earlier round had touched: an online
+retailer, an art museum, a Japanese-language postal group, a global law firm, a developer-tools
+company, a personal blog, a hospital group and a software documentation site. Eighty-four
+numbered findings, forty-eight true, thirty-six wrong or misleading. That is 43%, against 20%
+and 18% in the two rounds before it, and it is the honest number: rounds 5 and 6 measured
+easier shapes, and the same code scores 43% on shapes it had not met. Every class below was
+found on more than one of the eight.
+
+**7. A claim that something is present carries the words that make it present.** The check
+that asks whether a site states its prices, its contact routes and its service area passed on
+five of the eight sites by coincidence of vocabulary. "Feel free to call" contains "free" and
+was read as a stated price. A navigation label reading "Practice areas" was read as a stated
+service area. Each false pass is worse than a false finding, because a check that passes says
+nothing and so suppresses the true finding underneath it - three of those five sites do not in
+fact state a price anywhere, and the report said they did.
+
+No pattern list fixes this; the next site coins a different coincidence. So the shape changed:
+every fact the code records as found now stores the sentence that states it, and the line that
+reports the check as quiet prints those sentences. A check that cannot quote itself cannot
+pass. The same rule made the definition search readable - it now shows which sentence it
+believes defines the brand, and the quote table shows the sentence rather than a claim about
+one. Two helpers in `audit_common.py` hold it: `sentence_with`, which returns the sentence a
+match sits in, and the 15-to-220-character bounds that decide whether a sentence is worth
+printing as evidence.
+
+**8. A sentence that says nothing was found may only describe what was looked at.** A global
+law firm's report said "No Organization or LocalBusiness markup anywhere on the site" and "too
+few pages carry an address to treat this as a business with separate places to visit". The
+crawl read 60 pages. The firm's own sitemap lists 2,692 lawyer profiles, and its site lists 31
+offices in 26 countries, none of which the crawl reached. Both sentences were true of the
+sample and false of the site. Rule 2 sizes a finding against the pages this audit read; this
+sizes those pages against the site, which is the number a reader assumes when a sentence says
+"anywhere on the site". `state_the_coverage` in `compose_report.py` appends both numbers to
+any finding whose wording claims the whole site, when the sitemap is at least twice the crawl.
+
+Three more sentences were the same shape. A skip line said dates were not expected on pages
+whose type the classifier had failed to work out, which is a statement about our classifier
+printed as a statement about the site; a page with real prose is now content whatever its
+type. A refusal cause - always Critical, always "do first" - was asserted from the status code
+alone, so a bot manager and an address block produced the same first move; the audit now sends
+one further request that separates them, and names which of the two it tested. And the
+appendix header promised to show its arithmetic; it now prints it.
+
+**Text that is not the page's own words was read as the page's own.** Five of the eight. A
+blog's comment thread, a retailer's review list and a testimonial carousel were counted as the
+page's prose, which moved the sentence-length numbers, the definition search and the quote
+table. `without_other_peoples_words` removes visitor-contributed regions and keeps chrome - a
+footer telephone number is the site's own - and `content_soup` drops them only if 300
+characters of the page's own words remain, so a page that is mostly its comment thread is not
+emptied into an empty-page finding.
+
+**Measurement that assumed English.** A Japanese postal group's contact page carries its
+address in the order prefecture, ward, block, with no word meaning "street" to match on, and
+its articles date themselves in kanji as year, month, day; the report said the site stated no
+address and carried no dates. An Arabic news page has no capital letter to mark where the next
+sentence starts, so the splitter returned the whole page as one sentence and the readability
+numbers were nonsense. Japanese and Chinese put no spaces between words, so a word count was a
+count of lines. `audit_common.py` now decides what to measure from the script the page is
+written in: `dominant_script`, `words_are_separated`, and a sentence splitter with a branch
+each for Latin, CJK and Indic-or-Arabic terminators.
+
+Smaller items from the same round, each fixed where it belongs: sitemap totals now say "at
+least N" when an index names more sub-sitemaps than the audit read; an image whose alt text is
+bound by a template is not an image missing alt text; a heading that is a logo image is a
+heading, and its alt text is what it says; the `SearchAction` snippet reads the target and
+field name from the page's own search form instead of guessing; and a challenge page is
+recognised from the mitigation headers a vendor sets, not only from a phrase list.
+`tests/test_round_seven.py` pins all of it - 35 cases, including one that fails the build if
+any source file holds a control character, after a shell heredoc silently turned two regular
+expressions' word-boundary escape into a backspace byte.
 
 **We held out three samples and wrote the prediction down first.** The 36 study sites are
 training data: every threshold moved after looking at them. So we drew fresh samples in
