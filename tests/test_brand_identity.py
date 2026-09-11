@@ -25,17 +25,12 @@ def _page(url, title="", jsonld=(), og=None, page_type="home"):
 # A tight colon is ordinary punctuation
 # --------------------------------------------------------------------------
 
-def test_a_title_split_on_a_tight_colon():
-    """"Brand: Tagline" is a brand and a tagline, not a 47-character name."""
+def test_a_title_splits_on_a_separator_and_not_on_punctuation():
+    """"Brand: Tagline" is a brand and a tagline, not a 47-character name - but
+    a clock time and a hyphenated word are one part, not two."""
     assert TITLE_SEPARATOR.split("Zingerman's: Online Shopping for Food and Gifts") == [
         "Zingerman's", "Online Shopping for Food and Gifts"]
-
-
-def test_a_clock_time_is_not_a_separator():
     assert TITLE_SEPARATOR.split("Open 9:00 to 5:00") == ["Open 9:00 to 5:00"]
-
-
-def test_a_tight_hyphen_belongs_to_the_word():
     assert TITLE_SEPARATOR.split("e-commerce for all") == ["e-commerce for all"]
 
 
@@ -53,16 +48,12 @@ def test_the_apostrophe_survives_into_the_brand_name():
 # --------------------------------------------------------------------------
 
 def test_the_domain_spelling_defers_to_the_page_spelling():
+    """A domain cannot carry an apostrophe and the homepage can. But three
+    letters match too much to be worth trusting, and a page with no mention of
+    the domain stem cannot spell it at all."""
     assert _site_spelling("zingermans", {"title": "Zingerman's Mail Order"}) == "Zingerman's"
     assert _site_spelling("levis", {"title": "Levi's"}) == "Levi's"
-
-
-def test_an_unrelated_page_yields_no_spelling():
     assert _site_spelling("acme", {"title": "Totally Unrelated Words Here"}) is None
-
-
-def test_a_short_token_is_not_matched():
-    """Three letters match too much to be worth trusting."""
     assert _site_spelling("abc", {"title": "A B C"}) is None
 
 
@@ -127,25 +118,12 @@ def test_declarations_record_the_pages_they_came_from():
 # The shorter end of a title is not always the name
 # --------------------------------------------------------------------------
 
-def test_home_is_not_the_brand():
+def test_a_boilerplate_half_is_not_the_brand():
     """"Brand | Home" split shortest-first made the brand "Home"."""
-    brand = detect_brand(
-        [_page("https://example.test/", "Example Relief | Home")], "https://example.test")
-    assert brand["name"] == "Example Relief"
-
-
-def test_official_site_is_not_the_brand():
-    brand = detect_brand(
-        [_page("https://example.test/", "Example Relief | Official Site")],
-        "https://example.test")
-    assert brand["name"] == "Example Relief"
-
-
-def test_the_shorter_end_still_wins_between_two_real_halves():
-    brand = detect_brand(
-        [_page("https://example.test/", "Acme | Wheel-thrown stoneware from York")],
-        "https://example.test")
-    assert brand["name"] == "Acme"
+    for title in ("Example Relief | Home", "Example Relief | Official Site"):
+        brand = detect_brand([_page("https://example.test/", title)],
+                             "https://example.test")
+        assert brand["name"] == "Example Relief", title
 
 
 # --------------------------------------------------------------------------
@@ -166,11 +144,6 @@ def test_a_national_suffix_is_not_the_brand():
     """
     brand = detect_brand([_og("Example Without Borders - USA")], "https://example.test")
     assert brand["name"] == "Example Without Borders"
-
-
-def test_a_regional_suffix_is_not_the_brand():
-    brand = detect_brand([_og("Example Software | EMEA")], "https://example.test")
-    assert brand["name"] == "Example Software"
 
 
 def test_a_home_word_in_another_language_is_not_the_brand():
@@ -195,3 +168,41 @@ def test_the_shorter_half_still_wins_when_both_halves_are_real():
     brand = detect_brand([_og("Acme | Wheel-thrown stoneware from York")],
                          "https://example.test")
     assert brand["name"] == "Acme"
+
+
+# --------------------------------------------------------------------------
+# The forms of the name the checks are allowed to search for
+#
+# A brand written with "The" was unsatisfiable. Two sites, both at high
+# confidence, were told "no page states in one sentence what the brand is" -
+# one whose H1 is "The Coppergate Studio is a retreat for curious programmers",
+# the other whose about page opens "Northwind Figures (NWF) is a free,
+# non-profit website".
+# --------------------------------------------------------------------------
+
+from audit_common import comparison_key, name_forms  # noqa: E402
+
+
+def test_a_leading_article_is_stripped_and_a_middle_one_is_not():
+    assert "Coppergate Studio" in name_forms("The Coppergate Studio")
+    assert all(not f.startswith("Bank of West") for f in name_forms("Bank of The West"))
+
+
+def test_the_head_form_is_derived_only_when_it_spells_the_domain():
+    """A restaurant group declares three words and writes one. The check
+    searched for the full legal name, which appears nowhere on that site and
+    nowhere on the web. Without the domain to justify it, though, "Indian
+    Restaurants" would become a name the brand goes by."""
+    assert "Walmgate" in name_forms("Walmgate Indian Restaurants", domain_token="walmgate")
+    assert "Walmgate" not in name_forms("Walmgate Indian Restaurants")
+
+
+def test_a_name_never_reduces_to_nothing():
+    """`[^a-z0-9]` is the empty string for every name written in Hangul, and an
+    empty key equals every other empty key - so the filter that keeps only
+    exact Wikidata name matches kept all of them, and a museum was told three
+    organisations share a name that nothing shares."""
+    korean = u"국립중앙박물관"
+    assert comparison_key(korean), "a Hangul name reduced to the empty string"
+    assert comparison_key(korean) != comparison_key(u"서울시립미술관")
+    assert comparison_key("Roca Baños, S.A.") == comparison_key("roca baños sa")

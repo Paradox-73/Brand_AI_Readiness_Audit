@@ -6,6 +6,15 @@ requests~=2.32
 beautifulsoup4~=4.12
 lxml~=5.3
 
+# Brotli. Not optional, despite looking it: a great many edge providers answer
+# `Content-Encoding: br` whether or not the client advertises it, and
+# `requests` cannot decode that without this package. Without it the response
+# body is compressed bytes, which every check downstream reads as a page with
+# no title, no links and no text - so an audit of one large company's site
+# published fourteen findings about a document it had never decoded, and its
+# verdict line said a machine can read the site.
+brotli~=1.1
+
 # Optional. Install to enable the rendered-DOM comparison in
 # render-readability-audit (`run_audit.py --render`). Its absence is detected
 # and reported as an audit-environment limitation, never as a site defect.

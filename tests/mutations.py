@@ -18,8 +18,8 @@ and the test asserts two things:
 The second assertion is the one that matters. A check whose finding appears
 only when its own cause is introduced is measuring that cause. A check that
 lights up whenever the page changes shape is measuring something else, and
-`also` below is where that gets admitted in writing rather than discovered on
-a judge's laptop.
+`also` below is where that gets admitted in writing rather than discovered in
+a real run.
 
 Anything listed in `also` is a knock-on we have looked at and accepted - real
 consequences of the same edit, not tolerated noise. Keep those lists short. A
@@ -299,17 +299,47 @@ mutation(
 # --- Gate C: is there a sentence worth quoting -----------------------------
 
 mutation(
-    "the homepage never says what the company is",
+    "the site never says what the company is, in prose or in markup",
     expect={"no-entity-definition"},
+    # Giving every page the same meta description really does make them
+    # duplicates, and that is a different defect with a different fix. The
+    # edit causes it; the check is right to say so.
+    also={"meta-hygiene"},
     # Every copular sentence about the brand has to go, under any name the site
     # uses for itself - not just the one on the homepage. The fixture also says
     # "Brightpath is built for retail operations teams at ...", which is a
     # perfectly good definition and the check is right to accept it.
-    apply=lambda site: edit_all(
-        site,
-        swap(r"<p>\s*(?:Brightpath(?: Analytics)?) (?:is|are|was|were) [^<]*</p>",
-             "<p>We believe the future belongs to those who move first. They "
-             "know it. It is why they choose us, and why they stay.</p>")),
+    #
+    # And the declared ones too. The check reads the Organization and WebSite
+    # `description` and the meta description as independent statements of what
+    # the brand is, because they are: a site whose markup carries a clean
+    # one-sentence description has said what it is to every machine that
+    # matters, and telling that owner "no page states in one sentence what the
+    # brand is" while a snippet three findings below quotes that very sentence
+    # is the contradiction this mutation used to lock in. Removing the prose
+    # alone no longer makes the site silent, so this mutation removes both.
+    apply=lambda site: (
+        edit_all(
+            site,
+            swap(r"<p>\s*(?:Brightpath(?: Analytics)?) (?:is|are|was|were) [^<]*</p>",
+                 "<p>We believe the future belongs to those who move first. They "
+                 "know it. It is why they choose us, and why they stay.</p>")),
+        edit_all(site, swap(r'"description"\s*:\s*"[^"]*"',
+                            '"description": "Moving first, together."')),
+        edit_all(site, swap(r'<meta name="description" content="[^"]*"',
+                            '<meta name="description" content="Moving first, together."')),
+    ),
+)
+
+mutation(
+    "the price is in the markup but not in the copy",
+    # No finding. An Offer whose price a machine can read is a price the site
+    # states, whatever the visible copy does, and "the site never states its
+    # pricing in plain text" would be false of it. This case exists to hold
+    # that line: the pricing check reads declared prices as a second source,
+    # and a mutation asserting the opposite would quietly undo it.
+    expect=set(),
+    apply=lambda site: edit_all(site, swap(r"\$[\d,]+", "market rate")),
 )
 
 mutation(
@@ -324,9 +354,23 @@ mutation(
 )
 
 mutation(
-    "no page states a price in plain text",
+    "no page states a price, in the copy or in the markup",
     expect={"missing-core-fact"},
-    apply=lambda site: edit_all(site, swap(r"\$[\d,]+", "market rate")),
+    # An Offer whose `price` reads "on request" is an Offer missing a usable
+    # price, which is a real markup defect and not this mutation's subject.
+    # The edit causes it honestly.
+    also={"missing-schema-props"},
+    # Both, for the same reason as the definition mutation above. A price
+    # declared in an Offer is a price an assistant can quote, so removing it
+    # from the visible copy alone leaves the site stating its pricing.
+    apply=lambda site: (
+        edit_all(site, swap(r"\$[\d,]+", "market rate")),
+        # Emptied, not reworded. `"price": "on request"` is a site stating its
+        # pricing policy, which the check reads as an answer - correctly - so
+        # the mutation was leaving the fact it claims to remove.
+        edit_all(site, swap(r'"(price|lowPrice|highPrice)"\s*:\s*"?[\d.]+"?',
+                            '"' + chr(92) + '1": ""')),
+    ),
 )
 
 mutation(
@@ -421,6 +465,26 @@ mutation(
 )
 
 mutation(
+    "the homepage delivers no link to any other page of the site",
+    expect={"unreachable-from-homepage"},
+    # A storefront was audited whose delivered homepage carries two hrefs,
+    # both to a font host, and one `href=""`. This is that site staged: every
+    # anchor on the front page becomes the text it wrapped, and every other
+    # page keeps its links, so what changes is only what a machine entering at
+    # the front door can reach.
+    #
+    # The `also` list is long because the edit really does cause all three:
+    # a homepage with no anchors has no menu, no call to action and no share
+    # of the chrome the rest of the site carries. They are three different
+    # findings with three different fixes, which is the point of the split -
+    # none of them says that the rest of the site cannot be discovered.
+    also={"no-orientation", "inconsistent-chrome", "orphan-pages"},
+    apply=lambda site: edit(
+        site, "index.html",
+        lambda text: re.sub(r"<a\s[^>]*>(.*?)</a>", r"\1", text, flags=re.S | re.I)),
+)
+
+mutation(
     "in-body links point at pages that do not exist",
     expect={"broken-links"},
     apply=lambda site: edit_all(
@@ -482,7 +546,14 @@ mutation(
 mutation(
     "images carry no alt text",
     expect={"alt-missing"},
-    apply=lambda site: edit_all(site, drop(r' alt="[^"]*"')),
+    # The captions go too. An image inside a `<figure>` whose `<figcaption>`
+    # describes it is described, which is why the check counts undescribed
+    # images rather than missing attributes - so stripping only the attribute
+    # from a site that captions everything changes nothing the check reads.
+    apply=lambda site: edit_all(
+        site,
+        lambda text: drop(r"<figcaption>.*?</figcaption>")(
+            drop(r' alt="[^"]*"')(text))),
 )
 
 
@@ -532,6 +603,58 @@ mutation(
     apply=lambda site: edit_all(
         site, swap(r'"name": "Brightpath Analytics"', '"name": "Northwind Freight Systems"')),
 )
+
+mutation(
+    # The shape seen in the wild: a store-locator page whose entire visible
+    # content is the shortcode that was supposed to render the map. This family
+    # turned up on three unrelated sites - `[wpsl]`, `{{getCtrlKey()}}`,
+    # `#native_company#` - and nothing in the marketplace looked for it. Before
+    # the check existed the report said "1 page carries too little text to be
+    # quoted", which is true and useless: the fix is the plugin named inside
+    # the brackets, not more copy.
+    #
+    # `exclusive=False` because a page reduced to a shortcode is genuinely also
+    # short; the point of the check is that the short page has a cause worth
+    # naming, and `thin-html` sets it aside for that reason.
+    "a page prints the shortcode that was supposed to render it",
+    expect={"unrendered-template-artefact"},
+    exclusive=False,
+    # The whole body, not just `<main>`. Replacing the main region alone left
+    # the page's heading and standfirst outside it, so `[wpsl]` was 6 of 79
+    # characters - 7.6%, under the check's measured 10% floor. The real page
+    # was 6 of 34 because a broken plugin takes the page's content with it, and
+    # this has to reproduce that rather than a page with a shortcode in it.
+    apply=lambda site: edit(
+        site, "contact.html",
+        lambda text: re.sub(r"<body>.*?</body>",
+                            "<body><main><h1>Store locator</h1>"
+                            "<p>[wpsl]</p></main></body>",
+                            text, flags=re.S)),
+)
+
+
+mutation(
+    # The template ran its HTML-escape filter over a value that was already
+    # escaped, so `&amp;` reaches the parsed attribute as five characters a
+    # search result prints at a reader. The marketplace reported this fault
+    # inside `<script>`, where a character reference is a parse-level problem,
+    # and nowhere else - while the same filter puts it in the `<title>` and the
+    # meta description of every page the template renders. One site carried
+    # both halves and the report named only one of them.
+    #
+    # `exclusive=False` because a description carrying `&amp;` is also a
+    # description, so the hygiene counts are unaffected and other causes on the
+    # site still fire.
+    "the page template escapes its meta values twice",
+    expect={"template-escapes-values-twice"},
+    exclusive=False,
+    apply=lambda site: edit_all(
+        site,
+        swap(r'<meta name="description" content="([^"]*)"',
+             r'<meta name="description" content="Forecasting &amp;amp; '
+             r'replenishment &amp;#39;done right&amp;#39;. \1"')),
+)
+
 
 mutation(
     "content pages keep their shape but lose their words",
@@ -632,8 +755,13 @@ mutation(
 mutation(
     "the facts are marked up as microdata rather than JSON-LD",
     expect={"microdata-only"},
+    # `missing-schema-props` is the right answer here, not a knock-on to be
+    # tolerated: the Organization this edit writes in Microdata carries a name
+    # and nothing else, and the property grader reads Microdata now, so it says
+    # so. Before it did, the same edit produced `no-org-schema` - the site was
+    # told it publishes no Organization markup while publishing one.
     also={"no-org-schema", "no-article-schema", "no-breadcrumb-markup", "no-faq-schema",
-          "no-website-schema", "no-product-schema"},
+          "no-website-schema", "no-product-schema", "missing-schema-props"},
     apply=lambda site: (
         edit_all(site, drop(r'<script type="application/ld\+json">.*?</script>')),
         edit_all(site, swap(
@@ -709,7 +837,7 @@ mutation(
              "free and open source, with no licence fee")),
 )
 
-# --- Round 5: the two new checks ------------------------------------------
+# --- The two branch-page checks --------------------------------------------
 
 BRANCHES = (
     ("walmgate", "41 Walmgate, York YO1 9TT", "York"),

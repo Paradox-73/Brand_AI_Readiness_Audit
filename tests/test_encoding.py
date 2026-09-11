@@ -4,10 +4,15 @@
 is ISO-8859-1. Almost no site means that. Most declare UTF-8 in a `<meta>` tag
 and say nothing in the header, so `response.text` silently produced mojibake -
 and a Spanish retailer's own name arrived in the report with a replacement
-character in the middle of it, in the evidence line a judge would read.
+character in the middle of it, in the evidence line a reader would check.
 
 Nothing failed. Every fixture was ASCII, so no test could have noticed. These
 serve the same bytes the real site did.
+
+The last test is the same class of silent corruption, one layer up, in this
+repository's own files: `\\b` written into a patch through a shell heredoc
+arrived as a backspace byte, and the two regular expressions holding it matched
+nothing from then on. A corrupted pattern looks exactly like a working one.
 """
 
 from __future__ import annotations
@@ -96,3 +101,91 @@ def test_no_replacement_characters_anywhere_in_the_snapshot(tmp_path):
     snapshot = _crawl(tmp_path, omit_charset=True)
     blob = json.dumps(snapshot, ensure_ascii=False)
     assert "�" not in blob, "a replacement character reached the snapshot"
+
+
+# --------------------------------------------------------------------------
+# The escape that was not an escape
+# --------------------------------------------------------------------------
+
+def test_no_source_file_contains_a_control_character():
+    """`\\b` written into a patch through a shell heredoc arrived as a
+    backspace, and two regular expressions in this repo silently matched
+    nothing for it. A corrupted pattern looks exactly like a working one.
+    """
+    import io
+    from conftest import ROOT
+    offenders = []
+    for base in ("skills", "tests"):
+        for directory, _, files in os.walk(os.path.join(ROOT, base)):
+            if "__pycache__" in directory:
+                continue
+            for filename in files:
+                if not filename.endswith((".py", ".md", ".json")):
+                    continue
+                path = os.path.join(directory, filename)
+                with io.open(path, encoding="utf-8", errors="ignore") as handle:
+                    text = handle.read()
+                for index, char in enumerate(text):
+                    if ord(char) < 32 and char not in "\n\r\t":
+                        offenders.append("{}: U+{:04X} at offset {}".format(
+                            os.path.relpath(path, ROOT), ord(char), index))
+                        break
+    assert not offenders, "control characters in source:\n" + "\n".join(offenders)
+
+
+# --------------------------------------------------------------------------
+# A percent-encoded address must reach the reader as the address
+# --------------------------------------------------------------------------
+
+def test_a_percent_encoded_url_is_not_eaten_by_the_render():
+    """A Japanese URL copied out of the evidence returned a 404.
+
+    `%83` had been replaced by the literal text `5 of 6` - a percent-style
+    format applied to a string carrying an address, where `%8` is a width
+    specifier. `affected_pages` in the JSON was clean, so only the rendered
+    document was wrong and nothing that read the JSON could see it. This holds
+    the whole render boundary rather than the one call site, because the call
+    site was found by reading and a second one would be found the same way.
+    """
+    import re
+    import sys
+    sys.path.insert(0, SCRIPTS)
+    from compose_report import decode_character_references, decode_rendered_markdown
+
+    url = ("https://shiryo.example.jp/"
+           "%E3%82%A2%E3%83%BC%E3%82%AB%E3%82%A4%E3%83%96/%E5%B9%B4%E5%A0%B1.html")
+    assert decode_character_references(url) == url
+    rendered = decode_rendered_markdown(
+        "Example: {} was read.\n\n`{}`\n".format(url, url))
+    assert url in rendered, "the address did not survive the render"
+    assert rendered.count(url) == 2, "one of the two copies was altered"
+    assert re.search(r"%[0-9A-Fa-f]{2}", rendered), (
+        "the percent escapes were resolved, so the printed address is not the "
+        "address that was fetched")
+
+
+def test_no_report_prose_is_built_by_percent_formatting():
+    """The mechanism, not the symptom. `"...%s..." % value` on a string that
+    may carry a URL is the fault; `.format` cannot produce it.
+    """
+    import io
+    from conftest import ROOT
+    offenders = []
+    scripts = sorted(
+        os.path.join(directory, name)
+        for directory, _, files in os.walk(os.path.join(ROOT, "skills"))
+        for name in files
+        if name.endswith(".py") and "__pycache__" not in directory)
+    assert scripts, "no skill scripts were read"
+    for path in scripts:
+        name = os.path.relpath(path, ROOT)
+        for number, line in enumerate(
+                io.open(path, encoding="utf-8").read().splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if '" % ' in stripped or "' % " in stripped:
+                offenders.append("{}:{}: {}".format(name, number, stripped[:100]))
+    assert not offenders, (
+        "percent-formatting on a literal, which eats a percent-encoded URL:\n"
+        + "\n".join(offenders))

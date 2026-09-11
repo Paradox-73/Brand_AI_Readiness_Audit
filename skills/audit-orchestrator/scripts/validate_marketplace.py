@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate marketplace.json and every SKILL.md against the contest rules.
 
-Checks, in the order a judge would apply them:
+Checks, in the order a reviewer would apply them:
   1. marketplace.json parses and has name, version and a non-empty skills list
   2. every declared path exists, is inside the marketplace root, and holds a SKILL.md
   3. exactly one skill is marked entrypoint
@@ -22,7 +22,6 @@ import argparse
 import json
 import os
 import re
-import sys
 
 # Constraints taken from the Agent Skills specification at
 # https://agentskills.io/specification (checked before this file was written):

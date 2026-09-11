@@ -103,15 +103,10 @@ def hostile_server():
 # The size cap
 # --------------------------------------------------------------------------
 
-def test_a_huge_response_is_read_only_up_to_the_cap(hostile_server):
-    url = hostile_server("huge")
-    response = Fetcher(delay=0).get(url)
+def test_a_huge_response_is_read_only_up_to_the_cap_and_says_it_was_cut(hostile_server):
+    response = Fetcher(delay=0).get(hostile_server("huge"))
     assert len(response.content) == MAX_RESPONSE_BYTES
-
-
-def test_a_truncated_response_says_it_was_truncated(hostile_server):
-    url = hostile_server("huge")
-    assert Fetcher(delay=0).get(url).truncated is True
+    assert response.truncated is True
 
 
 def test_an_ordinary_response_is_not_marked_truncated():

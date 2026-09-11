@@ -443,7 +443,7 @@ to fire on all four, because the copular pattern is English-only, and
 be to detect the page language and decline the prose checks with a reason. We do
 not do that today. If the prediction holds, that is a limitation to document and
 fix, not a threshold to tune — and it is the most likely thing on this list to
-be quietly wrong in front of a judge auditing a non-English brand.
+be quietly wrong in front of a reader auditing a non-English brand.
 
 **A named failure signal:** if any check fires on more than 70% of the whole
 sample, or if the four non-English sites average more than double the findings

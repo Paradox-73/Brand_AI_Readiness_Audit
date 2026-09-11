@@ -7,8 +7,7 @@ probe, sitemap HEADs, internal link checks) and must be able to reach them.
 
 Sub-skills are invoked as subprocesses rather than imported. That is slower,
 but it exercises the same command-line contract the orchestrator uses, so a
-broken argument or a non-zero exit shows up here rather than in front of a
-judge.
+broken argument or a non-zero exit shows up here rather than in a real run.
 """
 
 from __future__ import annotations
@@ -31,15 +30,12 @@ sys.path.insert(0, SCRIPTS)
 
 from fixture_server import FixtureServer  # noqa: E402
 
-# Sub-skill order matters: it is the dedup precedence the orchestrator relies on.
-SUB_SKILLS = [
-    "crawl-access-audit",
-    "render-readability-audit",
-    "structured-data-audit",
-    "fact-extractability-audit",
-    "freshness-corroboration-audit",
-    "engagement-audit",
-]
+# Sub-skill order matters: it is the dedup precedence the orchestrator relies
+# on. Read from the code rather than repeated here, so a test cannot pass
+# against a list the marketplace no longer uses.
+from audit_common import SUB_SKILLS as _SUB_SKILLS  # noqa: E402
+
+SUB_SKILLS = list(_SUB_SKILLS)
 
 # Fixed reference date. Without it, "older than 18 months" would quietly change
 # meaning as the calendar moves and the suite would start failing on its own.
@@ -88,19 +84,27 @@ class AuditResult:
         return [f for f in self.report["findings"] if f["root_cause"] == root_cause]
 
 
-def _audit(name, out_dir, no_network=False, site_dir=None):
+def _audit(name, out_dir, no_network=False, site_dir=None, render=True):
     """Serve, crawl and audit one site directory. Returns (server, AuditResult).
 
     `site_dir` defaults to the named fixture. The mutation suite passes a
     throwaway copy instead, so it can break one property at a time without
     touching the fixtures the rest of the suite depends on.
+
+    `render=False` skips the browser pass. It costs ten seconds per audit and
+    there are forty-nine mutation cases, which is eight minutes of a browser
+    re-reading static fixture files and changing nothing about them. The
+    browser path has its own tests in `test_render.py`, which drive it against
+    the one fixture where JavaScript actually supplies the text.
     """
     server = FixtureServer(site_dir or os.path.join(FIXTURES, name)).__enter__()
     try:
         snapshot_path = os.path.join(out_dir, "snapshot.json")
-        run_script([os.path.join(SCRIPTS, "crawl.py"), server.base_url,
-                    "--out", snapshot_path, "--budget", "60", "--delay", "0"],
-                   "crawl.py [{}]".format(name))
+        crawl_command = [os.path.join(SCRIPTS, "crawl.py"), server.base_url,
+                         "--out", snapshot_path, "--budget", "60", "--delay", "0"]
+        if not render:
+            crawl_command.append("--no-render")
+        run_script(crawl_command, "crawl.py [{}]".format(name))
 
         findings_paths, findings = [], {}
         for skill in SUB_SKILLS:
@@ -147,8 +151,12 @@ def _audit(name, out_dir, no_network=False, site_dir=None):
         with open(report_md, encoding="utf-8") as handle:
             markdown = handle.read()
 
-        return server, AuditResult(name, server.base_url, out_dir, snapshot,
-                                   findings, report, markdown)
+        result = AuditResult(name, server.base_url, out_dir, snapshot,
+                             findings, report, markdown)
+        # The server logs every request it answered, so a test can assert what
+        # the crawler actually sent rather than what it is meant to send.
+        result.server = server
+        return server, result
     except Exception:
         server.__exit__(None, None, None)
         raise

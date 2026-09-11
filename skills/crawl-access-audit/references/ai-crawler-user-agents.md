@@ -91,7 +91,7 @@ cited.
 
 That advice would have reopened a site to training collection its owner had deliberately
 opted out of, to fix a citation problem that did not exist. It is the most damaging thing
-this audit has been caught saying.
+this audit has ever said about a real site.
 
 Three things changed, and none of them is "the list was corrected":
 
@@ -123,6 +123,25 @@ Agent matching follows the Robots Exclusion Protocol as the major crawlers imple
   equal length.
 - **`*` wildcards and `$` end-anchors are supported** in path patterns.
 
+Two questions are asked of every agent in the tables above, not one:
+
+- **Is the agent disallowed from `/`?** The whole site, shut.
+- **Does a group *naming* the agent close a section that no `User-agent: *` rule closes?**
+  A named group is not an overlay on `*` — it replaces it — so a rule written inside one is
+  a rule no check that reads the `*` group can see. A robots.txt whose single group named
+  eleven of the agents above and carried `Disallow: /store/` was reported clean by the first
+  question and excused by the check that reads the `*` group, on a shop where that path
+  holds every product and every price. Section blocks are reported by role like everything
+  else here: the answer and search agents are the defect, the training crawlers and opt-out
+  tokens are `info` and get their own finding, and the remedy splits the one group in two so
+  a deliberate training opt-out survives the fix.
+
+A section block is priced rather than merely named. The finding says how many of the pages
+the crawl already fetched sit behind the rule, because "`/store/` is disallowed" does not
+tell an owner whether that is three pages or the catalogue. At least two of them and at least
+a tenth of the crawl is high; fewer is medium; a path the crawl never reached is medium at
+medium confidence, and says so.
+
 Two consequences worth knowing, both of which the parser handles:
 
 - A group with `Disallow: /` **and** any non-trivial `Allow:` line is not a site-wide block,
@@ -153,6 +172,33 @@ confirmation, using the first answer crawler robots.txt does *not* disallow, ski
 when they are all disallowed. It is the only place in this marketplace that sends a
 user-agent other than its own, and it is documented as such in the orchestrator's safety
 section.
+
+### What that comparison can and cannot conclude
+
+Both arms of it go through the same HTTP client. The name is the only variable that moves,
+so the client is a confound shared by both arms, and a comparison whose arms share a
+confound cannot settle the question it was built to ask.
+
+One conclusion survives that: **a name answered differently from the baseline, from the same
+client seconds apart, means the rule reads the name.** The reverse does not. Uniform
+refusals across every name are equally well explained by an edge that scores this client's
+TLS and header fingerprint and never looks at the name at all.
+
+Measured on a charity that refused this audit, one request per user agent with plain curl
+from the same machine:
+
+| user agent | curl | this skill's client |
+|---|---|---|
+| `OAI-SearchBot`, `GPTBot`, `Applebot`, `Googlebot` | 200 | 403 |
+| this audit's own agent string | 200 | 403 |
+| `ClaudeBot`, `Claude-SearchBot`, `PerplexityBot` | 403 | 403 |
+| `curl/8.0`, `python-requests/2.32` | 403 | 403 |
+
+That edge reads the name for three of them. This skill's client sees a uniform 403 and can
+see nothing else, so the check now reports "this client is refused under every name tried,
+and what the edge reads was not determined from here" and makes the loop that produces the
+table above the first fix step. Reading the uniform column as "the name does not matter"
+published the reverse of the row that mattered.
 
 ## Why this crawler does not try harder to get in
 

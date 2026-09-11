@@ -7,7 +7,7 @@ things were wrong the first time it ran, and neither was visible from reading
 it.
 
 These tests skip when Playwright is absent, which is the normal case on a
-judge's machine. That is the point of the skip - the marketplace must work
+user's machine. That is the point of the skip - the marketplace must work
 without a browser, and must be correct with one.
 
     pip install playwright && playwright install chromium
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -83,13 +84,6 @@ def test_render_mode_is_recorded_as_rendered(rendered_shell):
         "notes: {}".format(snapshot["crawl"].get("notes")))
 
 
-def test_pages_carry_a_rendered_measurement(rendered_shell):
-    snapshot, _, _ = rendered_shell
-    measured = [p for p in snapshot["pages"] if "rendered_text_len" in p]
-    assert measured, "the rendered pass recorded no measurements"
-    assert all(isinstance(p["rendered_text_len"], int) for p in measured)
-
-
 def test_render_pass_stays_inside_its_budget(rendered_shell):
     _, _, elapsed = rendered_shell
     assert elapsed < RENDER_CEILING_SECONDS, (
@@ -103,13 +97,21 @@ def test_render_pass_stays_inside_its_budget(rendered_shell):
 # --------------------------------------------------------------------------
 
 def test_javascript_recovers_the_shell_content(rendered_shell):
-    """The fixture hydrates, so the text exists - for consumers that run JS."""
+    """The fixture hydrates, so the text exists - for consumers that run JS.
+
+    Read through `static_view`. The crawl now re-reads a shell from the
+    rendered DOM so the other five skills judge the page a visitor sees, which
+    means `body_text_len` on the record describes the rendered document. The
+    delivered lengths are kept under `static_view`, and they are what this test
+    is about.
+    """
     snapshot, _, _ = rendered_shell
     home = next(p for p in snapshot["pages"] if p.get("page_type") == "home")
-    assert home["body_text_len"] < 300, "the fixture should ship an empty shell"
-    assert home["rendered_text_len"] > home["body_text_len"] * 5, (
+    delivered = home.get("static_view") or home
+    assert delivered["body_text_len"] < 300, "the fixture should ship an empty shell"
+    assert home["rendered_text_len"] > delivered["body_text_len"] * 5, (
         "hydration should add most of the text: static {} vs rendered {}".format(
-            home["body_text_len"], home["rendered_text_len"]))
+            delivered["body_text_len"], home["rendered_text_len"]))
 
 
 def test_recovered_content_softens_the_verdict(rendered_shell):
@@ -127,8 +129,14 @@ def test_recovered_content_softens_the_verdict(rendered_shell):
     assert homepage[0]["severity"] == "high", (
         "with the text recovered the finding should be `high`, not `critical`; "
         "got {}".format(homepage[0]["severity"]))
-    assert "recovered" in homepage[0]["evidence"].lower(), (
-        "the evidence should say how much text JavaScript supplied")
+    # The invariant is that the evidence states the measurement, not that it
+    # uses one particular verb. The wording that said "a Playwright pass
+    # recovered only N chars" belonged to the branch where the text is NOT
+    # reachable; asserting that word here asked the `high` branch to speak in
+    # the `critical` branch's voice.
+    evidence = homepage[0]["evidence"].lower()
+    assert re.search(r"\d+ chars after javascript ran", evidence), (
+        "the evidence should say how much text JavaScript supplied: {}".format(evidence))
 
 
 def test_gap_check_runs_instead_of_skipping(rendered_shell):
@@ -190,13 +198,7 @@ def test_the_render_sample_reaches_deep_page_types():
     pages += [_page("https://h.test/p1", "product"), _page("https://h.test/a1", "article")]
     chosen = {p["page_type"] for p in _render_targets(pages)}
     assert "product" in chosen and "article" in chosen
-
-
-def test_the_render_sample_still_starts_at_the_homepage():
-    from crawl import _render_targets
-    pages = [_page("https://h.test/", "home"),
-             _page("https://h.test/p1", "product"),
-             _page("https://h.test/a1", "article")]
+    # And the homepage still leads the sample.
     assert _render_targets(pages)[0]["page_type"] == "home"
 
 
@@ -209,19 +211,55 @@ def test_the_render_sample_is_the_same_two_runs_running():
     assert first == second
 
 
-def test_the_render_sample_never_exceeds_its_budget():
+def test_only_pages_that_answered_200_are_rendered_and_never_more_than_the_budget():
     from crawl import RENDER_PAGES, _render_targets
-    pages = [_page("https://h.test/p{}".format(i), "product") for i in range(40)]
-    assert len(_render_targets(pages)) == RENDER_PAGES
+    forty = [_page("https://h.test/p{}".format(i), "product") for i in range(40)]
+    assert len(_render_targets(forty)) == RENDER_PAGES
 
-
-def test_only_pages_that_answered_200_are_rendered():
-    from crawl import _render_targets
     pages = [_page("https://h.test/", "home"),
              _page("https://h.test/gone", "article", status=404)]
     assert all(p["status"] == 200 for p in _render_targets(pages))
-
-
-def test_no_pages_means_no_render_targets():
-    from crawl import _render_targets
     assert _render_targets([_page("https://h.test/x", "other", status=500)]) == []
+
+
+# --------------------------------------------------------------------------
+# The rendered document is kept, not just measured
+#
+# The pass recorded `rendered_text_len` and threw the DOM away. Measured on a
+# software vendor's homepage: 60 characters delivered, 6,606 rendered, and the
+# snapshot kept the 60. Five skills then read a page with no H1, no navigation,
+# no call to action and nothing quotable, and the report carried four findings
+# that were all false of the page a visitor sees - two entries below a finding
+# that quoted the 6,606 figure it had just measured.
+# --------------------------------------------------------------------------
+
+def test_a_shell_is_re_read_from_the_rendered_document(rendered_shell):
+    """The record downstream skills read describes the hydrated page."""
+    snapshot, _, _ = rendered_shell
+    home = next(p for p in snapshot["pages"] if p.get("page_type") == "home")
+    assert home.get("content_from") == "rendered", (
+        "the homepage delivered 13 characters and rendered several hundred; it should "
+        "have been re-read from the browser's document")
+    assert home["text_len"] > (home.get("static_view") or {})["text_len"], (
+        "the record still holds the delivered text: {} vs {}".format(
+            home["text_len"], (home.get("static_view") or {})["text_len"]))
+
+
+def test_the_delivered_document_is_kept_beside_the_rendered_one(rendered_shell):
+    """Both halves of the JavaScript gap survive, or the gap cannot be stated."""
+    snapshot, _, _ = rendered_shell
+    home = next(p for p in snapshot["pages"] if p.get("page_type") == "home")
+    view = home.get("static_view") or {}
+    assert view.get("text_len") == home.get("static_text_len")
+    assert view.get("spa_shell"), "the shell markers of the delivered page are the evidence"
+    assert home["rendered_text_len"] > view["text_len"] * 3
+
+
+def test_a_server_rendered_page_is_left_alone(rendered_clean):
+    """Nothing is re-read on a site that delivers its own text."""
+    snapshot, _, _ = rendered_clean
+    adopted = [p["url"] for p in snapshot["pages"] if p.get("content_from") == "rendered"]
+    assert not adopted, (
+        "the clean fixture delivers its text in the HTML; re-reading it from a browser "
+        "would replace a measurement with a different measurement for no reason: {}".format(
+            adopted))

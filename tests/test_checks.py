@@ -14,7 +14,13 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import SUB_SKILLS, all_fixture_names
+import sys
+
+from conftest import SCRIPTS, SUB_SKILLS, all_fixture_names
+
+sys.path.insert(0, SCRIPTS)
+
+from audit_common import AFFECTED_PAGES_LISTED  # noqa: E402
 
 FIXTURE_NAMES = all_fixture_names()
 
@@ -62,45 +68,82 @@ def test_good_site_every_key_page_has_a_quotable_sentence(audit):
 # Per-fixture expectations
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("name", FIXTURE_NAMES)
-def test_fixture_finds_what_it_should(audit, golden, name):
-    expected = golden(name)
-    found = audit(name).root_causes
-    missing = [rc for rc in expected["must_find"] if rc not in found]
-    assert not missing, "{}: expected root causes not detected: {}\nfound: {}".format(
-        name, missing, sorted(found))
+def test_fixture_finds_what_it_should(audit, golden):
+    for name in FIXTURE_NAMES:
+        expected = golden(name)
+        result = audit(name)
+        found = result.root_causes
+        missing = [rc for rc in expected["must_find"] if rc not in found]
+        assert not missing, "{}: expected root causes not detected: {}\nfound: {}".format(
+            name, missing, sorted(found))
+        _assert_render_dependent_causes(result, expected, name)
 
 
-@pytest.mark.parametrize("name", FIXTURE_NAMES)
-def test_fixture_stays_quiet_where_it_should(audit, golden, name):
+def _assert_render_dependent_causes(result, expected, name):
+    """Causes that are findings when a browser read the site and questions when not.
+
+    A claim that something is not on the site rests on the pages that were
+    read, and on a client-side-rendered fixture without a browser most of them
+    deliver no text. `withhold_absence_claims` moves those claims into
+    `unverifiable[]` rather than publishing them as defects, so the expectation
+    has to be asserted in both directions: found when the crawl read the site,
+    held back and named as an unanswered question when it did not. Dropping
+    them from `must_find` alone would have stopped asserting either.
+    """
+    wanted = expected.get("must_find_when_rendered")
+    if not wanted:
+        return
+    if result.snapshot["crawl"].get("render_mode") == "rendered":
+        missing = [rc for rc in wanted if rc not in result.root_causes]
+        assert not missing, (
+            "{}: a browser read this site, so these are facts about it and must be "
+            "reported: {}".format(name, missing))
+        return
+    held = {item.get("root_cause") for item in result.report.get("unverifiable") or []}
+    unaccounted = [rc for rc in wanted
+                   if rc not in held and rc not in result.root_causes]
+    assert not unaccounted, (
+        "{}: no browser read this site, so these claims of absence must appear as "
+        "questions the audit could not answer, not vanish: {}".format(name, unaccounted))
+    published = [rc for rc in wanted if rc in result.root_causes]
+    assert not published, (
+        "{}: these were published as defects about a site most of which this crawl "
+        "could not read: {}".format(name, published))
+
+
+def test_fixture_stays_quiet_where_it_should(audit, golden):
     """The false-positive half. A check firing here is a bug in the check."""
-    expected = golden(name)
-    result = audit(name)
-    found = result.root_causes
-    spurious = [rc for rc in expected["must_not_find"] if rc in found]
-    if spurious:
-        detail = "\n".join(
-            "  {:<22} {} :: {}".format(f["root_cause"], f["title"], f["evidence"])
-            for f in result.report["findings"] if f["root_cause"] in spurious)
-        pytest.fail("{}: these root causes fired but should not have:\n{}".format(name, detail))
+    for name in FIXTURE_NAMES:
+        expected = golden(name)
+        result = audit(name)
+        found = result.root_causes
+        spurious = [rc for rc in expected["must_not_find"] if rc in found]
+        if spurious:
+            detail = "\n".join(
+                "  {:<22} {} :: {}".format(f["root_cause"], f["title"], f["evidence"])
+                for f in result.report["findings"] if f["root_cause"] in spurious)
+            pytest.fail("{}: these root causes fired but should not have:\n{}".format(
+                name, detail))
 
 
-@pytest.mark.parametrize("name", FIXTURE_NAMES)
-def test_fixture_recommendations(audit, golden, name):
-    expected = golden(name)
-    recommended = audit(name).recommendation_ids
-    missing = [r for r in expected.get("must_recommend", []) if r not in recommended]
-    spurious = [r for r in expected.get("must_not_recommend", []) if r in recommended]
-    assert not missing, "{}: missing recommendations {}".format(name, missing)
-    assert not spurious, "{}: recommendations offered without their condition: {}".format(
-        name, spurious)
+def test_fixture_recommendations(audit, golden):
+    for name in FIXTURE_NAMES:
+        expected = golden(name)
+        recommended = audit(name).recommendation_ids
+        missing = [r for r in expected.get("must_recommend", []) if r not in recommended]
+        spurious = [r for r in expected.get("must_not_recommend", []) if r in recommended]
+        assert not missing, "{}: missing recommendations {}".format(name, missing)
+        assert not spurious, (
+            "{}: recommendations offered without their condition: {}".format(
+                name, spurious))
 
 
-@pytest.mark.parametrize("name", FIXTURE_NAMES)
-def test_fixture_severity_expectations(audit, golden, name):
-    expected = golden(name)
-    result = audit(name)
+def test_fixture_severity_expectations(audit, golden):
+    for name in FIXTURE_NAMES:
+        _assert_severities(audit(name), golden(name), name)
 
+
+def _assert_severities(result, expected, name):
     minimum_critical = expected.get("expect_critical_at_least")
     # A fixture may expect a different floor once a browser has measured what
     # JavaScript actually recovers. js-shell-site is the case: unmeasured, an
@@ -220,42 +263,43 @@ def test_legal_pages_are_never_assessed(audit):
         assert not (set(finding["affected_pages"]) & legal_urls)
 
 
-@pytest.mark.parametrize("name", FIXTURE_NAMES)
-def test_page_type_detection_is_sane(audit, golden, name):
+def test_page_type_detection_is_sane(audit, golden):
     """Every crawled page gets a type, and product type is never guessed loosely."""
-    result = audit(name)
-    for page in result.snapshot["pages"]:
-        assert page.get("page_type"), "page {} has no detected type".format(page["url"])
+    for name in FIXTURE_NAMES:
+        result = audit(name)
+        for page in result.snapshot["pages"]:
+            assert page.get("page_type"), "page {} has no detected type".format(page["url"])
 
-    expected_types = golden(name).get("expect_page_types")
-    if expected_types:
-        detected = result.page_types()
-        missing = [t for t in expected_types if t not in detected]
-        assert not missing, "{}: page types not detected: {} (got {})".format(
-            name, missing, sorted(detected))
+        expected_types = golden(name).get("expect_page_types")
+        if expected_types:
+            detected = result.page_types()
+            missing = [t for t in expected_types if t not in detected]
+            assert not missing, "{}: page types not detected: {} (got {})".format(
+                name, missing, sorted(detected))
 
 
 # --------------------------------------------------------------------------
 # The sub-skill contract
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("name", FIXTURE_NAMES)
-def test_every_skill_reports_what_it_skipped(audit, name):
+def test_every_skill_reports_what_it_skipped(audit):
     """A check that stays quiet must say why. Silence is not an output."""
-    result = audit(name)
-    for skill in SUB_SKILLS:
-        payload = result.findings[skill]
-        assert payload["skill"] == skill
-        assert payload["checks_run"], "{} ran no checks on {}".format(skill, name)
-        for entry in payload["not_applicable"]:
-            assert entry["reason"].strip(), \
-                "{} skipped `{}` on {} without a reason".format(skill, entry["check"], name)
-            assert entry["check"] in payload["checks_run"], \
-                "{} recorded `{}` as not applicable but not as run".format(skill, entry["check"])
+    for name in FIXTURE_NAMES:
+        result = audit(name)
+        for skill in SUB_SKILLS:
+            payload = result.findings[skill]
+            assert payload["skill"] == skill
+            assert payload["checks_run"], "{} ran no checks on {}".format(skill, name)
+            for entry in payload["not_applicable"]:
+                assert entry["reason"].strip(), (
+                    "{} skipped `{}` on {} without a reason".format(
+                        skill, entry["check"], name))
+                assert entry["check"] in payload["checks_run"], (
+                    "{} recorded `{}` as not applicable but not as run".format(
+                        skill, entry["check"]))
 
 
-@pytest.mark.parametrize("name", FIXTURE_NAMES)
-def test_extra_requests_stay_within_declared_budgets(audit, name):
+def test_extra_requests_stay_within_declared_budgets(audit):
     """Each skill's SKILL.md declares a request ceiling. Hold it to that."""
     budgets = {
         "crawl-access-audit": 10,
@@ -268,17 +312,18 @@ def test_extra_requests_stay_within_declared_budgets(audit, name):
         "freshness-corroboration-audit": 10,
         "engagement-audit": 20,
     }
-    result = audit(name)
-    for skill, ceiling in budgets.items():
-        made = result.findings[skill]["extra_requests_made"]
-        assert made <= ceiling, "{} made {} extra requests on {}, ceiling is {}".format(
-            skill, made, name, ceiling)
+    for name in FIXTURE_NAMES:
+        result = audit(name)
+        for skill, ceiling in budgets.items():
+            made = result.findings[skill]["extra_requests_made"]
+            assert made <= ceiling, (
+                "{} made {} extra requests on {}, ceiling is {}".format(
+                    skill, made, name, ceiling))
 
 
-@pytest.mark.parametrize("name", FIXTURE_NAMES)
-def test_findings_are_well_formed(audit, name):
+def test_findings_are_well_formed(audit):
     """Every finding carries the evidence and the fix that make it actionable."""
-    for finding in audit(name).report["findings"]:
+    for finding in [f for n in FIXTURE_NAMES for f in audit(n).report["findings"]]:
         action = finding["suggested_action"]
         assert finding["evidence"].strip()
         assert finding["evidence"] != finding["title"], \
@@ -288,8 +333,18 @@ def test_findings_are_well_formed(audit, name):
         assert finding["mechanism"] in "ABCDEFG"
         assert finding["confidence"] in ("high", "medium", "low")
         assert action["owner"] in ("developer", "content owner", "marketing")
-        assert len(finding["affected_pages"]) <= 5, \
-            "{}: affected_pages must be a sample of at most 5".format(finding["id"])
+        # The list is a sample, and the constant says how big a sample. It was
+        # five until one of this audit's claims was disproved by hand, and it
+        # could not have been checked from the report: a title
+        # claiming 48 pages, five addresses listed, and the other 43 recorded
+        # nowhere in the run.
+        assert len(finding["affected_pages"]) <= AFFECTED_PAGES_LISTED, \
+            "{}: affected_pages must be a sample of at most {}".format(
+                finding["id"], AFFECTED_PAGES_LISTED)
+        assert (len(finding["affected_pages"]) == finding["affected_page_count"]
+                or len(finding["affected_pages"]) == AFFECTED_PAGES_LISTED), \
+            "{}: a truncated list must stop at the constant, so a reader can " \
+            "tell a sample from a complete list".format(finding["id"])
 
 
 def test_offline_mode_makes_no_extra_requests(audit):

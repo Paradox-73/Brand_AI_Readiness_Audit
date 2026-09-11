@@ -30,9 +30,29 @@
           "minimum": 0,
           "description": "Extension. Observations deliberately not treated as defects, such as a training-crawler block, which is a rights decision rather than a discoverability problem."
         },
+        "confident": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Extension. How many of total_findings are published in the graded body of the report, meaning tier == confident: read directly off the document, and either stated at high confidence or at medium confidence with corroborating sources. confident + worth_checking == total_findings."
+        },
+        "worth_checking": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Extension. How many of total_findings sit in the lower tier because the audit is not certain of them. They are still counted in total_findings and in the severity counts above: the tier changes where a finding is printed and whether it may lead Start here, never whether it is published."
+        },
+        "actions": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Extension. How many things this report asks somebody to do: every finding that is not info, plus every proactive recommendation. Counted over both halves because the reader has to carry out both halves."
+        },
+        "actions_needing_a_template_editor": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Extension. How many of `actions` are owned by somebody who edits the files the site is built from - its theme or template - rather than typing into an admin screen. Stated under the verdict so an owner with no developer learns what they are up against before the first instruction rather than after the ninth."
+        },
         "verdict": {
           "type": "string",
-          "description": "Extension. One paragraph of plain language stating what the findings amount to."
+          "description": "Extension. One paragraph of plain language stating what the findings amount to. Where crawl.enough_to_judge is false it states what the crawl did and did not establish instead of grading the site, because a verdict computed from severity counts alone told two site owners they were fine on runs that read no text at all."
         }
       }
     },
@@ -80,7 +100,20 @@
               }
             }
           },
-          "confidence": {"enum": ["high", "medium", "low"], "description": "Extension."},
+          "confidence": {"enum": ["high", "medium", "low"], "description": "Extension. How sure the audit is that this observation is correct, assigned by the sub-skill that raised it."},
+          "evidence_basis": {
+            "enum": ["observed", "inferred"],
+            "description": "Extension. How the evidence under this finding was obtained. `observed` means the claim is settled by what the document or the HTTP exchange literally contains - a status code, an attribute, a tag, a JSON-LD node, a character count - so a reader can confirm or refute it in View Source. `inferred` means the claim also rests on the audit having correctly decided what something is: which pages are product pages, which URL is the brand's own account, which string is a street address. Derived from audit_common.EVIDENCE_BASIS, which holds one entry per root cause and is proved complete against ROOT_CAUSES by the test suite, plus a short per-check override table for the causes raised by two checks that do not read the same kind of evidence."
+          },
+          "tier": {
+            "enum": ["confident", "worth checking"],
+            "description": "Extension. Which tier of the report this finding is published in. `confident` requires evidence_basis == observed AND either confidence == high or confidence == medium with at least two independent sources named in checked[] when the root cause asserts a negative; everything else is `worth checking`. Both tiers are in this array and both are counted in summary; the tier decides where the finding is printed and whether it is eligible for start_here. Added after a validation pass in which confidence gated nothing, and keyed on the evidence basis after a later pass in which the confident tier scored 84.6% against the lower tier's 82.9% - an honest split that separated nothing, because confidence is a value each check writes about itself."
+          },
+          "read_in": {
+            "type": "string",
+            "description": "Extension. Present on every finding, empty on most. Where this finding's claim rests on matching word patterns against the page text, and the audit did not establish that the site is written in the language those patterns were written for, this states the script and the language the text was read in and how that was arrived at. Empty where the claim read no prose, and empty on a site established as English, where saying it on forty findings would be noise. Never names a language the audit cannot evidence: on a non-Latin script with nothing declared, and where a declared language is contradicted by the letters, it states the script and no language. crawl.site_language carries the same record as fields. Added after a validation pass in which every wrong finding on a non-English site came from an English word list run over sentences and no finding said which language it had looked in.",
+            "examples": ["", "This finding comes from matching word patterns against the page text, which was read as `no` in the latin script (declared). Those patterns are written for English (`en`)."]
+          },
           "mechanism": {
             "enum": ["A", "B", "C", "D", "E", "F", "G"],
             "description": "Extension. See mechanism-model.md. G is this marketplace's own addition for on-site engagement."
@@ -117,7 +150,12 @@
       "type": "array",
       "items": {"type": "string"},
       "maxItems": 3,
-      "description": "Extension. Finding IDs of the top three by priority score, excluding info."
+      "description": "Extension. Finding IDs of the top three by priority score, excluding info and drawn only from findings whose tier is `confident`. An empty array means nothing the audit is sure of was worth leading with; it is never filled from the lower tier."
+    },
+    "worth_checking": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Extension. Finding IDs whose tier is `worth checking`, in the order the report prints them. An index into findings[], not a second copy of them: a demoted finding stays in findings[] so a consumer that does not know about the tier still sees every finding the audit raised."
     },
     "recommendations": {
       "type": "array",
@@ -165,6 +203,19 @@
         "brand_name_source": {"type": ["string", "null"]},
         "pages_crawled": {"type": "integer", "minimum": 0},
         "pages_ok": {"type": "integer", "minimum": 0},
+        "readable_pages": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Extension. Pages that answered 200, were not skipped or served a bot-manager challenge, and carried at least one sentence of text. Distinct from pages_ok, which counts a URL that answered 200 and was skipped as a redirect off the origin: on the run this key was added for, pages_ok was 1 and readable_pages was 0."
+        },
+        "enough_to_judge": {
+          "type": "boolean",
+          "description": "Extension. Whether the crawl read enough to grade the site: at least the readable-pages floor, AND at least half of the URLs that could have been pages. One rule, and it is the same one that decides whether an absence claim may be asserted - a run that held back eight findings for want of coverage and then printed 'No blocking problems' had two rules disagreeing. The denominator counts URLs the crawl went looking for a page at; a response whose own content type proved it was never a page (a release archive, a PDF) is not one of them, and counting nine of those as URLs the crawler was refused is what caused that suppression. False makes summary.verdict state what was and was not established, puts the same caveat above the severity table in report.md and report.html, and, where nothing readable came back at all, routes every check that stayed quiet into unverifiable[] rather than letting its silence read as a pass."
+        },
+        "site_not_serving": {
+          "type": ["object", "null"],
+          "description": "Extension. Null on an ordinary site. Set only when every address the crawl reached answered, all answered the same status, and that status speaks for the service rather than for the address - 402, 410, 451, 503. A 404 is about an address and 401/403/429 are about who is asking, so none of them qualifies; robots.txt is read for evidence and kept out of the uniformity test, because a switched-off store still serves robots.txt. Carries status, meaning (plain words), addresses, addresses_answered and reason, a one-sentence explanation also present in crawl.notes. A snapshot in this state carries no evidence about content and cannot support a verdict of any kind, a clean one included: it forces enough_to_judge to false, summary.verdict is the recorded reason unchanged, and both documents lead with it above the severity table. Added after a report whose only finding was 'remove Disallow: / from robots.txt' on a site with no shop behind it - the whole story of the site, missed."
+        },
         "budget_exhausted": {"type": "boolean"},
         "render_mode": {"enum": ["static", "rendered"]},
         "elapsed_s": {"type": ["number", "null"]},
@@ -176,6 +227,24 @@
     "checks_run": {
       "type": "array",
       "description": "Extension. Every check attempted, with the skill that ran it.",
+      "items": {
+        "type": "object",
+        "required": ["skill", "check"],
+        "properties": {"skill": {"type": "string"}, "check": {"type": "string"}}
+      }
+    },
+    "checks_with_nothing_to_run_against": {
+      "type": "array",
+      "description": "Extension. Checks that were registered, never fired and never declined, on a crawl that read fewer than the readable-pages floor. Registered and executed are different facts, and a skill cannot tell them apart: it records a check before it looks at anything, so a check whose data never arrived is indistinguishable there from one that examined its data and was satisfied. Only the orchestrator can see whether the crawl produced anything to examine, so it resolves the candidate list each skill emits as unresolved_checks. These may not be printed as clean - a store answering HTTP 402 on every URL, with zero pages fetched, listed homepage-reachable and non-200-rate under 'these ran against this site and were clean'. Empty on every run that read pages. Not titled 'checks that did not run', because a few of them - the ones that fetch robots.txt or probe a sitemap - do make a request and do reach an answer; what is true of all of them is that nothing they found is a statement about the site.",
+      "items": {
+        "type": "object",
+        "required": ["skill", "check"],
+        "properties": {"skill": {"type": "string"}, "check": {"type": "string"}}
+      }
+    },
+    "skills_that_did_not_run": {
+      "type": "array",
+      "description": "Extension. Sub-skills that did not run at all, as the (skill, check) pair their stand-in result registered. run_audit.py writes a stand-in rather than throwing a completed crawl and five completed skills away when the sixth overruns; the stand-in is shaped like a decline, so without this it printed under \"Checks that did not apply, and why: these were run and found nothing to report\", contradicting its own reason in the same paragraph. Recognised by skill_did_not_run on the result, did_not_run on the decline, or the check name skill-did-not-run - the first two are preferred, because a magic string agreed between two files and written down in neither is the coupling that rots. The decline itself stays in not_applicable so the appendix buckets still add up to the checks that ran; this key is what lets both renderers print it under \"Questions this audit could not answer\" instead, and say under the declines where it went.",
       "items": {
         "type": "object",
         "required": ["skill", "check"],
@@ -195,15 +264,31 @@
         }
       }
     },
+    "unverifiable": {
+      "type": "array",
+      "description": "Extension. Questions the audit could not answer, kept separate from defects it found, and rendered as \"Questions this audit could not answer\" in both documents. Fed from three places, listed most serious first. (1) A whole sub-skill that did not run: run_audit.py writes a stand-in result rather than throwing a completed crawl away when a skill overruns, and that stand-in carries the sentence saying how long it had and what to change. It is moved here rather than echoed, because a decline printed under \"these were run and found nothing to report\" contradicts its own reason in place; its check lands in checks_with_nothing_to_run_against so the appendix arithmetic still balances. (2) An absence claim held back because fewer than half the URLs the crawl reached came back with readable text - a 200 carrying nothing is not a page the site was read on, and counting it as one published twelve claims about what a site does not say on a crawl that read no text at all. (3) When crawl.enough_to_judge is false, which crawl.site_not_serving also forces, every check that stayed quiet, because its silence then rests on a crawl that read nothing rather than on a judgement about the site. The third source is echoed, not moved: those checks stay in not_applicable so the appendix arithmetic still adds up.",
+      "items": {
+        "type": "object",
+        "required": ["title", "reason"],
+        "properties": {
+          "title": {"type": "string", "description": "The finding that was held back, or the name of the check that stayed quiet."},
+          "check": {"type": "string"},
+          "detected_by": {"type": ["string", "null"]},
+          "root_cause": {"type": "string"},
+          "reason": {"type": "string", "description": "Why this is a fact about what the crawler was shown rather than about the site."}
+        }
+      }
+    },
     "merged_duplicates": {
       "type": "array",
-      "description": "Extension. Observations two skills both made, and which finding they were merged into.",
+      "description": "Extension. Observations two skills both made, or two findings that are one edit, and which finding they were merged into.",
       "items": {
         "type": "object",
         "properties": {
           "skill": {"type": "string"},
           "id_hint": {"type": "string"},
-          "merged_into": {"type": "string"}
+          "merged_into": {"type": "string"},
+          "reason": {"type": "string", "description": "Why the two were merged. Absent where the two reported the same root cause."}
         }
       }
     },

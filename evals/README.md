@@ -123,6 +123,7 @@ only one with an email capture.
 | **Evidence, not adjectives** | Every finding cites counts and sampled URLs. "0/12 product pages contain schema.org markup", never "structured data could be improved". |
 | **Fixes a non-expert can act on** | Every finding names an owner and a rough duration, and carries paste-ready code where code is the fix. |
 | **Silence is explained** | `not_applicable[]` is populated and each entry gives a reason. |
+| **Absence is evidenced** | Every finding that says something is *missing* prints **Where we looked** and names the independent sources it consulted. A finding resting on one of them is capped at medium confidence and says so in the same sentence. Pick one and try to name a place the thing could be that is not on the list; that is the fastest way to break this audit, and it is the failure mode every false positive it has made shares. |
 | **Determinism** | Run twice on one site. `findings[]` must be byte-identical; only `audited_at` moves. |
 | **No false positives** | Audit `tests/fixtures/good-site` **with `--no-network`**. It must report **zero** findings and still offer `R-BOILERPLATE`. Without the flag it reports one, correctly: the fixture's profile URLs use reserved `.example` names, so the profile-link check asks the real internet about them and is told they do not exist. That is the check working. |
 | **Read-only** | Nothing is written to the target. Check the server log if you control the site. |

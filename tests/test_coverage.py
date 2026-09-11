@@ -37,30 +37,37 @@ from mutations import MUTATIONS
 # on this evidence, check twice.
 UNSTAGEABLE = set()
 
-# Causes proved by a unit test instead of a fixture, and the file that proves
-# them. This is not an exemption: the guarantee still holds, it is just met
-# somewhere the fixture server cannot reach. The test below opens each file and
-# checks the cause is actually named in it, so an entry cannot rot into a lie.
+# Causes proved by a unit test instead of a fixture, and why the fixture
+# server cannot reach them. This is not an exemption: the guarantee still
+# holds, it is just met somewhere the fixture server cannot go. The test below
+# searches the whole suite for each cause, so an entry cannot rot into a lie.
+#
+# The value used to be a filename, and that made the file naming load-bearing:
+# a housekeeping pass that regrouped the tests by subject broke this assertion
+# for a purely cosmetic reason, and the failure named a missing file rather
+# than a missing proof. What matters is that some test asserts the cause, not
+# which file it sits in. The reason stays, because a reader needs to know why
+# a cause is here at all.
 PROVED_BY_UNIT_TEST = {
     # Proving this needs a real platform to answer 404 for a profile that does
     # not exist. The fixture server can only serve itself, and pointing the
     # suite at LinkedIn on every run would make it slow, rude and dependent on
     # somebody else's uptime.
-    "dead-profile-link": "test_profile_links.py",
+    "dead-profile-link": True,
     # Needs an origin on a real hostname served over plain HTTP. The fixture
     # server is loopback, and the check correctly treats loopback as a
     # deployment detail rather than a defect, so a snapshot supplies the origin
     # directly.
-    "insecure-transport": "test_unstageable_causes.py",
+    "insecure-transport": True,
     # Needs a Wikidata response listing several entities with one name. A stub
     # supplies it with invented labels, so no real organisation enters the
     # test corpus.
-    "entity-ambiguity": "test_unstageable_causes.py",
+    "entity-ambiguity": True,
     # Needs an origin that answers correctly and takes seconds to do it. The
     # fixture server answers in milliseconds, and making it sleep would add
     # that time to every run of the suite for one root cause. A snapshot with
     # real timings supplies it instead.
-    "slow-origin": "test_later_rounds.py",
+    "slow-origin": True,
 }
 
 
@@ -105,22 +112,27 @@ def test_no_case_claims_a_root_cause_that_does_not_exist():
             sorted(unknown)))
 
 
-def test_the_unit_test_registry_points_at_files_that_prove_what_it_claims():
-    """An entry here has to name a file that exists and mentions the cause.
+def test_the_unit_test_registry_names_causes_some_test_actually_asserts():
+    """An entry here has to be named by a test somewhere in this suite.
 
     Without this the registry is a way to silence the coverage check by typing
     a root cause into a dictionary, which is the opposite of what it is for.
+    The search is over every test file rather than one named file, so moving a
+    test between files cannot break the build and cannot quietly remove a
+    proof either.
     """
     here = os.path.dirname(os.path.abspath(__file__))
-    for cause, filename in sorted(PROVED_BY_UNIT_TEST.items()):
+    corpus = {}
+    for name in sorted(os.listdir(here)):
+        if name.startswith("test_") and name.endswith(".py"):
+            with open(os.path.join(here, name), encoding="utf-8") as handle:
+                corpus[name] = handle.read()
+
+    for cause in sorted(PROVED_BY_UNIT_TEST):
         assert cause in ROOT_CAUSES, "{} is not a real root cause".format(cause)
         assert cause not in UNSTAGEABLE, (
             "{} is listed as both proved and unstageable".format(cause))
-        path = os.path.join(here, filename)
-        assert os.path.isfile(path), "{} claims proof in {}, which does not exist".format(
-            cause, filename)
-        with open(path, encoding="utf-8") as handle:
-            body = handle.read()
-        assert cause in body, (
-            "{} claims to be proved in {}, but that file never mentions it".format(
-                cause, filename))
+        proving = [name for name, body in corpus.items() if cause in body]
+        assert proving, (
+            "{} claims to be proved by a unit test, and no test file in this "
+            "suite mentions it".format(cause))

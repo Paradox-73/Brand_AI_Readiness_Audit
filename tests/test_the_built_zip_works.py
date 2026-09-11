@@ -1,6 +1,6 @@
 """The submission is the zip, so the zip is what has to work.
 
-Every other test in this suite runs from the checkout. That is not what a judge
+Every other test in this suite runs from the checkout. That is not what anyone
 receives, and the difference is not cosmetic: `package.py` writes a copy of the
 shared library into each skill so that a folder lifted out on its own can still
 run, and that copy changes which directory wins the import search.
@@ -35,19 +35,17 @@ import zipfile
 
 import pytest
 
-from conftest import FIXTURES, ROOT
+from conftest import FIXTURES, ROOT, SUB_SKILLS
 
-ARCHIVE = os.path.join(ROOT, "brand-ai-readiness-audit.zip")
+# The build artefact lives outside the tree it packages, so that the size
+# test measures the submission rather than the checkout plus the last
+# submission. `package.py` refuses to write it anywhere else.
+ARCHIVE = os.path.join(ROOT, "dist", "brand-ai-readiness-audit.zip")
 PACKAGE = "brand-ai-readiness-audit"
 
-SUB_SKILLS = [
-    "crawl-access-audit",
-    "render-readability-audit",
-    "structured-data-audit",
-    "fact-extractability-audit",
-    "freshness-corroboration-audit",
-    "engagement-audit",
-]
+# From `conftest`, which reads it from the marketplace's own code. A fourth
+# copy of this list lived here and could have drifted from the order the
+# orchestrator actually deduplicates by.
 
 
 def _require_zip():
@@ -57,7 +55,7 @@ def _require_zip():
 
 @pytest.fixture(scope="module")
 def extracted():
-    """The zip, unpacked, exactly as a judge would have it."""
+    """The zip, unpacked, exactly as a recipient would have it."""
     _require_zip()
     work = tempfile.mkdtemp(prefix="submission-")
     try:
@@ -138,9 +136,10 @@ def test_the_readme_command_produces_a_report_from_the_zip(extracted):
 def test_the_documented_procedure_produces_a_report_from_the_zip(extracted):
     """The six steps in audit-orchestrator/SKILL.md, run literally.
 
-    This is the path a judge's agent follows: it reads the entrypoint's
-    SKILL.md and runs the commands there. `run_audit.py` is a convenience, not
-    the graded route, so passing one and failing the other is not good enough.
+    This is the path an AI agent given the zip follows: it reads the
+    entrypoint's SKILL.md and runs the commands there. `run_audit.py` is a
+    convenience, not the documented route, so passing one and failing the
+    other is not good enough.
     """
     scripts = os.path.join(extracted, "skills", "audit-orchestrator", "scripts")
 

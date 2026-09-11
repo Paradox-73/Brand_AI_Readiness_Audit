@@ -26,7 +26,6 @@ from __future__ import annotations
 import os
 import sys
 
-import pytest
 
 _SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         "skills", "freshness-corroboration-audit", "scripts")
@@ -37,7 +36,7 @@ from conftest import SCRIPTS as ORCH_SCRIPTS  # noqa: E402
 sys.path.insert(0, ORCH_SCRIPTS)
 
 from audit_common import (  # noqa: E402
-    ROOT_CAUSES, SkillResult, VERIFIABLE_PROFILE_PLATFORMS, FetchError,
+    SkillResult, VERIFIABLE_PROFILE_PLATFORMS, FetchError,
 )
 
 import importlib.util  # noqa: E402
@@ -49,9 +48,11 @@ _spec.loader.exec_module(freshness)
 
 
 class StubResponse:
-    def __init__(self, status_code, url):
+    def __init__(self, status_code, url, body=""):
         self.status_code = status_code
         self.url = url
+        self.content = body.encode("utf-8")
+        self.headers = {"content-type": "text/plain; charset=utf-8"}
 
 
 class StubFetcher:
@@ -61,9 +62,10 @@ class StubFetcher:
     "could not be reached" branch is exercised without waiting on one.
     """
 
-    def __init__(self, answers, raise_for=()):
+    def __init__(self, answers, raise_for=(), robots=None):
         self.answers = answers
         self.raise_for = set(raise_for)
+        self.robots = robots or {}
         self.calls = []
         self.count = 0
 
@@ -72,8 +74,28 @@ class StubFetcher:
         self.count += 1
         if url in self.raise_for:
             raise FetchError("stubbed failure")
+        # Every profile probe now asks that host's own robots.txt first, so a
+        # stub that answers only the profile URLs is answering half the
+        # conversation. `robots` lets a test say what a platform permits;
+        # unlisted hosts serve an empty file, which permits everything.
+        if url.endswith("/robots.txt") and url not in self.answers:
+            return StubResponse(200, url, self.robots.get(url, ""))
         status, final = self.answers[url]
         return StubResponse(status, final)
+
+    def try_get(self, url, **kwargs):
+        """The optional-probe form, which `confirm_dead` uses.
+
+        The profile check now confirms a HEAD 404 with a GET before calling a
+        profile gone - the rule `confirm_dead` exists for and that every other
+        link check in the marketplace already followed. The stub answers the
+        confirmation with the same status, so a profile the test says is 404 is
+        still 404 to both probes.
+        """
+        try:
+            return self.get(url, **kwargs)
+        except FetchError:
+            return None
 
 
 LIVE = {
@@ -88,9 +110,9 @@ UNVERIFIABLE = {
 }
 
 
-def _run(profiles, answers, raise_for=(), allow_network=True, fetcher=True):
+def _run(profiles, answers, raise_for=(), allow_network=True, fetcher=True, robots=None):
     result = SkillResult("freshness-corroboration-audit")
-    stub = StubFetcher(answers, raise_for) if fetcher else None
+    stub = StubFetcher(answers, raise_for, robots) if fetcher else None
     freshness._check_profile_links_resolve(result, profiles, stub, allow_network)
     return result, stub
 
@@ -114,7 +136,7 @@ def test_a_dead_profile_link_is_reported():
     assert causes == ["dead-profile-link"], causes
 
 
-def test_the_evidence_names_the_url_and_the_status():
+def test_the_evidence_and_the_affected_pages_name_the_dead_url():
     answers = {LIVE["LinkedIn"]: (404, LIVE["LinkedIn"]),
                LIVE["GitHub"]: (200, LIVE["GitHub"])}
     result, _ = _run({"LinkedIn": LIVE["LinkedIn"], "GitHub": LIVE["GitHub"]}, answers)
@@ -122,6 +144,7 @@ def test_the_evidence_names_the_url_and_the_status():
     assert "LinkedIn" in evidence and "404" in evidence, evidence
     assert "linkedin.com/company/kestrel-instruments" in evidence, evidence
     assert "1 other profile link(s) resolved" in evidence, evidence
+    assert result.findings[0]["affected_pages"] == [LIVE["LinkedIn"]]
 
 
 def test_one_dead_link_is_low_and_several_is_medium():
@@ -133,19 +156,6 @@ def test_one_dead_link_is_low_and_several_is_medium():
     result, _ = _run(two, {LIVE["LinkedIn"]: (404, LIVE["LinkedIn"]),
                            LIVE["GitHub"]: (410, LIVE["GitHub"])})
     assert result.findings[0]["severity"] == "medium"
-
-
-def test_the_root_cause_is_in_the_shared_vocabulary():
-    """Every root cause must be declared once, in `audit_common`, or the
-    orchestrator will reject the finding at compose time."""
-    assert "dead-profile-link" in ROOT_CAUSES
-
-
-def test_the_dead_urls_are_the_affected_pages():
-    answers = {LIVE["LinkedIn"]: (404, LIVE["LinkedIn"]),
-               LIVE["GitHub"]: (200, LIVE["GitHub"])}
-    result, _ = _run({"LinkedIn": LIVE["LinkedIn"], "GitHub": LIVE["GitHub"]}, answers)
-    assert result.findings[0]["affected_pages"] == [LIVE["LinkedIn"]]
 
 
 # --------------------------------------------------------------------------
@@ -172,19 +182,18 @@ def test_a_403_is_recorded_as_unchecked_not_as_dead():
     assert result.signals["profile_links_alive"] == 1
 
 
-def test_a_redirect_to_a_sign_in_page_is_not_an_answer():
-    """Facebook sends an unknown page to /login with a 200. That says nothing
-    about whether the profile exists."""
+def test_an_answer_that_settles_nothing_is_unchecked_not_dead():
+    """Facebook sends an unknown page to /login with a 200, and a request that
+    times out returns nothing at all. Neither says the profile is gone."""
     url = "https://www.linkedin.com/company/kestrel-instruments/"
-    answers = {url: (200, "https://www.linkedin.com/uas/login?session_redirect=%2Fcompany")}
-    result, _ = _run({"LinkedIn": url}, answers)
+    result, _ = _run(
+        {"LinkedIn": url},
+        {url: (200, "https://www.linkedin.com/uas/login?session_redirect=%2Fcompany")})
     assert result.findings == []
     assert result.signals["profile_links_unchecked"] == ["LinkedIn"]
 
-
-def test_a_request_that_fails_is_unchecked_not_dead():
-    answers = {LIVE["GitHub"]: (200, LIVE["GitHub"])}
-    result, _ = _run({"LinkedIn": LIVE["LinkedIn"], "GitHub": LIVE["GitHub"]}, answers,
+    result, _ = _run({"LinkedIn": LIVE["LinkedIn"], "GitHub": LIVE["GitHub"]},
+                     {LIVE["GitHub"]: (200, LIVE["GitHub"])},
                      raise_for=[LIVE["LinkedIn"]])
     assert result.findings == []
     assert result.signals["profile_links_unchecked"] == ["LinkedIn"]
@@ -194,17 +203,47 @@ def test_a_request_that_fails_is_unchecked_not_dead():
 # Budget and manners
 # --------------------------------------------------------------------------
 
+def _profile_calls(stub):
+    """The probes, without the robots.txt each host is asked for first."""
+    return [(method, url) for method, url in stub.calls
+            if not url.endswith("/robots.txt")]
+
+
 def test_only_head_requests_are_made():
-    """We want the status code, not the page. HEAD is the smaller ask."""
+    """We want the status code, not the page. HEAD is the smaller ask.
+
+    robots.txt is the exception and has to be: a file cannot be read with HEAD,
+    and reading it is what makes the probe permitted at all.
+    """
     answers = {url: (200, url) for url in LIVE.values()}
     _, stub = _run(dict(LIVE), answers)
-    assert {method for method, _url in stub.calls} == {"HEAD"}
+    assert {method for method, _url in _profile_calls(stub)} == {"HEAD"}
+    assert {method for method, url in stub.calls
+            if url.endswith("/robots.txt")} == {"GET"}
 
 
-def test_at_most_one_request_per_verifiable_platform():
-    answers = {url: (200, url) for url in LIVE.values()}
-    _, stub = _run(dict(LIVE), answers)
-    assert len(stub.calls) == len(LIVE) <= len(VERIFIABLE_PROFILE_PLATFORMS)
+def test_at_most_one_probe_and_one_robots_request_per_platform():
+    """Six profile links on three hosts must not cost six robots requests."""
+    _, stub = _run(dict(LIVE), {url: (200, url) for url in LIVE.values()})
+    assert len(_profile_calls(stub)) == len(LIVE) <= len(VERIFIABLE_PROFILE_PLATFORMS)
+    asked = [url for _m, url in stub.calls if url.endswith("/robots.txt")]
+    assert len(asked) == len(set(asked)) == len(LIVE)
+
+
+def test_a_platform_that_disallows_us_is_unchecked_not_dead():
+    """LinkedIn and X both answer `User-agent: *` / `Disallow: /`. Probing them
+    anyway was a hole in the one promise this marketplace makes about itself,
+    and a 999 or a sign-in wall from either was being read as a site defect."""
+    answers = {url: (404, url) for url in LIVE.values()}
+    result, stub = _run(
+        dict(LIVE), answers,
+        robots={"https://www.linkedin.com/robots.txt":
+                "User-agent: *" + chr(10) + "Disallow: /" + chr(10)})
+    probed = [url for method, url in stub.calls if method == "HEAD"]
+    assert not any("linkedin.com" in url for url in probed)
+    reason = " ".join(
+        f["evidence"] for f in result.findings) + " " + (_skip_reason(result) or "")
+    assert "robots.txt" in reason
 
 
 def test_no_network_means_no_requests_and_a_stated_reason():

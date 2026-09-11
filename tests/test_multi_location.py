@@ -14,7 +14,6 @@ import importlib.util
 import os
 import sys
 
-import pytest
 
 from conftest import ROOT, SCRIPTS
 
@@ -45,12 +44,8 @@ def test_several_branches_read_as_several_places():
     assert is_multi_location({"pages": pages}) is True
 
 
-def test_one_branch_is_not_a_chain():
-    pages = [HOME, _branch("York", "YO1 9TT")]
-    assert is_multi_location({"pages": pages}) is False
-
-
-def test_a_site_with_no_places_is_not_a_chain():
+def test_fewer_than_two_places_is_not_a_chain():
+    assert is_multi_location({"pages": [HOME, _branch("York", "YO1 9TT")]}) is False
     assert is_multi_location({"pages": [HOME]}) is False
 
 
@@ -64,12 +59,11 @@ def test_branch_names_are_not_spellings_of_the_brand():
     assert brand["authoritative_variants"] == [], (
         "branch names must not be collected as variants of the brand name")
 
-
-def test_a_single_locations_declared_name_is_still_the_brand():
-    """A one-site business declaring LocalBusiness is declaring its own name."""
-    pages = [HOME, _branch("York", "YO1 9TT", name="Coppergate Ceramics")]
-    brand = detect_brand(pages, "https://example.test")
-    assert "Coppergate Ceramics" in brand["authoritative_variants"]
+    # A one-site business declaring LocalBusiness is declaring its own name,
+    # so the fix must not throw that away too.
+    one_place = [HOME, _branch("York", "YO1 9TT", name="Coppergate Ceramics")]
+    assert "Coppergate Ceramics" in detect_brand(
+        one_place, "https://example.test")["authoritative_variants"]
 
 
 def _freshness():
@@ -114,3 +108,56 @@ def test_one_organisation_declaring_two_phone_numbers_still_contradicts_itself()
     result = SkillResult("freshness-corroboration-audit")
     freshness._check_fact_consistency(result, {"pages": pages}, pages)
     assert result.findings, "two primary numbers for one organisation is still a conflict"
+
+
+# --------------------------------------------------------------------------
+# A chain that declares no markup at all, recognised from its addresses
+# --------------------------------------------------------------------------
+
+from audit_common import pages_with_their_own_address  # noqa: E402
+
+
+def _text_branch(i, street, postcode):
+    return {"url": "https://x.test/restaurants/branch{}".format(i), "status": 200,
+            "page_type": "other", "jsonld_types": [],
+            "contact_facts": {"street_hint": street, "postcode_hint": postcode,
+                              "declared_phones": ["+441000000{}".format(i)]}}
+
+
+TEXT_CHAIN = {"origin": "https://x.test", "site": "x.test",
+              "brand": {"name": "Example"},
+              "pages": [_text_branch(1, "51 Berwick Street", "W1F 8SJ"),
+                        _text_branch(2, "12 Park Row", "LS1 5HD"),
+                        _text_branch(3, "9 Union Street", "BS1 5EF"),
+                        _text_branch(4, "9 Union Street", "BS1 5EF")]}
+
+
+def test_a_chain_is_recognised_from_its_addresses_not_its_url_slugs():
+    """A pizza chain kept its branches at /restaurants/<slug>, printed each
+    address in plain text, and declared no place markup at all - so the slug
+    signal missed it and the markup signal could not fire, because the markup
+    that would have identified the chain is the markup the chain is missing.
+    The bug and the defect were the same fact.
+    """
+    assert is_multi_location(TEXT_CHAIN)
+    assert len(pages_with_their_own_address(TEXT_CHAIN)) == 3   # the duplicate folds
+
+    single = {"origin": "https://x.test", "site": "x.test",
+              "pages": [_text_branch(1, "41 Walmgate", "YO1 9TT")]}
+    assert not is_multi_location(single)
+    assert len(pages_with_their_own_address(single)) == 1
+
+
+def test_the_same_address_written_three_ways_is_one_place():
+    """The street hint is a fuzzy substring match, so one head-office address
+    came out three slightly different ways across three pages of a
+    single-location fixture and was counted as three branches. A postal code
+    identifies a place; the street only describes it."""
+    pages = [{"url": "https://x.test/{}".format(i), "status": 200,
+              "contact_facts": {"street_hint": street, "postcode_hint": "97204"}}
+             for i, street in enumerate(("418 Harbour Street",
+                                         "418 Harbour Street, Portland",
+                                         "418 Harbour Street Portland OR"))]
+    snapshot = {"origin": "https://x.test", "site": "x.test", "pages": pages}
+    assert len(pages_with_their_own_address(snapshot)) == 1
+    assert not is_multi_location(snapshot)

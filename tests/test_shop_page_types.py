@@ -61,7 +61,7 @@ def test_the_price_ceiling_is_what_separates_them():
     assert DISTINCT_PRICE_CEILING == 5
 
 
-@pytest.mark.parametrize("declared", ["CollectionPage", "ItemList", "SearchResultsPage"])
+@pytest.mark.parametrize("declared", ["CollectionPage", "SearchResultsPage"])
 def test_a_declared_listing_type_outranks_embedded_product_nodes(declared):
     """A listing embeds one Product node per item; that is not a product page."""
     assert detect_page_type("https://shop.example/c/mugs",

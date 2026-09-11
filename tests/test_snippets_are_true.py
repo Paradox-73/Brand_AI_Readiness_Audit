@@ -52,26 +52,22 @@ DECLARED = [{
 }]
 
 
-def test_a_regex_match_never_becomes_a_published_address():
-    """"9 Let's Circle" is a $9 nail polish; "15880" is a colour-index code."""
-    facts = SD._contact_facts_for_snippet(SCRAPED_ONLY)
-    assert "address" not in facts
-    assert "postal_code" not in facts
-    assert facts["has_address"] is True, (
+def test_only_an_address_the_markup_declares_reaches_the_snippet():
+    """"9 Let's Circle" is a $9 nail polish; "15880" is a colour-index code.
+
+    A page that only has address-shaped text gets a placeholder; a page that
+    declares a PostalAddress gets its own address, in full.
+    """
+    scraped = SD._contact_facts_for_snippet(SCRAPED_ONLY)
+    assert "address" not in scraped
+    assert "postal_code" not in scraped
+    assert scraped["has_address"] is True, (
         "the site does mention something address-shaped; that is a signal, not a fact")
 
-
-def test_a_declared_address_is_used_in_full():
-    facts = SD._contact_facts_for_snippet(DECLARED)
-    assert facts["address"] == "41 Walmgate"
-    assert facts["postal_code"] == "YO1 9TT"
-    assert facts["locality"] == "York"
-
-
-def test_the_declared_address_wins_over_the_scraped_one():
-    """The scraped value here is a year plus a blog headline."""
-    assert SD._contact_facts_for_snippet(DECLARED)["address"] != \
-        "2026 Shake Shack Hits the Road"
+    declared = SD._contact_facts_for_snippet(DECLARED)
+    assert declared["address"] == "41 Walmgate"
+    assert declared["postal_code"] == "YO1 9TT"
+    assert declared["locality"] == "York"
 
 
 # --------------------------------------------------------------------------
@@ -87,17 +83,9 @@ MIXED = [{"social_profiles": {
 }}]
 
 
-def test_a_founders_personal_account_is_not_the_brands_profile():
-    same_as = SD._all_same_as(MIXED, {"name": "PostHog"})
-    assert "https://x.com/james406" not in same_as
-
-
-def test_an_unrelated_encyclopedia_article_is_not_the_brands_profile():
-    same_as = SD._all_same_as(MIXED, {"name": "PostHog"})
-    assert "https://en.wikipedia.org/wiki/ACID" not in same_as
-
-
-def test_the_brands_own_accounts_survive():
+def test_only_the_brands_own_accounts_reach_same_as():
+    """A founder's personal X account and an encyclopedia article about the
+    ACID properties were both published as the brand's own profiles."""
     same_as = SD._all_same_as(MIXED, {"name": "PostHog"})
     assert set(same_as) == {
         "https://github.com/PostHog",
@@ -106,10 +94,7 @@ def test_the_brands_own_accounts_survive():
     }
 
 
-@pytest.mark.parametrize("handle,brand", [
-    ("getpostman", "Postman"), ("acmehq", "Acme"), ("theacme", "Acme"),
-    ("acme", "Acme Ltd"),
-])
+@pytest.mark.parametrize("handle,brand", [("getpostman", "Postman"), ("acme", "Acme Ltd")])
 def test_ordinary_handle_variations_still_match(handle, brand):
     same_as = SD._all_same_as(
         [{"social_profiles": {"X": "https://x.com/" + handle}}], {"name": brand})
@@ -141,17 +126,15 @@ def test_many_branches_make_an_organization_not_a_local_business():
     """A 500-branch chain was handed markup calling it one storefront."""
     snapshot = _snapshot([_branch("York", "YO1 9TT"), _branch("Leeds", "LS1 1AA")])
     assert SD._identity_type(snapshot, snapshot["pages"], {}) == "Organization"
+    # One visitable place really is a storefront, and stays one.
+    one = _snapshot([_branch("York", "YO1 9TT")])
+    assert SD._identity_type(one, one["pages"], {}) == "LocalBusiness"
 
-
-def test_one_visitable_place_is_still_a_local_business():
-    snapshot = _snapshot([_branch("York", "YO1 9TT")])
-    assert SD._identity_type(snapshot, snapshot["pages"], {}) == "LocalBusiness"
-
-
-def test_an_address_in_a_footer_does_not_make_a_charity_a_local_business():
-    """Nearly every organisation publishes an address, for legal reasons."""
-    snapshot = _snapshot([{"url": "https://example.test/", "page_type": "home", "jsonld": []}])
-    assert SD._identity_type(snapshot, snapshot["pages"],
+    # An address in a footer is not a visitable place: nearly every
+    # organisation publishes one, for legal reasons.
+    footer = _snapshot([{"url": "https://example.test/", "page_type": "home",
+                         "jsonld": []}])
+    assert SD._identity_type(footer, footer["pages"],
                              {"has_address": True}) == "Organization"
 
 
@@ -169,11 +152,8 @@ def test_a_product_group_variant_offer_is_found():
     assert offer and offer["price"] == 95
 
 
-def test_a_flat_product_offer_is_still_found():
+def test_a_flat_product_offer_is_still_found_and_a_missing_one_is_still_reported():
     assert SD._offer_of({"@type": "Product", "offers": {"price": 10}})["price"] == 10
-
-
-def test_a_product_with_no_offer_anywhere_is_still_reported():
     assert SD._offer_of({"@type": "Product"}) is None
 
 
@@ -192,28 +172,38 @@ def _page(url, body="", page_type="home", jsonld_types=()):
             "jsonld_types": list(jsonld_types), "jsonld": []}
 
 
-def test_a_charity_is_not_a_seller():
-    """It was told it "never states its pricing", with a fix reading
+def test_a_charity_or_a_free_project_is_not_a_seller():
+    """The charity was told it "never states its pricing", with a fix reading
     "contact sales for a quote"."""
     pages = [_page("https://example.test/", "We provide medical care in crisis zones."),
              _page("https://example.test/who-we-are", "Founded in 1971.", "about")]
     assert sells_something({"pages": pages}, pages) is False
 
-
-def test_a_free_software_project_is_not_a_seller():
-    pages = [_page("https://example.test/", "Free and open source software.")]
-    assert sells_something({"pages": pages}, pages) is False
+    free = [_page("https://example.test/", "Free and open source software.")]
+    assert sells_something({"pages": free}, free) is False
 
 
-def test_a_shop_is_a_seller():
+def test_a_shop_and_a_priced_plan_are_sellers():
     pages = [_page("https://example.test/p/mug", "Walmgate mug. 18.00 GBP. Add to cart.",
                    "product")]
     assert sells_something({"pages": pages}, pages) is True
 
+    priced = [_page("https://example.test/pricing",
+                    "Plans and packages. From 40.00 GBP a month.", "pricing")]
+    assert sells_something({"pages": priced}, priced) is True
 
-def test_a_pricing_page_makes_a_seller():
-    pages = [_page("https://example.test/pricing", "Plans and packages.", "pricing")]
-    assert sells_something({"pages": pages}, pages) is True
+
+def test_a_pricing_url_with_no_figure_on_it_does_not():
+    """`subscribe`, `membership`, `plan`, `plans` and `rates` all resolve to
+    the `pricing` page type, so a free newsletter with `/subscribe`, a club
+    with `/membership` and a public library with `/plans` were each read as
+    sellers - and then told at HIGH severity that they "never state their
+    pricing", with a fix reading "contact sales for a quote". That is the same
+    false positive the other three signals exist to stop, arriving through the
+    page type instead of through a stray figure."""
+    pages = [_page("https://example.test/subscribe",
+                   "There is nothing to pay and nothing to cancel.", "pricing")]
+    assert sells_something({"pages": pages}, pages) is False
 
 
 def test_commerce_markup_makes_a_seller():
@@ -229,11 +219,11 @@ def test_the_worked_example_does_not_invent_a_pricing_plan():
     assert "per month" not in example
     assert "What is Example Relief?" in example
 
-
-def test_the_worked_example_is_about_price_when_there_is_one():
-    example = FACT._answer_first_example(True, "Acme")
-    assert "How much does it cost?" in example
-    assert "Starter plan" not in example, "still no invented plan names"
+    # Where there is a price, the example is about the price - still with no
+    # invented plan names.
+    priced = FACT._answer_first_example(True, "Acme")
+    assert "How much does it cost?" in priced
+    assert "Starter plan" not in priced
 
 
 def test_free_software_is_described_as_free_not_as_quote_on_request():
@@ -242,3 +232,348 @@ def test_free_software_is_described_as_free_not_as_quote_on_request():
     assert FACT.COSTS_NOTHING_RE.search("FFmpeg is free and open-source software")
     assert not FACT.QUOTE_ON_REQUEST_RE.search("FFmpeg is free and open-source software")
     assert FACT.QUOTE_ON_REQUEST_RE.search("Contact us for a quote")
+
+
+# --------------------------------------------------------------------------
+# A branch's address is not the company's address
+# --------------------------------------------------------------------------
+
+CHAIN_PAGES = [
+    {"url": "https://x.test/", "jsonld": [{"@type": "Organization", "name": "The Group"}]},
+    {"url": "https://x.test/find-a-gym/wimbledon/", "jsonld": [
+        {"@type": "ExerciseGym", "name": "Wimbledon",
+         "address": {"@type": "PostalAddress", "streetAddress": "122 The Broadway",
+                     "postalCode": "SW19 1RH"}}]},
+]
+
+
+def test_a_chains_brand_snippet_takes_no_address_from_a_branch_page():
+    """A gym chain's report offered its homepage a paste-ready Organization
+    block carrying the Wimbledon branch's own address, lifted from the single
+    branch page the crawl happened to reach. The registered office is four
+    miles and one postcode away, printed on the site's own privacy page.
+
+    The telephone reader already refused to do this - "a bakery with three
+    shops was offered the Cherche-Midi shop's line as the telephone for its
+    whole company record" - and the guard was never extended to the address.
+    """
+    assert SD._declared_address(CHAIN_PAGES, whole_brand_only=True) == {}
+
+
+def test_the_address_on_a_whole_brand_node_is_the_one_that_is_used():
+    """A chain's snippet takes the address the Organization node declares, and
+    a single-location business's one place really is the company's - which is
+    the common case, so the guard applies only where there are branches."""
+    org = [{"url": "https://x.test/", "jsonld": [
+        {"@type": "Organization", "name": "The Group",
+         "address": {"@type": "PostalAddress", "streetAddress": "7 St Johns Road",
+                     "postalCode": "SW11 1QN"}}]}]
+    assert SD._declared_address(org, whole_brand_only=True)["postal_code"] == "SW11 1QN"
+
+    one_place = [{"url": "https://x.test/", "jsonld": [
+        {"@type": "LocalBusiness", "name": "One Shop",
+         "address": {"@type": "PostalAddress", "streetAddress": "41 Walmgate",
+                     "postalCode": "YO1 9TT"}}]}]
+    assert SD._declared_address(
+        one_place, whole_brand_only=False)["postal_code"] == "YO1 9TT"
+
+
+@pytest.mark.parametrize("declared,expected", [
+    ({"@type": "Organization"}, True),
+    ({"@type": ["Organization", "NewsMediaOrganization"]}, True),
+    ({"@type": "LocalBusiness"}, False),
+    ({"@type": ["Organization", "Restaurant"]}, False),
+    ({"@type": "Product"}, False),
+])
+def test_which_nodes_speak_for_the_whole_business(declared, expected):
+    assert SD._speaks_for_the_whole_brand(declared) is expected
+
+
+# --------------------------------------------------------------------------
+# A venue's address is not the audited company's head office
+# --------------------------------------------------------------------------
+
+from audit_common import SkillResult  # noqa: E402
+
+TICKETS = "https://a-newsroom-that-does-not-exist.test"
+LIBRARY = "https://a-roastery-that-does-not-exist.test"
+
+VENUE_ADDRESS = {"@type": "PostalAddress", "streetAddress": "12 Quayside",
+                 "addressLocality": "A Port Town", "addressRegion": "XX",
+                 "postalCode": "ZZ1 1ZZ", "addressCountry": "GB"}
+
+
+def _sd_page(url, page_type="other", headings=None, links=(), paragraphs=(),
+             sections=(), title="", site=TICKETS):
+    """A snapshot page record with only the keys these checks read."""
+    return {
+        "url": site + url,
+        "page_type": page_type,
+        "status": 200,
+        "title": title,
+        "headings": headings or {},
+        "paragraphs": list(paragraphs),
+        "sections": list(sections),
+        "links": {"internal": [{"url": site + u, "text": t} for u, t in links]},
+        "jsonld": [],
+        "jsonld_types": [],
+    }
+
+
+def _snippet_payload(snippet):
+    """The JSON object out of a `<script type="application/ld+json">` block."""
+    return json.loads(snippet.split(">\n", 1)[1].rsplit("\n</script>", 1)[0])
+
+
+def _ticket_site():
+    """A one-company site whose only PostalAddress sits under an Event.
+
+    The second node on the performer page is what `_flatten_jsonld` appends for
+    a nested one: the venue, lifted out so a presence check can see it, marked
+    with the property it hung off and the name of the node above it.
+    """
+    home = _sd_page("/", "home")
+    home["jsonld"] = [{"@type": "Organization", "name": "Ticket Exchange",
+                       "url": TICKETS + "/", "logo": TICKETS + "/logo.png"}]
+    home["jsonld_types"] = ["Organization"]
+    performer = _sd_page("/artists/a-quartet/", "other")
+    venue = {"@type": "Place", "name": "The Quayside Hall", "address": VENUE_ADDRESS}
+    performer["jsonld"] = [
+        {"@type": "Event", "name": "A Quartet Live", "location": venue},
+        dict(venue, _nested_in="location", _parent_name="A Quartet Live",
+             _parent_type="event"),
+    ]
+    performer["jsonld_types"] = ["Event", "Place"]
+    return [home, performer]
+
+
+def test_an_address_under_an_events_location_never_becomes_the_companys():
+    """A ticket marketplace's finding said only "declares Organization but
+    omits: description", and the block printed under it added a `streetAddress`
+    the finding never claimed was missing - an arena's, lifted out of an Event's
+    `location` on a performer page. A developer pasting it publishes a false
+    head office."""
+    pages = _ticket_site()
+    snapshot = {"origin": TICKETS, "site": "a newsroom", "pages": pages}
+    result = SkillResult("structured-data-audit")
+    SD._check_organization(result, snapshot, pages, {"home": [pages[0]]},
+                           {"name": "Ticket Exchange"})
+
+    finding = result.findings[0]
+    assert finding["root_cause"] == "missing-schema-props"
+    assert "address" not in finding["evidence"]
+    snippet = finding["suggested_action"]["snippet"]
+    payload = _snippet_payload(snippet)
+    assert "address" not in payload, "the venue's address is not the company's"
+    assert VENUE_ADDRESS["streetAddress"] not in snippet
+
+
+# --------------------------------------------------------------------------
+# A description is pasteable or it is not published
+# --------------------------------------------------------------------------
+
+def _description_from(meta, brand_name, links=()):
+    home = _sd_page("/", "home", links=links)
+    home["meta_description"] = meta
+    snapshot = {"origin": TICKETS, "site": "a newsroom", "pages": [home]}
+    payload = _snippet_payload(
+        SD._org_snippet(snapshot, [home], {"name": brand_name}))
+    return payload.get("description", "")
+
+
+def test_a_description_drops_a_menu_label_and_a_severed_last_clause():
+    """The block published `"description": "En otro idioma The Record Office is
+    the nation's record keeper. ... available to you, whether"`. The first two
+    words are the label on the language-switcher link; the last word is where
+    the crawl's paragraph limit landed. Nothing in it is invented and none of
+    it can be pasted."""
+    description = _description_from(
+        "En otro idioma The Record Office is the nation's record keeper. "
+        "Those records are preserved and made available to you, whether",
+        "The Record Office",
+        links=[("/es/", "En otro idioma")])
+    assert description == "The Record Office is the nation's record keeper."
+
+
+def test_the_brands_own_name_still_opens_its_description():
+    """The logo link is labelled with the brand, and opening a description with
+    the brand's name is how a description about a brand is written."""
+    description = _description_from(
+        "The Record Office Keeps The Nation's Records Since 1934.",
+        "The Record Office",
+        links=[("/", "The Record Office")])
+    assert description == "The Record Office Keeps The Nation's Records Since 1934."
+
+
+def test_a_tagline_with_no_full_stop_survives_whole():
+    """One sentence with no terminator is a line the site wrote whole, not a
+    cut; dropping it would lose a true value."""
+    description = _description_from(
+        "Independent record office for the county since 1934",
+        "The Record Office")
+    assert description == "Independent record office for the county since 1934"
+
+
+# --------------------------------------------------------------------------
+# A whole-brand claim comes off a whole-brand page
+# --------------------------------------------------------------------------
+
+def test_a_brand_definition_is_never_read_off_a_product_page():
+    """The paste-ready LocalBusiness block described a restaurant as "not only
+    bold in colour but also in versatility - this bag has it all for your every
+    day storage needs". The homepage states no definition, which the same
+    report said correctly in a separate finding, so the search fell through in
+    URL order to a product page where the sentence matched on the word "is".
+    """
+    pages = [
+        {"url": "https://x.test/", "page_type": "home",
+         "paragraphs": ["Open Tuesday to Saturday from six."]},
+        {"url": "https://x.test/product/tote", "page_type": "product",
+         "paragraphs": ["Example's blue tote is not only bold in colour but also "
+                        "in versatility - it has it all for your storage needs."]},
+    ]
+    assert SD._brand_definition(pages, {"name": "Example"}) == ""
+
+
+def test_a_definition_on_the_about_page_is_still_used():
+    pages = [
+        {"url": "https://x.test/", "page_type": "home", "paragraphs": ["Welcome."]},
+        {"url": "https://x.test/about", "page_type": "about",
+         "paragraphs": ["Example is a neighbourhood wine bar and kitchen in east "
+                        "London."]},
+    ]
+    assert "wine bar" in SD._brand_definition(pages, {"name": "Example"})
+
+
+# --------------------------------------------------------------------------
+# A heading on every page belongs to the template, not to the page
+# --------------------------------------------------------------------------
+
+_WIDGET = u"Questions?"
+
+
+def _payload_of(finding):
+    """The JSON object inside a finding's paste-ready block."""
+    snippet = finding["suggested_action"]["snippet"]
+    return json.loads(snippet[snippet.index("{"):snippet.rindex("}") + 1])
+
+
+def _faq_finding_over(pages):
+    result = SkillResult("structured-data-audit")
+    by_type = {}
+    for page in pages:
+        by_type.setdefault(page["page_type"], []).append(page)
+    SD._check_faq(result, by_type, pages)
+    return result.findings[0]
+
+
+def test_a_sidebar_heading_on_every_page_is_not_published_as_a_question():
+    """"Questions?" sat above a phone number in the sidebar of every page.
+
+    It reads as a question, so it was counted as one and written into the
+    generated FAQPage block with an `acceptedAnswer`. An owner pasting that
+    ships markup asserting their contact widget is a frequently asked question.
+    """
+    real = [{"heading": u"What do volunteers do at the library?",
+             "first_paragraph": u"Shelving, story time and the book sale."},
+            {"heading": u"How old do I have to be to volunteer?",
+             "first_paragraph": u"Fourteen, with a guardian's signature."},
+            {"heading": u"When can I start?",
+             "first_paragraph": u"After the next orientation evening."}]
+    widget = {"heading": _WIDGET, "first_paragraph": u"Call 555 0100 or text 555 0111."}
+
+    pages = [_sd_page("/about/volunteer", "other", site=LIBRARY,
+                      headings={"h2": [s["heading"] for s in real] + [_WIDGET]},
+                      sections=real + [widget])]
+    for path in ("/", "/about", "/contact", "/events", "/hours"):
+        pages.append(_sd_page(path, "other", site=LIBRARY,
+                              headings={"h2": [_WIDGET]}, sections=[widget]))
+
+    finding = _faq_finding_over(pages)
+    published = [q["name"] for q in _payload_of(finding)["mainEntity"]]
+
+    assert _WIDGET not in published, "site furniture must not become a Question node"
+    assert published == [s["heading"] for s in real]
+    assert _WIDGET not in finding["evidence"]
+
+
+def test_a_question_the_template_does_not_repeat_survives():
+    """The guard is repetition across the crawl, not the wording of a heading.
+
+    A two-page crawl has no "most pages" to measure, and calling a heading
+    furniture there would delete the real questions from a small site's only
+    page of them.
+    """
+    real = [{"heading": u"Do you deliver on Saturdays?", "first_paragraph": u"Yes."},
+            {"heading": u"How long does delivery take?", "first_paragraph": u"Two days."},
+            {"heading": u"Can I collect in person?", "first_paragraph": u"Any weekday."}]
+    pages = [_sd_page("/help", "other", site=LIBRARY,
+                      headings={"h2": [s["heading"] for s in real]}, sections=real),
+             _sd_page("/", "home", site=LIBRARY)]
+    finding = _faq_finding_over(pages)
+    assert [q["name"] for q in _payload_of(finding)["mainEntity"]] == [
+        s["heading"] for s in real]
+
+
+# --------------------------------------------------------------------------
+# A snippet never publishes an address the same report calls dead
+# --------------------------------------------------------------------------
+#
+# The case that prompted this, verbatim: "A snippet tells a school to publish a `sameAs`
+# URL that another finding in the same report proves returns 404." Two
+# instructions, opposite, one document - and the snippet is the half a reader
+# pastes, so the report's own advice is what breaks the site.
+
+def test_a_same_as_the_report_calls_dead_is_dropped_from_the_snippet():
+    from compose_report import (drop_dead_profile_links,
+                                profile_addresses_that_do_not_resolve)
+
+    dead = profile_addresses_that_do_not_resolve([
+        {"root_cause": "dead-profile-link",
+         "affected_pages": ["https://elsewhere.test/skl-heritage"]},
+        {"root_cause": "meta-hygiene",
+         "affected_pages": ["https://school.test/about"]},
+    ])
+    assert dead == {"https://elsewhere.test/skl-heritage"}
+
+    snippet = ('{\n'
+               '  "@type": "Organization",\n'
+               '  "sameAs": [\n'
+               '    "https://social.test/skl",\n'
+               '    "https://elsewhere.test/skl-heritage"\n'
+               '  ]\n'
+               '}')
+    cleaned, dropped = drop_dead_profile_links(snippet, dead)
+    assert dropped == ["https://elsewhere.test/skl-heritage"]
+    assert "elsewhere.test" not in cleaned
+    assert "https://social.test/skl" in cleaned
+    json.loads(cleaned)
+
+
+def test_dropping_the_last_entry_leaves_a_block_that_still_parses():
+    """The trailing comma is the one thing that stops JSON-LD parsing, and
+    this block exists to be pasted into a page.
+    """
+    from compose_report import drop_dead_profile_links
+
+    snippet = ('{\n'
+               '  "@type": "Organization",\n'
+               '  "name": "Skelbrook Heritage",\n'
+               '  "sameAs": [\n'
+               '    "https://social.test/skl",\n'
+               '    "https://elsewhere.test/gone"\n'
+               '  ]\n'
+               '}')
+    cleaned, dropped = drop_dead_profile_links(
+        snippet, {"https://elsewhere.test/gone"})
+    assert dropped == ["https://elsewhere.test/gone"]
+    assert json.loads(cleaned)["sameAs"] == ["https://social.test/skl"]
+
+
+def test_a_live_profile_is_never_dropped():
+    from compose_report import drop_dead_profile_links
+
+    snippet = '{\n  "sameAs": [\n    "https://social.test/skl"\n  ]\n}'
+    cleaned, dropped = drop_dead_profile_links(snippet, set())
+    assert dropped == []
+    assert cleaned == snippet

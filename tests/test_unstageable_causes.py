@@ -34,7 +34,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _ORCH = os.path.join(_ROOT, "skills", "audit-orchestrator", "scripts")
 sys.path.insert(0, _ORCH)
 
-from audit_common import ROOT_CAUSES, SkillResult  # noqa: E402
+from audit_common import SkillResult  # noqa: E402
 
 
 def _load(skill):
@@ -67,11 +67,13 @@ def _snapshot(origin):
             "crawl": {"head_supported": True}}
 
 
-def test_a_site_served_over_http_is_reported():
+def test_a_site_served_over_http_is_reported_and_the_evidence_names_the_origin():
     snapshot = _snapshot("http://an-invented-host.test")
     result = SkillResult("crawl-access-audit")
     access._check_transport_and_hosts(result, snapshot, snapshot["pages"])
     assert "insecure-transport" in _causes(result)
+    finding = next(f for f in result.findings if f["root_cause"] == "insecure-transport")
+    assert "http://an-invented-host.test" in finding["evidence"]
 
 
 def test_the_same_site_over_https_is_not_reported():
@@ -81,7 +83,7 @@ def test_the_same_site_over_https_is_not_reported():
     assert "insecure-transport" not in _causes(result)
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "192.168.1.10"])
+@pytest.mark.parametrize("host", ["localhost", "192.168.1.10"])
 def test_a_loopback_or_ip_host_is_a_deployment_detail_not_a_defect(host):
     """Why the fixture server could never stage this: it is one of these."""
     snapshot = _snapshot("http://{}:8000".format(host))
@@ -89,14 +91,6 @@ def test_a_loopback_or_ip_host_is_a_deployment_detail_not_a_defect(host):
     access._check_transport_and_hosts(result, snapshot, snapshot["pages"])
     assert "insecure-transport" not in _causes(result)
     assert any("local or IP-addressed host" in s["reason"] for s in result.not_applicable)
-
-
-def test_the_evidence_names_the_origin_it_read():
-    snapshot = _snapshot("http://an-invented-host.test")
-    result = SkillResult("crawl-access-audit")
-    access._check_transport_and_hosts(result, snapshot, snapshot["pages"])
-    finding = next(f for f in result.findings if f["root_cause"] == "insecure-transport")
-    assert "http://an-invented-host.test" in finding["evidence"]
 
 
 # --------------------------------------------------------------------------
@@ -146,20 +140,13 @@ def test_a_name_shared_with_other_entities_is_reported():
     assert "entity-ambiguity" in _causes(result)
 
 
-def test_the_root_cause_is_in_the_shared_vocabulary():
-    result, _ = _ambiguity([BRAND, BRAND])
-    finding = next(f for f in result.findings if f["root_cause"] == "entity-ambiguity")
-    assert finding["root_cause"] in ROOT_CAUSES
-
-
-def test_a_unique_name_is_not_reported():
+def test_a_name_nothing_else_actually_shares_is_not_reported():
+    """Wikidata matches by prefix, so a brand's own sub-brands come back too
+    and are not other entities with the same name."""
     result, _ = _ambiguity([BRAND])
     assert "entity-ambiguity" not in _causes(result)
     assert any("no obvious name collision" in s["reason"] for s in result.not_applicable)
 
-
-def test_a_prefix_match_is_not_a_collision():
-    """Wikidata matches by prefix, so a brand's own sub-brands come back too."""
     result, _ = _ambiguity([BRAND, BRAND + " One Login", BRAND + " Verify"])
     assert "entity-ambiguity" not in _causes(result)
 

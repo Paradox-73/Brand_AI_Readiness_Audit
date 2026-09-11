@@ -38,7 +38,7 @@ def _ids(mutations):
 def clean_baseline(tmp_path_factory):
     """The unmutated site must report nothing, or every case below is void."""
     out_dir = str(tmp_path_factory.mktemp("baseline"))
-    server, result = _audit(FIXTURE, out_dir)
+    server, result = _audit(FIXTURE, out_dir, render=False)
     try:
         yield result.root_causes
     finally:
@@ -61,7 +61,7 @@ def test_mutation_is_detected_and_specific(case, clean_baseline, tmp_path_factor
 
     out_dir = os.path.join(work, "out")
     os.makedirs(out_dir)
-    server, result = _audit(FIXTURE, out_dir, site_dir=site)
+    server, result = _audit(FIXTURE, out_dir, site_dir=site, render=False)
     try:
         found = result.root_causes
     finally:

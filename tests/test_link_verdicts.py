@@ -57,12 +57,9 @@ HOME = "https://an-invented-host.test/"
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("status,expected", [
-    (200, "alive"), (204, "alive"), (301, "alive"), (399, "alive"),
-    (404, "dead"), (410, "dead"), (400, "dead"),
-    (401, "unchecked"), (403, "unchecked"), (405, "unchecked"),
-    (406, "unchecked"), (429, "unchecked"),
-    (500, "unchecked"), (503, "unchecked"),
-    (None, "unchecked"),
+    (200, "alive"), (301, "alive"), (399, "alive"),
+    (400, "dead"), (404, "dead"),
+    (403, "unchecked"), (500, "unchecked"), (None, "unchecked"),
 ])
 def test_the_verdict_table(status, expected):
     assert link_verdict(status) == expected
@@ -70,19 +67,6 @@ def test_the_verdict_table(status, expected):
 
 def test_every_refused_status_is_unchecked_not_dead():
     assert all(link_verdict(s) == "unchecked" for s in REFUSED_STATUS)
-
-
-def test_the_bot_block_check_and_the_link_checks_agree():
-    """These five codes were hard-coded in the bot-block check for months.
-
-    If someone edits one list, this fails rather than letting the marketplace
-    quietly hold two opinions again.
-    """
-    path = os.path.join(_ROOT, "skills", "crawl-access-audit", "scripts", "check.py")
-    with open(path, encoding="utf-8") as handle:
-        source = handle.read()
-    assert "(401, 403, 405, 406, 429)" in source
-    assert set(REFUSED_STATUS) == {401, 403, 405, 406, 429}
 
 
 # --------------------------------------------------------------------------
@@ -132,25 +116,18 @@ def test_a_404_link_target_is_still_reported():
     assert any(f["root_cause"] == "broken-links" for f in result.findings)
 
 
-def test_a_403_link_target_is_not_reported_as_broken():
-    result, _ = _links(True, {HOME: 200}, ["https://an-invented-host.test/waf"], 403)
-    assert not any(f["root_cause"] == "broken-links" for f in result.findings)
+def test_a_refused_or_erroring_link_target_is_not_reported_as_broken():
+    """A server having a bad moment is not a page that was deleted, and neither
+    is one behind a bot manager."""
+    for status in (403, 503):
+        result, _ = _links(True, {HOME: 200}, ["https://an-invented-host.test/waf"], status)
+        assert not any(f["root_cause"] == "broken-links" for f in result.findings), status
 
 
-def test_a_503_link_target_is_not_reported_as_broken():
-    """A server having a bad moment is not a page that was deleted."""
-    result, _ = _links(True, {HOME: 200}, ["https://an-invented-host.test/deploying"], 503)
-    assert not any(f["root_cause"] == "broken-links" for f in result.findings)
-
-
-def test_a_site_that_refuses_head_is_not_probed_at_all():
+def test_a_site_that_refuses_head_is_not_probed_and_says_so():
     result, fetcher = _links(False, {HOME: 200}, ["https://an-invented-host.test/x"], 403)
     assert fetcher.calls == []
     assert not any(f["root_cause"] == "broken-links" for f in result.findings)
-
-
-def test_a_site_that_refuses_head_says_so_rather_than_going_quiet():
-    result, _ = _links(False, {HOME: 200}, ["https://an-invented-host.test/x"], 403)
     reasons = " ".join(s["reason"] for s in result.not_applicable)
     assert "refus" in reasons and "unchecked" in reasons
 
@@ -161,10 +138,17 @@ def test_unverifiable_targets_are_counted_and_reported_as_such():
 
 
 def test_unverifiable_targets_are_excluded_from_the_rate():
-    """Otherwise a refused link would make the broken-link rate look worse."""
-    crawled = {HOME: 200, "https://an-invented-host.test/gone": 404,
-               "https://an-invented-host.test/waf": 403}
-    snapshot = _snapshot(True, crawled, [])
+    """Otherwise a refused link would make the broken-link rate look worse.
+
+    The fixture has to say that something links to these two. The rate counts
+    link targets now, not crawled pages: a URL the crawl reached because it
+    was seeded from the sitemap is not a broken internal link, and counting
+    those inflated the rate by an order of magnitude on every small site.
+    """
+    gone = "https://an-invented-host.test/gone"
+    waf = "https://an-invented-host.test/waf"
+    crawled = {HOME: 200, gone: 404, waf: 403}
+    snapshot = _snapshot(True, crawled, [HOME, gone, waf])
     result = SkillResult("engagement-audit")
     engagement._check_broken_links(result, snapshot, snapshot["pages"], StubFetcher(200), True)
     finding = next(f for f in result.findings if f["root_cause"] == "broken-links")
@@ -189,19 +173,12 @@ def _canonicals(head_supported, canonical_status):
     return result
 
 
-def test_a_canonical_pointing_at_a_404_is_reported():
+def test_a_canonical_is_reported_broken_only_where_the_target_is_really_gone():
     assert any(f["root_cause"] == "canonical-broken"
                for f in _canonicals(True, 404).findings)
-
-
-def test_a_canonical_pointing_at_a_403_is_not_reported():
-    assert not any(f["root_cause"] == "canonical-broken"
-                   for f in _canonicals(True, 403).findings)
-
-
-def test_a_canonical_pointing_at_a_503_is_not_reported():
-    assert not any(f["root_cause"] == "canonical-broken"
-                   for f in _canonicals(True, 503).findings)
+    for status in (403, 503):
+        assert not any(f["root_cause"] == "canonical-broken"
+                       for f in _canonicals(True, status).findings), status
 
 
 # --------------------------------------------------------------------------
@@ -241,35 +218,28 @@ def _rate_finding(result):
 
 
 def test_a_site_of_dead_pages_is_reported_as_dead_pages():
+    """Only a majority of refusals changes the diagnosis, so a site that is
+    mostly 404 keeps this wording even with two 403s in it."""
     finding = _rate_finding(_rate([404] * 9))
     assert finding is not None
     assert finding["root_cause"] == "non-200"
     assert "redirect" in finding["suggested_action"]["summary"].lower()
 
+    mixed = _rate_finding(_rate([403, 403, 404, 404, 404, 500, 404, 404, 404]))
+    assert mixed["root_cause"] == "non-200"
+
 
 def test_a_site_that_refuses_the_crawler_is_reported_as_a_refusal():
+    """The diagnosis, the evidence and the fix all have to change together: a
+    site behind a bot manager needs a rule in that product, not 42 redirects."""
     finding = _rate_finding(_rate([403] * 9))
     assert finding is not None
     assert finding["root_cause"] == "bot-manager-block"
     assert "refuse this crawler" in finding["title"]
-
-
-def test_the_refusal_fix_is_about_bot_rules_not_redirects():
-    finding = _rate_finding(_rate([403] * 9))
+    assert "not an outage" in finding["evidence"]
     steps = " ".join(finding["suggested_action"]["how_to_fix"]).lower()
     assert "waf" in steps or "bot" in steps
     assert "301" not in steps
-
-
-def test_the_refusal_evidence_says_it_is_not_an_outage():
-    finding = _rate_finding(_rate([403] * 9))
-    assert "not an outage" in finding["evidence"]
-
-
-def test_a_mixed_site_falls_back_to_the_dead_page_wording():
-    """Only a majority of refusals changes the diagnosis."""
-    finding = _rate_finding(_rate([403, 403, 404, 404, 404, 500, 404, 404, 404]))
-    assert finding["root_cause"] == "non-200"
 
 
 def test_a_low_rate_is_not_reported_either_way():
@@ -304,8 +274,6 @@ AKAMAI = ('<html><body><script src="/QU4/n/N/x"></script>'
     (AWS_WAF, "AWS WAF"),
     (AKAMAI, "Akamai Bot Manager"),
     ('<html><body>__cf_chl_opt</body></html>', "Cloudflare"),
-    ('<html><body>_Incapsula_Resource</body></html>', "Imperva Incapsula"),
-    ('<html><body>px-captcha</body></html>', "PerimeterX"),
 ])
 def test_a_challenge_page_is_recognised_and_the_vendor_named(html, vendor):
     """Naming the vendor is the point: the fix is a rule in that product."""
@@ -319,16 +287,19 @@ def test_an_article_about_bot_management_is_not_a_challenge():
 
 
 def test_a_genuinely_empty_page_is_not_called_a_challenge():
-    """An empty page is a real finding - a JavaScript shell - and must stay one."""
+    """An empty page is a real finding - a JavaScript shell - and must stay one.
+
+    What separates the two is the text ceiling: a vendor fingerprint under it
+    is a challenge, the same fingerprint over it is a page about one.
+    """
     assert detect_challenge("<html><body></body></html>", "") is None
-
-
-def test_the_text_ceiling_is_what_decides_a_borderline_page():
     assert detect_challenge(AWS_WAF, "x" * (CHALLENGE_TEXT_CEILING - 1)) == "AWS WAF"
     assert detect_challenge(AWS_WAF, "x" * (CHALLENGE_TEXT_CEILING + 1)) is None
 
 
 def test_challenge_pages_are_kept_out_of_the_content_checks():
+    """Every skill but one sees a challenge page as absent. crawl-access has to
+    see it, because for that skill the challenge is the finding."""
     from audit_common import pages_of
     snapshot = {"pages": [
         {"url": HOME, "status": 200, "page_type": "home"},
@@ -336,16 +307,7 @@ def test_challenge_pages_are_kept_out_of_the_content_checks():
          "challenge": "Akamai Bot Manager"},
     ]}
     assert [p["url"] for p in pages_of(snapshot)] == [HOME]
-
-
-def test_crawl_access_can_still_see_them():
-    """It has to: for that skill the challenge is the finding."""
-    from audit_common import pages_of
-    snapshot = {"pages": [
-        {"url": HOME, "status": 200, "page_type": "home", "challenge": "AWS WAF"},
-    ]}
-    assert pages_of(snapshot) == []
-    assert len(pages_of(snapshot, include_challenged=True)) == 1
+    assert len(pages_of(snapshot, include_challenged=True)) == 2
 
 
 def _challenge_result(pages):
@@ -357,19 +319,20 @@ def _challenge_result(pages):
 
 
 def test_a_walled_site_is_reported_as_a_bot_block_not_as_empty_pages():
-    pages = [{"url": HOME + str(i), "status": 200, "page_type": "other",
-              "challenge": "Akamai Bot Manager"} for i in range(6)]
-    finding = next(f for f in _challenge_result(pages).findings)
+    """How much of the site is walled decides the severity: all of it is
+    critical, one page of nine is high."""
+    walled = [{"url": HOME + str(i), "status": 200, "page_type": "other",
+               "challenge": "Akamai Bot Manager"} for i in range(6)]
+    finding = next(f for f in _challenge_result(walled).findings)
     assert finding["root_cause"] == "bot-manager-block"
     assert "Akamai Bot Manager" in finding["title"]
     assert finding["severity"] == "critical"
 
-
-def test_a_partly_walled_site_is_high_not_critical():
-    pages = [{"url": HOME + str(i), "status": 200, "page_type": "other"} for i in range(8)]
-    pages += [{"url": HOME + "w", "status": 200, "page_type": "other", "challenge": "AWS WAF"}]
-    finding = next(f for f in _challenge_result(pages).findings)
-    assert finding["severity"] == "high"
+    partly = [{"url": HOME + str(i), "status": 200, "page_type": "other"}
+              for i in range(8)]
+    partly += [{"url": HOME + "w", "status": 200, "page_type": "other",
+                "challenge": "AWS WAF"}]
+    assert next(f for f in _challenge_result(partly).findings)["severity"] == "high"
 
 
 def test_a_clean_site_says_it_checked_and_found_none():

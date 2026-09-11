@@ -1,20 +1,17 @@
 # Brand AI-Readiness Audit
 ### An Agent Skill Marketplace · Adobe University Hackathon 2026 — Round 3
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
-![Agent Skills](https://img.shields.io/badge/Agent%20Skills-agentskills.io-6E56CF?style=flat-square)
-![Skills](https://img.shields.io/badge/Skills-7%20(1%20entrypoint)-0F9D58?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-924%20passing-2EA043?style=flat-square)
-![Read Only](https://img.shields.io/badge/Mode-Read--only-FF6F00?style=flat-square)
-![License](https://img.shields.io/badge/License-MIT-4169E1?style=flat-square)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white) ![Agent Skills](https://img.shields.io/badge/Agent%20Skills-agentskills.io-6E56CF?style=flat-square) ![Skills](https://img.shields.io/badge/Skills-7%20(1%20entrypoint)-0F9D58?style=flat-square) ![Read Only](https://img.shields.io/badge/Mode-Read--only-FF6F00?style=flat-square) ![License](https://img.shields.io/badge/License-MIT-4169E1?style=flat-square)
 
 Point it at any website. It reports why AI assistants cannot find, read, trust or correctly
 describe that brand, and why visitors who do arrive leave again — with the evidence for each
 problem and the specific fix.
 
-> **Read-only.** GET and HEAD only, robots.txt respected, 0.5 s between requests. The audit
-> never signs in, submits a form, or touches `/cart`, `/checkout`, `/login` or `/admin`. It
-> recommends changes; it never makes them. Enforced in code, not promised in prose.
+> **Read-only.** GET and HEAD only. robots.txt obeyed, `Crawl-delay` included and in full — a
+> slower crawl means a smaller sample, not a faster crawler. One exception, named not hidden:
+> two calls to Wikidata's public JSON API, which Wikimedia asks bots to use *instead of*
+> crawling wiki pages. Never signs in, submits a form, or touches `/cart`, `/checkout`,
+> `/login` or `/admin`. Both its HTTP clients pass one guard: enforced in code, not in prose.
 
 ---
 
@@ -33,12 +30,13 @@ matters if the one before it passed.
 | `freshness-corroboration-audit` | Is it current, and does anywhere else agree? Dates, staleness, off-site profile breadth, name collisions | Trusted |
 | `engagement-audit` | Does the person who clicks through stay? Orientation, dead ends, orphans, broken links, breadcrumbs, interstitials, forms | Visitor stays |
 
-Between them the six run **73 checks**, drawing on a catalogue of **80 distinct findings**
-and **56 named root causes**. A single audit reports only the ones its evidence supports —
-a typical small site produces ten to twenty.
+Between them the six run **96 checks**, drawing on a catalogue of **119 distinct findings**
+and **59 named root causes**. A single audit reports only the ones its evidence supports — a
+typical small site produces ten to twenty. Six is the number of gates there are, and a test
+fails the build if any two skills ever claim the same root cause.
 
-Six is the number of gates there are. A test fails the build if any two skills ever claim the
-same root cause, so the separation is enforced rather than asserted.
+**A finding that says something is missing says where it looked.** 28 of the 59 root causes
+assert a negative; each carries the sources it consulted, and one source caps it at medium.
 
 ---
 
@@ -69,9 +67,9 @@ same root cause, so the separation is enforced rather than asserted.
 The six sub-skills **never fetch the site themselves**. They read fields off `snapshot.json`.
 That is what makes this one crawl rather than six.
 
-**Measured, not estimated.** The crawl is capped at 60 page requests, and four sub-skills then
-make a bounded number of extra read-only requests, declared in each skill's `compatibility`
-line and capped at 40, 16, 10 and 2. On two large public sites the totals were **117 and 103
+**Measured, not estimated.** The crawl is capped at 60 page requests; the three sub-skills that
+probe make a bounded number of extra read-only ones, capped at 30, 40 and 16 and declared in
+each skill's `compatibility` line. On two large public sites the totals were **117 and 103
 requests, in 223 s and 195 s** of the 300 allowed; `--no-network` reduces it to the 60.
 
 `compose_report.py` merges the six result files. It deduplicates **across** skills — while
@@ -111,45 +109,40 @@ snippet is invented: a value appearing nowhere in the crawl becomes a placeholde
 borrowed from the wrong subject, so a sentence describing the brand may only be read off a
 page that speaks for the brand.
 
-**Nothing about a third party is asserted without a source.** Every AI crawler this audit
-names carries its operator's own description of what it does, the URL that states it and the
-date that page was read; the report renders those rather than repeating them. The audit will
-never tell you to allow a training crawler in order to be cited. See
-`skills/crawl-access-audit/references/ai-crawler-user-agents.md`.
+**Nothing about a third party is asserted without a source.** Every AI crawler this audit names
+carries its operator's own description of what it does, the URL that states it and the date that
+page was read. The audit will never tell you to allow a training crawler in order to be cited.
+See `skills/crawl-access-audit/references/ai-crawler-user-agents.md`.
 
-**Silence is explained.** Every check is in exactly one of four places in the appendix: it
-produced a finding, it contributed to one, it declined and says why — *"No product detail
-pages were detected, so Product markup is not expected"* — or it ran clean. A check never
-simply goes missing, and a test over every fixture proves it.
+**Silence is explained.** Every check is in exactly one place in the appendix: it produced a
+finding, it contributed to one, it found something this report does not publish — held back or
+merged away — it declined and says why, or it ran clean. A check never simply goes missing, a
+skill that did not run says so there, and a test proves it per fixture.
 
 **A deliberate choice is not a fault.** Blocking AI *training* crawlers is information, not a
 problem: it is a rights decision, and calling it a defect imposes a view the brand never asked
-for. Suggested actions also go beyond defects — the recommendation catalogue fires on what a
-site is missing, not only on what is broken.
+for. Suggested actions go beyond defects too — the recommendation catalogue fires on what a site
+is missing, not only on what is broken.
 
 ---
 
 ## Running it
 
-> **There is nothing to install.** `marketplace.json` at the root is the contest's own
-> manifest convention, not a package format — the brief notes that agentskills.io defines the
-> single-skill `SKILL.md` format and does not define a multi-skill one. So there is no
-> `/plugin marketplace add` step and no `.claude-plugin/` directory. Each of the seven folders
-> is independently valid against the agentskills.io spec; the manifest names which one is the
-> entrypoint. Run it as below, or point an agent at `skills/audit-orchestrator/SKILL.md` and
-> let it follow the procedure there.
+> **There is nothing to install.** `marketplace.json` at the root is the contest's own manifest
+> convention, not a package format — the brief notes that agentskills.io defines the single-skill
+> `SKILL.md` format and does not define a multi-skill one. So there is no `/plugin marketplace
+> add` step and no `.claude-plugin/` directory. Each of the seven folders is independently valid
+> against the agentskills.io spec; the manifest names which one is the entrypoint. Run it as
+> below, or point an agent at `skills/audit-orchestrator/SKILL.md` and follow the procedure there.
 
-If `requests`, `beautifulsoup4` and `lxml` are already installed, skip the virtual
-environment and go straight to the last two commands.
+Already have `requests`, `beautifulsoup4` and `lxml`? Skip to the two run commands below.
 
 ```bash
-# macOS / Linux
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate      # macOS / Linux
 pip install -r requirements.txt
 ```
 ```powershell
-# Windows PowerShell. The first line is needed because Windows blocks
-# script execution by default; it applies to this shell only.
+# Windows PowerShell blocks script execution by default; line one applies to this shell only.
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 python -m venv .venv; .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -157,14 +150,20 @@ pip install -r requirements.txt
 Rather not change the policy? In `cmd.exe` activate with `.venv\Scripts\activate.bat`; in Git Bash, `source .venv/Scripts/activate`. Then run it:
 
 ```bash
-# macOS / Linux
 python3 skills/audit-orchestrator/scripts/validate_marketplace.py
 python3 run_audit.py example.com --out-dir ./out
+# On Windows the same two lines, with `python` for `python3` and `.\out` for `./out`.
 ```
-```powershell
-# Windows
-python skills\audit-orchestrator\scripts\validate_marketplace.py
-python run_audit.py example.com --out-dir .\out
+
+**Install a browser, or don't — but know which one you did.** Playwright is deliberately not a
+dependency and is not in `requirements.txt`. Without it the audit reads the HTML the server
+sends and nothing else, so a page whose text arrives by JavaScript is *inferred* to be a shell
+rather than measured as one, and that finding drops to medium confidence. Every run prints
+which mode it is in on its first line. Installing it — a ~300 MB download — is what turns the
+JavaScript findings from inference into measurement:
+
+```bash
+pip install playwright~=1.49 && playwright install chromium
 ```
 
 `out/report.md` is the one to read. `out/report.json` is the fixed-schema machine version,
@@ -173,18 +172,22 @@ specified in `skills/audit-orchestrator/references/report-schema.json`.
 | Flag | Default | Effect |
 |---|---|---|
 | `--max-pages` | 60 | Page ceiling |
-| `--budget` | 240 | Wall-clock seconds |
+| `--budget` | 240 | Wall-clock seconds for the crawl. Clamped to 115 s at the default run ceiling: 148 s is held back for the six sub-skills before the crawl starts, so a site too slow for both is read less deeply rather than analysed less widely. Measured on a site answering in six seconds a page, that is the difference between five of the six skills running and all six |
 | `--render` | on when Playwright is installed | Compare static HTML against a browser-rendered DOM. `--no-render` turns it off |
 | `--no-network` | off | Snapshot only; no extra probes |
 | `--format html` | md | Also write `report.html` |
 
-The tests, if you want them:
+The tests, and the submission zip:
 
 ```bash
 pip install pytest
-python3 -m pytest -q                        # 924 tests, about 17 minutes
-python3 -m pytest -q -m "not mutation"      # 865 tests, about 5 minutes
+python3 -m pytest -q                        # the whole suite, about 11 minutes
+python3 -m pytest -q -m "not mutation"      # everything but the mutations, about 5 minutes
+python3 package.py --check                  # tests, then dist/brand-ai-readiness-audit.zip
 ```
+
+The zip goes to `dist/`, never beside the files it packages — a build artefact in the checkout
+root is a file every tool walking the tree then has to be told to ignore, and one was not.
 
 > **Windows path limit.** Do not unzip into a deep directory — `pip` cannot install `lxml` if
 > the total path exceeds 260 characters. Use something short like `C:\audit`.
@@ -198,7 +201,7 @@ This README is deliberately short. Everything below lives where a skill can read
 | Read | For |
 |---|---|
 | `skills/audit-orchestrator/references/cited-vs-uncited-study.md` | **The field research.** 36 matched-pair sites, then three holdout samples of 24, 32 and 40 more, each predicted in writing before it was run. Results and failures both |
-| `skills/audit-orchestrator/references/how-the-checks-were-built.md` | The three methods behind the checks, and what each one caught |
+| `skills/audit-orchestrator/references/how-the-checks-were-built.md` | The nine methods behind the checks, what each one caught, and **where the code is** - every file, its size, and what is in it |
 | `skills/audit-orchestrator/references/mechanism-model.md` | The seven mechanisms every check traces back to |
 | `skills/audit-orchestrator/references/severity-and-priority.md` | The scoring formula, worked |
 | `skills/*/SKILL.md` | Each skill's checks, in prose an agent can follow without Python |
@@ -207,10 +210,9 @@ This README is deliberately short. Everything below lives where a skill can read
 
 **One number, if you read nothing else.** Brands assistants name link to **7.2** other places
 about themselves; comparable competitors they ignore link **4.6**. That separated in all six
-categories studied — the only measure that did — and it is the cheapest fix here. You cannot
-become famous this quarter; you can claim six profiles this week and put the same sentence on
-all of them. The audit also confirms those links still resolve, on the six platforms that
-answer that question honestly.
+categories studied — the only measure that did — and it is the cheapest fix here: you can claim
+six profiles this week and put the same sentence on all of them. The audit also confirms those
+links still resolve, on the six platforms that answer that question honestly.
 
 *What that number is and is not:* our own study of 29 crawlable sites in six categories, matched within category. Whether an assistant "names" a brand was our prominence judgement, not a systematic query, so this is the strongest association we found and not a proven cause. The study says so at greater length, including the measures that did **not** separate the two groups.
 
@@ -238,18 +240,16 @@ answer that question honestly.
 - **Name conflicts are checked against Wikidata only.** That says how many organisations share
   a name, not which one an assistant currently prefers.
 - **Only six platforms can be asked whether a profile exists** — LinkedIn, X, YouTube, GitHub,
-  Wikipedia and Wikidata answer 404 for one that is not there. Instagram, TikTok, Medium,
-  Pinterest and Threads answer 200 for anything, and Crunchbase, Yelp, Glassdoor and Trustpilot
-  refuse every crawler; those nine are reported as unchecked.
+  Wikipedia and Wikidata answer 404 for one that is not there. Nine others answer 200 for
+  anything or refuse every crawler, and are reported as unchecked.
 - **Without Playwright the JavaScript gap is inferred, not measured**, so the homepage-shell
-  finding drops to medium confidence. With Playwright — used automatically when installed — it
-  is measured. Both verdicts are correct; the difference is what was known.
-- **A robots.txt block stops the run**, and the verdict explains the empty result instead of
-  presenting it as a clean bill of health. A refused request is unchecked, never an absence;
-  and a path robots.txt disallows is never fetched, so "this disallow looks like real content"
-  is a judgement about the path, not a measurement of what is behind it. Both findings say so.
-- **The JavaScript gap is measured on five pages.** A finding naming thirty extrapolates from
-  those five and says how many were rendered.
+  finding drops to medium confidence. Both verdicts are correct; the difference is what was known.
+- **A phase that runs long degrades the report, it does not cancel it.** A sub-skill stopped at
+  its ceiling is listed as unrun, with the reason, in the appendix; only a crawl that produced
+  no snapshot at all ends the run. A skill that never ran may not read as a clean pass.
+- **A robots.txt block stops the run**, and the verdict explains the empty result rather than
+  presenting it as a clean bill of health. A refused request is unchecked, never an absence.
+- **The JavaScript gap is measured on five pages**, and a finding naming thirty says so.
 
 ---
 

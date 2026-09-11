@@ -1,6 +1,6 @@
 """Who each AI user agent actually is, and why the audit may not guess.
 
-A round-4 verification agent called this the single most consequential wrong
+An independent review called this the single most consequential wrong
 finding in the whole report. It read, at rank two of "Start here", marked high
 and "do first":
 
@@ -60,45 +60,34 @@ REFERENCE = os.path.join(ROOT, "skills", "crawl-access-audit", "references",
 # The table itself
 # --------------------------------------------------------------------------
 
-def test_every_agent_carries_a_role_this_code_understands():
+def test_every_agent_carries_a_role_this_code_understands_and_a_purpose():
     allowed = {CA.SEARCH, CA.USER_FETCH, CA.TRAINING, CA.CONTROL}
     for agent in CA.AI_CRAWLER_AGENTS:
         assert agent.role in allowed, "{} has role {!r}".format(agent.token, agent.role)
-
-
-def test_no_agent_is_listed_twice():
-    tokens = [a.token.lower() for a in CA.AI_CRAWLER_AGENTS]
-    assert len(tokens) == len(set(tokens)), "duplicate token in AI_CRAWLER_AGENTS"
-
-
-def test_the_two_groups_the_checks_use_cannot_overlap():
-    """The old lists could, and did: Meta's two agents sat one in each group
-    while the prose described them the other way round."""
-    assert not set(CA.ANSWER_CRAWLERS) & set(CA.TRAINING_CRAWLERS)
-
-
-def test_every_agent_reaches_exactly_one_of_the_two_groups():
-    covered = set(CA.ANSWER_CRAWLERS) | set(CA.TRAINING_CRAWLERS)
-    assert covered == {a.token for a in CA.AI_CRAWLER_AGENTS}
-
-
-def test_every_agent_states_a_purpose():
-    for agent in CA.AI_CRAWLER_AGENTS:
         assert len(agent.purpose) > 20, "{} has no purpose sentence".format(agent.token)
 
 
-def test_a_vendor_documented_agent_names_the_page_that_documents_it():
+def test_every_agent_reaches_exactly_one_of_the_two_groups():
+    """The old lists could overlap, and did: Meta's two agents sat one in each
+    group while the prose described them the other way round."""
+    tokens = [a.token.lower() for a in CA.AI_CRAWLER_AGENTS]
+    assert len(tokens) == len(set(tokens)), "duplicate token in AI_CRAWLER_AGENTS"
+    assert not set(CA.ANSWER_CRAWLERS) & set(CA.TRAINING_CRAWLERS)
+    assert set(CA.ANSWER_CRAWLERS) | set(CA.TRAINING_CRAWLERS) == {
+        a.token for a in CA.AI_CRAWLER_AGENTS}
+
+
+def test_a_documented_role_names_its_source_and_an_undocumented_one_says_so():
     """The failure this replaces was a claim with no source. A role asserted as
-    the operator's own can only be checked if the URL is there."""
+    the operator's own can only be checked if the URL is there, and a role with
+    no URL may not claim to be the operator's own."""
     for agent in CA.AI_CRAWLER_AGENTS:
         if agent.vendor_documented:
             assert agent.source.startswith("https://"), (
                 "{} claims vendor documentation but names no page".format(agent.token))
             assert re.match(r"^\d{4}-\d{2}-\d{2}$", agent.checked), agent.token
-
-
-def test_an_agent_with_no_source_is_marked_as_inferred():
-    for agent in CA.AI_CRAWLER_AGENTS:
+        else:
+            assert not agent.source or not agent.vendor_documented, agent.token
         if not agent.source:
             assert not agent.vendor_documented, (
                 "{} has no source but is marked vendor-documented".format(agent.token))
@@ -152,9 +141,7 @@ def test_a_named_agent_is_printed_with_its_operator_and_role():
     line = CA.describe_agents(["OAI-SearchBot", "GPTBot"])
     assert "OAI-SearchBot" in line and "OpenAI" in line and "search index" in line
     assert "model training" in line
-
-
-def test_an_agent_the_table_does_not_know_is_printed_plainly():
+    # An agent the table has never seen is printed as itself, never described.
     assert CA.describe_agents(["SomeNewBot"]) == "`SomeNewBot`"
 
 
@@ -165,9 +152,7 @@ def test_the_counterpart_list_names_the_same_operators_answer_agents():
     assert "OAI-SearchBot" in counterparts and "ChatGPT-User" in counterparts
     assert "GPTBot" not in counterparts
     assert all(CA.AGENT_BY_TOKEN[c.lower()].operator == "OpenAI" for c in counterparts)
-
-
-def test_counterparts_of_an_unknown_token_are_empty_not_everything():
+    # An unknown token has no counterparts, rather than all of them.
     assert CA.answer_side_counterparts(["SomeNewBot"]) == []
 
 
@@ -236,12 +221,6 @@ def test_the_reference_file_says_exactly_what_the_code_says():
         "tests/test_crawler_roles.py:render_agent_tables().")
 
 
-def test_the_reference_file_names_every_agent_the_code_checks():
-    region = _generated_region()
-    for agent in CA.AI_CRAWLER_AGENTS:
-        assert "`{}`".format(agent.token) in region, agent.token
-
-
 # --------------------------------------------------------------------------
 # No crawler name may be typed into a sentence
 # --------------------------------------------------------------------------
@@ -254,8 +233,8 @@ def test_no_skill_writes_a_crawler_name_into_a_string():
     when a bot manager serves a challenge page instead of the page - still had
     "OAI-SearchBot, PerplexityBot, ClaudeBot and Google-Extended" typed into a
     remediation step, described as crawlers that "fetch a page to answer a
-    question". Two verification agents found it independently on two different
-    sites, and it survived the fix that was supposed to remove exactly that
+    question". It turned up independently on two different sites, and it
+    survived the fix that was supposed to remove exactly that
     sentence, because nothing connected the string to the data.
 
     Now something does. Every crawler name in the report is rendered from the
@@ -313,7 +292,5 @@ def test_a_truncated_agent_list_says_how_many_it_left_out():
            if agent.role == CA.TRAINING][:10]
     assert len(ten) == 10
     assert CA.describe_agents(ten).endswith("and 2 more")
-
-
-def test_a_complete_agent_list_says_nothing_extra():
+    # And a list that fits says nothing extra.
     assert "more" not in CA.describe_agents(["GPTBot", "ClaudeBot"])

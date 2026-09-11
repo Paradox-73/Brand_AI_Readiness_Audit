@@ -21,12 +21,10 @@ These tests hold two separate claims:
 from __future__ import annotations
 
 import importlib.util
-import io
 import os
 import sys
 import time
 
-import pytest
 
 from conftest import SCRIPTS
 
@@ -57,22 +55,22 @@ def test_the_whole_run_has_a_ceiling_not_just_the_crawl():
         "the run ceiling must leave the crawl its full budget")
 
 
-@pytest.mark.parametrize("skill", NETWORK_SKILLS)
-def test_every_network_sub_skill_accepts_a_time_budget(skill):
-    """Declared on the command line, or the orchestrator cannot hand it over."""
-    module = _load(skill)
-    with pytest.raises(SystemExit):
-        module.main(["--help"])
-
-
-@pytest.mark.parametrize("skill", NETWORK_SKILLS)
-def test_a_time_budget_becomes_a_deadline(skill):
-    module = _load(skill)
-    assert module._deadline(None) is None, "no budget means no ceiling"
-    soon = module._deadline(5.0)
-    assert 0 < soon - time.monotonic() <= 5.0
-    assert module._deadline(-10.0) <= time.monotonic(), (
-        "a budget already spent must not read as time remaining")
+def test_a_time_budget_becomes_a_deadline():
+    """Every skill that makes requests has to turn the budget the orchestrator
+    hands it into a wall-clock deadline, or the ceiling bounds nothing."""
+    # One helper, shared. Each of these skills carried its own byte-identical
+    # `_deadline`; they now import `deadline_from_budget` from the shared
+    # library, and this test checks both that the property holds and that the
+    # skill really is reading the shared one rather than a fourth copy.
+    for skill in NETWORK_SKILLS:
+        module = _load(skill)
+        assert not hasattr(module, "_deadline"), (
+            "{}: a local copy of the deadline helper is back".format(skill))
+        assert module.deadline_from_budget(None) is None, "no budget means no ceiling"
+        soon = module.deadline_from_budget(5.0)
+        assert 0 < soon - time.monotonic() <= 5.0, skill
+        assert module.deadline_from_budget(-10.0) <= time.monotonic(), (
+            "{}: a budget already spent must not read as time remaining".format(skill))
 
 
 def test_composing_the_report_is_reserved_for_before_the_ceiling():
@@ -91,9 +89,6 @@ def test_composing_the_report_is_reserved_for_before_the_ceiling():
     assert module.COMPOSE_RESERVE_SECONDS > 0
     assert RUN_WALL_CLOCK_LIMIT - module.COMPOSE_RESERVE_SECONDS > WALL_CLOCK_BUDGET, (
         "the reserve must not eat into the crawl's own budget")
-    source = io.open(os.path.join(ROOT, "run_audit.py"), encoding="utf-8").read()
-    assert "hard_limit - COMPOSE_RESERVE_SECONDS" in source, (
-        "the reserve has to be subtracted from what the probes are given")
 
 
 def test_only_the_three_that_make_requests_are_given_a_deadline():

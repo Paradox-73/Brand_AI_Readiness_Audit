@@ -1,6 +1,6 @@
 {
   "fixture": "js-shell-site",
-  "why": "A client-side rendered studio site. The homepage and work index are empty framework shells with the real content sitting in __NEXT_DATA__; the about page carries its story in three large images; the pricing page points at a rate-card PDF instead of stating a number; the contact page hides its form in an iframe beside an autoplaying video. Nothing is blocked, so this isolates gate 2 and gate 3 from gate 1.",
+  "why": "A client-side rendered studio site. The homepage and work index are empty framework shells with the real content sitting in __NEXT_DATA__; the about page carries its story in three large images; the pricing page points at a rate-card PDF instead of stating a number; the contact page hides its form in an iframe beside an autoplaying video. Nothing is blocked, so this isolates gate 2 and gate 3 from gate 1. `no-orientation` is deliberately not expected here. This fixture's homepage is an empty framework mount point, so whether a visitor is oriented on it depends on whether a browser was available: with one, the crawl adopts the rendered document and the check measures a real page; without one - the default on a reviewer's machine - there is nothing to measure, and firing would only restate the `js-shell` finding under a different mechanism, with advice (write a better heading, add a call to action) that is wrong because the page's own state blob already holds both. The cause is proved on every machine by two mutations of the server-rendered fixture instead.",
   "expect_zero_findings": false,
   "expect_critical_at_least": 1,
   "must_find": [
@@ -8,15 +8,17 @@
     "image-locked-facts",
     "pdf-locked-facts",
     "iframe-content",
-    "no-transcript",
+    "no-transcript"
+  ],
+  "must_find_when_rendered": [
     "no-org-schema",
     "no-entity-definition",
     "missing-core-fact",
     "weak-corroboration",
-    "no-orientation",
     "dead-end",
     "open-graph-incomplete"
   ],
+  "why_these_are_render_dependent": "Every one of these is a claim that something is not on the site, and without a browser this crawl read 2 of 5 URLs: the homepage carries 13 characters of static text, the about page 37 and the work index 13. Below half the URLs read, an absence claim is a fact about what the crawler was shown rather than about the site, so these are withheld into `unverifiable[]` and printed under \"Questions this audit could not answer\" instead. They used to be published as defects, which said that a site with an Organization block and a stated location has neither - and said it eight times, each one a restatement of the `js-shell` finding under a different mechanism, with advice that is wrong because the page's own state blob already holds what it says is missing. That is the same reasoning this file already applied by hand to `no-orientation`, applied as a rule instead of one cause at a time. With a browser the crawl adopts the rendered document, all five pages are read, and every one of these fires as a fact about the site - which is why they are asserted in both directions rather than dropped: `test_fixture_finds_what_it_should` expects them found when `render_mode` is `rendered` and expects them held back, by root cause, when it is not.",
   "must_not_find": [
     "robots-block",
     "bot-manager-block",

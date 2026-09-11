@@ -28,7 +28,6 @@ import os
 import subprocess
 import sys
 
-import pytest
 
 from conftest import ROOT, SCRIPTS, run_script
 from fixture_server import FixtureServer
@@ -84,7 +83,7 @@ def test_a_bare_hostname_is_accepted(tmp_path):
 
     It had never been exercised. The scheme is added silently, so a typo in that
     code path would have produced "could not parse a hostname" on the exact
-    command the documentation tells a judge to run.
+    command the documentation tells a reader to run.
     """
     site = _build(str(tmp_path / "site"),
                   {"index.html": _page("Kestrel Instruments",
@@ -110,14 +109,13 @@ def test_a_bare_hostname_is_accepted(tmp_path):
         "falling back to http has to be stated, not done quietly")
 
 
-def test_a_target_is_required():
-    """No URL at all should say so, not raise something unreadable."""
+def test_a_target_that_is_missing_or_unparseable_is_rejected_clearly():
+    """No URL at all, or one with no hostname, should say so rather than raise
+    something unreadable."""
     done = subprocess.run([sys.executable, CRAWL], cwd=ROOT, capture_output=True, text=True)
     assert done.returncode != 0
     assert "required" in (done.stdout + done.stderr).lower()
 
-
-def test_an_unparseable_target_is_rejected_clearly():
     done = subprocess.run([sys.executable, CRAWL, "http://", "--out", os.devnull],
                           cwd=ROOT, capture_output=True, text=True)
     assert done.returncode != 0
@@ -235,9 +233,17 @@ def test_the_page_budget_stops_the_crawl_and_says_so(tmp_path):
     with FixtureServer(site) as server:
         snapshot = _crawl(server.base_url, str(tmp_path / "snapshot.json"),
                           extra=["--max-pages", "4"])
-    assert snapshot["crawl"]["pages_crawled"] <= 4, "the page budget was not honoured"
-    assert snapshot["crawl"]["budget_exhausted"] is True, (
-        "the crawl stopped at the budget but did not record that it had")
+    crawl = snapshot["crawl"]
+    assert crawl["pages_crawled"] <= 4, "the page budget was not honoured"
+    assert crawl["stopped_early"] is True, (
+        "the crawl stopped with pages of this site unread and did not record that it had")
+    assert crawl["stopped_by"] == "page ceiling"
+    # Not the budget. This assertion used to read `budget_exhausted is True`,
+    # which is the same defect seen from the other side, in two real runs that
+    # reported `budget_exhausted: true` against a 142s budget they never spent.
+    # This crawl had 60 seconds and used a fraction of one.
+    assert crawl["budget_exhausted"] is False, (
+        "the page ceiling stopped this crawl, and the clock is being blamed for it")
 
 
 def test_the_brand_falls_back_to_the_domain_when_nothing_declares_a_name(tmp_path):

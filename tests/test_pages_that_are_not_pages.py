@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 import sys
 
-import pytest
 
 from conftest import FIXTURES, SCRIPTS
 
@@ -18,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SCRIPTS)
 
 import crawl as crawl_module  # noqa: E402
-from audit_common import looks_like_soft_404, pages_of  # noqa: E402
+from audit_common import pages_of  # noqa: E402
 from fixture_server import FixtureServer  # noqa: E402
 
 
@@ -56,18 +55,6 @@ def test_a_non_html_response_is_not_a_page_either():
 # A page reached twice is one page
 # --------------------------------------------------------------------------
 
-def test_a_page_naming_a_crawled_page_as_canonical_is_that_page():
-    """Cookie-preference links produced two extra copies of one homepage.
-
-    The report counted three pages sharing a title, spent 5% of a sixty-page
-    budget on one page, and inflated the denominator of every site-wide share.
-    """
-    seen = {"https://example.test/"}
-    landed = "https://example.test/?ketch_show=preferences"
-    canonical = "https://example.test/"
-    assert canonical in seen and canonical != landed
-
-
 def test_a_site_with_no_canonical_tags_still_crawls_every_page(tmp_path):
     """The guard, written badly, collapsed a seven-page crawl to one.
 
@@ -86,14 +73,25 @@ def test_a_site_with_no_canonical_tags_still_crawls_every_page(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# A page that says it is missing
+# A page that redirected to a sign-in screen is the sign-in screen
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("title,heading,expected", [
-    ("404 | Example", "", True),
-    ("Page Not Found - Example", "Uh-Oh, Nothing To See Here!", True),
-    ("Womens Flats | Example", "Womens Flats", False),
-    ("Designing a good error page", "Designing a good error page", False),
-])
-def test_what_reads_as_a_missing_page(title, heading, expected):
-    assert looks_like_soft_404({"title": title, "h1": heading}) is expected
+def _record(url, final_url=None, page_type="other"):
+    return {"url": url, "final_url": final_url or url, "status": 200,
+            "page_type": page_type}
+
+
+def test_a_page_that_redirects_to_a_login_screen_is_not_graded():
+    """A school's `/calendar` is a 302 to `/login`. It was graded, and the fix
+    told the owner to set an H1 on a page they do not control - against this
+    audit's own promise to touch nothing under `/login`."""
+    snapshot = {"pages": [
+        _record("https://example.test/calendar", "https://example.test/login"),
+        _record("https://example.test/about", page_type="about"),
+    ]}
+    assert [p["url"] for p in pages_of(snapshot)] == ["https://example.test/about"]
+    # An ordinary redirect, to a page this audit may read, is still graded.
+    ordinary = {"pages": [_record("https://example.test/old",
+                                  "https://example.test/new")]}
+    assert len(pages_of(ordinary)) == 1
+
