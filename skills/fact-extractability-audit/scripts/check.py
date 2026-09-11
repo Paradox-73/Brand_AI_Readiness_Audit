@@ -17,6 +17,7 @@ import argparse
 import os
 import re
 import sys
+import unicodedata
 
 from urllib.parse import urlsplit
 
@@ -470,6 +471,13 @@ _NOT_A_PLACE_RE = re.compile(
 _NOT_A_PLACE_WINDOW = 80
 
 
+# What "serving" is followed by when it introduces who or where is served.
+_SERVED_WHO_WORDS = frozenset({
+    "the", "all", "our", "customers", "clients", "communities", "businesses", "families",
+    "patients", "residents", "over", "across", "throughout", "both", "every",
+})
+
+
 def _states_a_service_area(sentence, match):
     """Does this sentence say where the site operates?
 
@@ -493,6 +501,15 @@ def _states_a_service_area(sentence, match):
     if _DECLINES_RE.search(sentence[:match.end()]):
         return False
     tail = sentence[match.end():]
+    # "Serving" on its own is as often a noun as a verb: "an extension of web
+    # browsers for dynamic page serving and CGI programming" was printed as a
+    # project's service area, the proper noun being the name of a protocol.
+    # Serving an area names the area, or the people in it, straight after.
+    if match.group(0).lower() == "serving":
+        following = tail.split()[:1]
+        if not following or not (following[0][:1].isupper()
+                                 or following[0].lower() in _SERVED_WHO_WORDS):
+            return False
     # Somewhere a file lives is not somewhere a site serves. "These extensions
     # are all available in the SQLite source tree in the ext/misc/ subfolder"
     # matched "available in", named a proper noun after it, and was printed as
@@ -714,6 +731,32 @@ def _sentence_is_about_another_program(sentence, brand_name=""):
                for token in re.findall(r"[^\s,;:()\"“”]+", sentence or ""))
 
 
+# Words that open a general statement in the subject position a name would
+# take: "Users created ...", "Everyone maintains ...". Plural nouns for the
+# people and things a site talks about, and the determiners that stand alone.
+_SENTENCE_OPENING_WORDS = frozenset({
+    "users", "people", "developers", "programmers", "customers", "members",
+    "visitors", "readers", "applications", "programs", "databases", "files",
+    "everyone", "anyone", "someone", "nobody", "somebody", "everybody",
+    "each", "every", "many", "most", "some", "several", "others", "both",
+    "new", "old", "once", "later", "then", "now", "here", "there",
+    # The words a sentence opens a clause with. "Because writes are so much
+    # slower than reads, ..." matched "<Person> writes".
+    "because", "although", "though", "while", "whilst", "when", "whenever", "where",
+    "if", "unless", "until", "after", "before", "since", "as", "so", "but", "yet",
+    "however", "therefore", "thus", "hence", "also", "still", "even", "just", "only",
+    "first", "next", "last", "instead", "otherwise", "meanwhile", "today", "tomorrow",
+})
+
+
+# The bare forms of the verbs `TEAM_FACT_RE` reads after a subject. Past forms
+# ("created", "built", "led") are a person's as much as the -s forms are.
+_BARE_RESPONSIBLE_VERBS = frozenset({
+    "maintain", "write", "create", "build", "develop", "run", "lead", "curate", "edit",
+    "design", "own",
+})
+
+
 def _states_a_named_person(sentence, match, brand_name="", labels=()):
     """Does this match name a person, rather than the site or a common noun?
 
@@ -759,6 +802,45 @@ def _states_a_named_person(sentence, match, brand_name="", labels=()):
         return False
     words = [w.lower() for w in letter_runs(who, 1)]
     if not words or any(w in STOPWORDS or w in CONTENTLESS_NOUNS for w in words):
+        return False
+    # One capitalised word is a name only when it is not an ordinary English
+    # word that happens to open the sentence. A database FAQ's "Newly created
+    # databases are initially empty." matched the shape "<Person> created ..."
+    # and was printed as the project's team. A first name is not an adverb, and
+    # it is not a word a sentence opens with because it is the subject of a
+    # general statement.
+    if len(words) == 1 and (words[0].endswith("ly")
+                            or words[0] in _SENTENCE_OPENING_WORDS):
+        return False
+    # A web address is not a person. "a book published by <name>.org" matched
+    # the attributed shape and was printed as the project's team.
+    if re.search(r"[^\W\d_]\.(?:[a-z]{2,6})\b", who):
+        return False
+    # Nor is a product. A run of capitals straight after a lower-case letter
+    # inside one word is how software and companies are named - "<Name>SQL",
+    # "<Te>CG<raf>" - and no person's name carries one; "McDonald" has a single
+    # capital there and is still a name.
+    if re.search(r"[a-z][A-Z]{2,}", who):
+        return False
+    groups = match.groupdict()
+    # "built-in" is an adjective, not "built by". "built-in window functions
+    # based on those supported by <product>" read as "built ... by <Name>".
+    if groups.get("attributed") and re.match(
+            r"(?:" + _ATTRIBUTION_VERBS + r")-", sentence[match.start():], re.I):
+        return False
+    # One person takes the -s form: "<Person> writes", "<Person> maintains".
+    # A capitalised word followed straight by the bare verb is an instruction
+    # or a plural - "Measure write performance by adding the --update option."
+    # was printed as a database's team once the adverb above stopped matching.
+    # The bare form is still a person after "continues to" or "helps", which
+    # is where the pattern allows it.
+    if groups.get("subject") and (groups.get("does") or "").lower() in _BARE_RESPONSIBLE_VERBS:
+        between = sentence[match.end("subject"):match.start("does")]
+        if not between.strip():
+            return False
+    # And a verb followed by "of" is a noun: "Default builds of <Name> contain
+    # ..." is about builds, not about a person called Default who builds.
+    if groups.get("subject") and re.match(r"\s+of\b", sentence[match.end("does"):]):
         return False
     brand_words = {w.lower() for w in letter_runs(brand_name or "", 2)}
     if brand_words and set(words) <= brand_words:
@@ -1543,6 +1625,24 @@ def _top_words(page, limit=DEFINITION_WINDOW_WORDS):
     return ". ".join(part for part in lead if part).strip()
 
 
+# A translation key an i18n library printed where its text should be:
+# `Translation missing: en.general.social.share_on_facebook`, or
+# `[missing "en.cart.title" translation]`. The render skill reports these as
+# template artefacts; here they are only kept out of a quote. A handicraft
+# shop's stated pricing was printed as "Share it Translation missing:
+# en.general.social.share_on_facebook Translation missing: ... Regular price
+# ₹ 2,299.00" - the price is real, and the two keys are not the site speaking.
+_MISSING_TRANSLATION_RE = re.compile(
+    r"[Tt]ranslation missing:\s*[a-z]{2,3}(?:[-_][A-Za-z]{2,4})?(?:\.[A-Za-z0-9_-]+){1,8}"
+    r"|\[missing \"[a-z]{2,3}(?:[-_][A-Za-z]{2,4})?(?:\.[A-Za-z0-9_-]+){1,8}\" translation\]")
+
+
+def _without_missing_translations(text):
+    if not text:
+        return text
+    return " ".join(_MISSING_TRANSLATION_RE.sub(" ", text).split())
+
+
 def _find_definition(text, brand_name, brand=None):
     """A quotable one-line definition on this text, or None.
 
@@ -1639,7 +1739,7 @@ def _definition_sources(declared_descriptions_seen):
             "homepage and about page, read with that same matcher: one reading, not two",)
 
 
-def _repeat_the_definition_step(kind):
+def _repeat_the_definition_step(kind, one_document=False):
     """Where to repeat the definition sentence, for a site of this kind.
 
     "on your LinkedIn page and in your press kit" is a marketing department's
@@ -1651,9 +1751,11 @@ def _repeat_the_definition_step(kind):
     list of places is a claim about what the site is, so only the list moves.
 
     `might_be` and not `is_certainly`: an undetermined site keeps the wording
-    it has today, which is the point of the gate.
+    it has today, which is the point of the gate - unless it is one document,
+    which has no LinkedIn page and no press kit. See `_one_document_site`.
     """
-    if kind.might_be(LOCAL_BUSINESS, ONLINE_SELLER, ORGANISATION):
+    if kind.might_be(LOCAL_BUSINESS, ONLINE_SELLER, ORGANISATION) and not (
+            one_document and not kind.determined):
         return ("Repeat the same sentence verbatim on the about page, in the Organization "
                 "`description` property, on your LinkedIn page and in your press kit.")
     return ("Repeat the same sentence verbatim on the about page, in the Organization "
@@ -1940,7 +2042,9 @@ def _definition_is_in_the_wrong_place(result, snapshot, pages, brand_name, brand
             "Put it above the main content - the grid, the listing, the article - and outside "
             "any slider or carousel, so it is in the HTML a fetcher receives rather than in "
             "markup a browser assembles.",
-            _repeat_the_definition_step(site_kind(snapshot)),
+            _repeat_the_definition_step(site_kind(snapshot),
+                                        _one_document_site(pages_of(snapshot),
+                                                           snapshot.get("pages") or ())),
         ],
         # A sentence, written once, by whoever writes the site's words. This is
         # one of the few entries in this report that needs no developer.
@@ -2337,7 +2441,9 @@ def _check_entity_definition(result, snapshot, pages, brand_name, brand=None):
             "open with \"We\".",
             "Put it in the first paragraph of the homepage, in plain HTML text, not inside an "
             "image or a slider.",
-            _repeat_the_definition_step(site_kind(snapshot)),
+            _repeat_the_definition_step(site_kind(snapshot),
+                                        _one_document_site(pages_of(snapshot),
+                                                           snapshot.get("pages") or ())),
             "Keep it under 30 words and make it specific enough that a competitor could not "
             "use the same sentence.",
         ],
@@ -2419,16 +2525,34 @@ def _check_heading_hierarchy(result, pages):
                         plural(len(pages), "crawled page")))
     else:
         affected = {p["url"] for p in no_h1}
+        # The title says what was counted. It read "Heading structure does not
+        # describe the page reliably" on nine of twelve sites audited together,
+        # the same sentence whether 2 of 60 pages lacked an H1 or 50 of 59 did,
+        # and its fix told readers to demote extra H1s and stop skipping levels
+        # - two things this check deliberately does not measure.
+        homepage_bare = any(p.get("page_type") == "home" for p in no_h1)
+        share = len(no_h1) / float(len(pages))
+        if homepage_bare:
+            title = "{} of the {} have no top-level heading, the homepage among them".format(
+                len(no_h1), plural(len(pages), "crawled page"))
+        else:
+            title = "{} of the {} have no top-level heading".format(
+                len(no_h1), plural(len(pages), "crawled page"))
         result.add(
             id_hint="heading-structure-unclear",
-            title="Heading structure does not describe the page reliably",
-            # `medium`, not `high`, and the reason is the line below it. One
+            title=title,
+            # `medium` at most, and the reason is the line below it. One
             # detector reads the heading elements, and `heading_sequence` is
             # built from the same parsed tree rather than a second reading of
             # the page, so there is nothing here to corroborate it with. An H1
             # this audit cannot see - injected after load, or carried by an
             # image whose alt text the extractor missed - is still an H1.
-            severity="medium", confidence="medium",
+            #
+            # And `low` when it is a few inner pages: three archive indexes of
+            # sixty without an H1 is housekeeping, not a reason the site goes
+            # unquoted. The homepage, or a quarter of the site, is the line.
+            severity="medium" if (homepage_bare or share >= 0.25) else "low",
+            confidence="medium",
             evidence="{} of {} crawled page(s) have no H1. Examples: {}.".format(
                 len(no_h1), len(pages), ", ".join(example_urls(sorted(affected)))),
             checked=("the h1 elements, including any alt text they carry, on every crawled "
@@ -2436,11 +2560,13 @@ def _check_heading_hierarchy(result, pages):
                      "once from the visible document and once from the whole markup, so an "
                      "h1 hidden with CSS still counts as an h1",),
             mechanism="C", root_cause="heading-structure",
-            summary="Give every page exactly one H1 that names its subject, and use H2/H3 in order.",
+            summary="Give each of these pages an H1 that names its subject.",
             how_to_fix=[
-                "Set one H1 per page stating what the page is about, not a slogan.",
-                "Demote extra H1s to H2. Styling can stay the same; only the tag changes.",
-                "Do not skip levels: an H4 should follow an H3, not an H2.",
+                "Add one H1 to each page listed, stating what the page is about, not a slogan.",
+                "Where the page already shows its name in large text, change that element to "
+                "an H1. Styling can stay the same; only the tag changes.",
+                "Where a template draws the page (a listing, a contact page), fix it in the "
+                "template once rather than page by page.",
             ],
             effort="low", owner="developer",
             rationale="Headings are how a machine works out which part of a long "
@@ -3088,6 +3214,10 @@ def _usable_phones(facts, page=None, key="phones"):
             continue
         if _A_RUN_OF_YEARS_RE.fullmatch(phone.strip()):
             continue
+        if _A_CITATION_YEAR_AND_NUMBER_RE.fullmatch(phone.strip()):
+            continue
+        if _DATES_NOT_A_NUMBER_RE.fullmatch(phone.strip()):
+            continue
         if _a_slice_of_a_figure(text, phone):
             continue
         if _given_as_another_businesss_number(text, phone, page):
@@ -3178,6 +3308,22 @@ def _given_as_another_businesss_number(text, phone, page):
 # table header "1978 1977 1978" was scraped as a telephone number and printed
 # as the site's way of getting in touch. A column of years is a table.
 _A_RUN_OF_YEARS_RE = re.compile(r"(?:(?:1[5-9]|20)\d{2}[\s./-]*){3,}")
+
+# A year in brackets and a number after it: how a bibliography writes a
+# journal's year and an article or page number. A project's documentation page
+# cites "Journal of Computer Languages 83 (2025) 101326", and "(2025) 101326"
+# was read as an area code and a local number and printed as the project's way
+# of getting in touch. A bracketed group that is a year is a date, and no
+# dialling plan uses one as an area code.
+_A_CITATION_YEAR_AND_NUMBER_RE = re.compile(
+    r"\(\s*(?:1[89]|20)\d{2}\s*\)\s*[0-9][0-9–-]*")
+
+# Two or more years, each optionally with its month: "2018 2017.12". A
+# university's news index lists its archive by year and month, and that run was
+# printed as the office's contact detail. A telephone number is not made of
+# calendar dates.
+_DATES_NOT_A_NUMBER_RE = re.compile(
+    r"(?:(?:19|20)\d{2}(?:[./-](?:0?[1-9]|1[0-2]))?[\s./-]*){2,}")
 
 
 # A number in somebody else's advert. A conglomerate's homepage carries its
@@ -3308,6 +3454,149 @@ _KIND_IN_WORDS = {
 # product description is a specification, and a check that read one as an
 # address would decline on every shop.
 _PAGES_THAT_CARRY_AN_ADDRESS = ("home", "about", "contact", "location")
+
+
+# What an event's page is called, and the words that introduce where it is
+# held. A project's page for a workshop it ran in 2012 gives the host's
+# headquarters under "Venue": "The workshop will be held at <company>'s
+# Worldwide Headquarters <street>, <town>, <state> <zip>", and that street was
+# printed as the project's own location. An address on an event's page is
+# where the event was, and a number beside it is the venue's switchboard.
+_EVENT_TITLE_RE = re.compile(
+    r"\b(?:workshops?|conferences?|symposi(?:um|a)|summits?|meet-?ups?|seminars?"
+    r"|webinars?|hackathons?|congress(?:es)?|conventions?|colloqui(?:um|a)|expos?)\b", re.I)
+_VENUE_RE = re.compile(
+    r"\b(?:venue|will be held at|was held at|is held at|will take place at|takes? place at"
+    r"|took place at|hosted at)\b", re.I)
+_VENUE_WINDOW = 200
+
+
+def _an_events_page(page, detail=""):
+    """Is this page about an event, so an address or number on it is the venue's?
+
+    Two readings. The page's own title or top heading names an event, or the
+    words just before the detail introduce it as where something is held.
+    """
+    heads = [str(page.get("title") or "")] + [
+        str(h) for h in ((page.get("headings") or {}).get("h1") or [])]
+    if any(_EVENT_TITLE_RE.search(head) for head in heads):
+        return True
+    detail = str(detail or "").strip()
+    if not detail:
+        return False
+    text = page.get("body_text") or page.get("text") or ""
+    index = text.find(detail)
+    if index < 0:
+        return False
+    return bool(_VENUE_RE.search(text[max(0, index - _VENUE_WINDOW):index]))
+
+
+# A figure followed by the period it pays for: "$1500/year", "$8K-85K/year",
+# "costs $1500 per year". A support contract and a licence are sold this way,
+# and a page listing several of them is a price list whatever its address says.
+_A_PERIOD_PRICE_RE = re.compile(
+    r"(?:[$€£¥₹]|\b(?:usd|eur|gbp|inr)\s?)\s?[0-9][0-9,.]*\s?[kKmM]?"
+    r"(?:\s?[-–]\s?(?:[$€£¥₹])?[0-9][0-9,.]*\s?[kKmM]?)?\s*"
+    r"(?:/\s*(?:year|yr|month|mo|user|seat)\b|per\s+(?:year|annum|month|user|seat|licen[cs]e)\b"
+    r"|a\s+(?:year|month)\b|annually\b|one[- ]time\b)", re.I)
+
+# What a page selling support or licences is called, in its address or title.
+_PAID_OFFERING_RE = re.compile(
+    r"support|licen[cs]|pricing|prices|purchase|subscription|plans|membership", re.I)
+_PAID_OFFERING_MIN_FIGURES = 2
+
+
+def _a_page_of_paid_offerings(page):
+    """Does this page set out what the site's paid support or licences cost?
+
+    A database engine's support page lists an annual maintenance subscription
+    at "$1500/year", technical support at "$8K-85K/year" and a consortium
+    membership at "$150K/year", and is typed `other` by its address. This
+    audit read the page's "<Name> is free and works great." as the pricing,
+    and the site as one where "nothing is for sale". Two figures each priced
+    per period, on a page whose address or title names support, a licence or
+    pricing, is the site stating its prices.
+    """
+    text = _readable_text(page)
+    if len(_A_PERIOD_PRICE_RE.findall(text)) < _PAID_OFFERING_MIN_FIGURES:
+        return False
+    where = "{} {}".format(urlsplit(page.get("url") or "").path, page.get("title") or "")
+    return page.get("page_type") in PRICE_BEARING_TYPES or bool(_PAID_OFFERING_RE.search(where))
+
+
+# A path segment that names a language edition: `/de/`, `/pt-br/`, `/fil/`.
+_ONE_DOCUMENT_EDITION_RE = re.compile(r"^[a-z]{2,3}(?:[-_][a-z0-9]{2,4})?$", re.I)
+
+# How many words a page needs before it is a document rather than a stub.
+_ONE_DOCUMENT_MIN_WORDS = 150
+
+
+def _document_key(url):
+    """The path of a page with a leading language-edition segment set aside."""
+    segments = [s for s in urlsplit(str(url or "")).path.split("/") if s]
+    if segments and _ONE_DOCUMENT_EDITION_RE.match(segments[0]):
+        segments = segments[1:]
+    return "/".join(segments)
+
+
+def _one_document_site(pages, every_record=()):
+    """Is this site a single document, published in one or more languages?
+
+    `every_record` is the whole crawl, content or not, so a link to an address
+    the crawl fetched and set aside - a copy of the page reached through a
+    broken relative link - is resolved to the document it served.
+
+    A one-page essay published in nine languages was told it "does not state
+    its contact method, founding facts or location" and handed "<Name> was
+    founded in <year> in <place>" to paste. An essay was not founded anywhere.
+
+    Three conditions, all read off the crawl. Every page with enough words to
+    be a document is the same document - one path once its language segment is
+    set aside, or the same text word for word at another address. No page
+    links to a page of the site that is not an edition of it, so the crawl did
+    not merely stop short of the rest. And at least one page has enough words
+    to be a document.
+    """
+    bodies, keys, crawled = {}, set(), {}
+    substantial = 0
+    content = {id(page) for page in pages}
+    for page in list(pages) + [p for p in every_record or () if id(p) not in content]:
+        body = " ".join((page.get("body_text") or "").split())
+        key = _document_key(page.get("final_url") or page.get("url"))
+        if body and body in bodies:
+            key = bodies[body]
+        elif body:
+            bodies[body] = key
+        for address in (page.get("url"), page.get("final_url")):
+            if address:
+                crawled[str(address).rstrip("/")] = key
+        if id(page) not in content:
+            continue
+        words = page.get("word_count") or len(body.split())
+        if words < _ONE_DOCUMENT_MIN_WORDS:
+            continue
+        substantial += 1
+        keys.add(key)
+    if not substantial or len(keys) != 1:
+        return False
+    for page in pages:
+        for link in (page.get("links") or {}).get("internal") or []:
+            url = str((link.get("url") if isinstance(link, dict) else link) or "")
+            if not url:
+                continue
+            key = crawled.get(url.split("#")[0].rstrip("/"), _document_key(url))
+            if key not in keys | {""}:
+                return False
+    return True
+
+
+def _not_expected_of_one_document(fact, because):
+    """The decline a gated fact prints on a site that is one document."""
+    return ("this site is a single document - every crawled page with text on it is the "
+            "same document in another language or at another address, and no page links to "
+            "any other page of the site - so {} is not a fact it is expected to state. {} "
+            "Anything it does state is still read and reported: what is gated here is the "
+            "expectation, not the observation".format(fact, because))
 
 
 def _a_founding_year_this_audit_could_not_attribute(pages, brand_name):
@@ -3466,6 +3755,13 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
     kind = site_kind(snapshot)
     result.signal("site_kind", kind.kind or "undetermined")
     result.signal("site_kind_confidence", kind.confidence)
+    # A site the classifier could not place that is one document - an essay
+    # in several languages - is not expected to have premises or a founding.
+    # Only where nothing was determined: a business with a one-page site is
+    # still a business. See `_one_document_site`.
+    one_document = not kind.determined and _one_document_site(pages,
+                                                              snapshot.get("pages") or ())
+    result.signal("one_document_site", one_document)
 
     missing = []
     found = {}
@@ -3527,7 +3823,11 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
     # not what anything costs, and no pattern will ever be able to tell the
     # difference. What the site is is knowable; what a stray figure means is
     # not.
-    sells = sells_something(snapshot, pages)
+    # A page setting out what paid support or a licence costs is the site
+    # selling something, whatever its address is typed as. See
+    # `_a_page_of_paid_offerings`.
+    offerings = [p for p in pages if not is_listing_page(p) and _a_page_of_paid_offerings(p)]
+    sells = sells_something(snapshot, pages) or bool(offerings)
     price_page = price_quote = None
     price_aside = ""
     listing_price_page = None
@@ -3535,7 +3835,21 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
     any_currency_figure = False
     # `(page, figure, aside)` for a figure shown only among interface labels.
     label_price = None
-    if sells:
+    for page in offerings:
+        # A sentence, ahead of a price-list cell. "$1500/year More Info
+        # Purchase 3." is the table the page opens with; "An AMS costs $1500
+        # per year." is the page saying it, further down.
+        priced = [s.strip() for s in sentences(_readable_text(page))
+                  if _A_PERIOD_PRICE_RE.search(s) and len(s.strip()) <= 220
+                  and not _reads_as_interface_labels(s)]
+        offered = next((s for s in priced if _prose_not_a_label_run(s)),
+                       next(iter(priced), ""))
+        if offered:
+            any_currency_figure = True
+            price_page, price_quote = page, offered
+            price_aside = "(a page setting out what the site's paid support or licences cost)"
+            break
+    if sells and price_page is None:
         for page in pages:
             prices = page.get("prices") or find_prices(page.get("body_text") or "")
             if not prices:
@@ -3577,7 +3891,8 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
             # Heading boundaries restored first, or the quoted price arrives
             # with the heading above it stuck to the front: "How much it costs
             # Plans start at $480 per month".
-            quote = sentence_with(_readable_text(page), re.compile(re.escape(prices[0])))
+            quote = _without_missing_translations(
+                sentence_with(_readable_text(page), re.compile(re.escape(prices[0]))))
             # The reader has to be able to see the price in the quote. An event
             # site's homepage arrives as one unpunctuated run of filter labels,
             # so the whole page is a single "sentence" and the figure that
@@ -3756,9 +4071,11 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
         return (_address_line(page.get("body_text") or "", street, postcode)
                 or street or postcode)
 
+    # Not off an event's page. See `_an_events_page`.
     with_an_address = [p for p in pages
                        if (p.get("contact_facts") or {}).get("has_address")
-                       and not is_listing_page(p)]
+                       and not is_listing_page(p)
+                       and not _an_events_page(p, _address_words(p))]
     address_page = next((p for p in with_an_address if _address_words(p)),
                         next(iter(with_an_address), None))
     # A `PostalAddress` in JSON-LD, which the text scan above never reads and
@@ -3809,6 +4126,13 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
                                  "(declared in JSON-LD rather than written in the text)")
     elif area_page:
         found["service area"] = note(area_page["url"], area_quote)
+    elif one_document:
+        reason = _not_expected_of_one_document(
+            "a postal address or a service area",
+            "A document has no premises to publish and no service area to name.")
+        unverified.add("location")
+        found["location"] = "not applicable - {}".format(reason)
+        result.skip("core-fact-location-or-service-area", reason)
     elif not kind.might_be(*_STATES_WHERE_IT_IS):
         # A program is not somewhere, and it has no customers to serve across
         # regions. Asked for its "location or service area" it can only answer
@@ -3890,6 +4214,9 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
             if _a_dated_document(page):
                 continue
             facts = page.get("contact_facts") or {}
+            # A number on an event's page is the venue's. See `_an_events_page`.
+            if _an_events_page(page, _contact_detail(facts, page)):
+                continue
             detail = _contact_detail(facts, page)
             if detail:
                 contact_page, contact_detail = page, detail
@@ -4094,7 +4421,14 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
         found["team facts"] = note(origin_page["url"], origin_fact,
                                    "(declared in JSON-LD rather than written in the text)")
 
-    if "founding facts" not in found and not kind.might_be(*_STATES_A_FOUNDING_YEAR):
+    if "founding facts" not in found and one_document:
+        reason = _not_expected_of_one_document(
+            "a founding year in a place",
+            "What it is, and who wrote it, are still asked for above.")
+        unverified.add("founding facts")
+        found["founding facts"] = "not applicable - {}".format(reason)
+        result.skip("core-fact-founding-facts", reason)
+    elif "founding facts" not in found and not kind.might_be(*_STATES_A_FOUNDING_YEAR):
         # A founding year is a fact about a body that was founded. A program, a
         # personal site and a research group have a first release, a person and
         # a grant respectively, and none of the three is what "was founded in
@@ -4325,6 +4659,9 @@ def _core_fact_steps(name, brand_name, any_currency_figure=True, kind=None, sell
             "body with a similar name.",
             because("a public body rather than a company"),
         ]
+    # A one-page essay never reaches this wording: the founding fact is not
+    # asked of a site that is one document, or of a person's site, so the
+    # company sentence below goes only to a site that might be a company.
     return [
         'Add a short paragraph on the about page: "{} was founded in `<year>` in '
         '`<place>`."'.format(brand),
@@ -4344,6 +4681,14 @@ def _check_naming_consistency(result, snapshot, pages, brand):
     """
     result.check("brand-naming-consistency")
     variants = [v for v in (brand.get("authoritative_variants") or []) if v]
+    # A name the markup gives only inside another node - the organisation's
+    # `founder`, an Article's `publisher` - is somebody the site names, not a
+    # name the site asserts for itself. A craft brand's Organization block
+    # names the charity that founded it, and the report said "2 distinct names
+    # are asserted as the site's identity", one of them the founder's. See
+    # `_named_only_inside_another_node`.
+    referenced = _named_only_inside_another_node(variants, snapshot.get("pages") or pages)
+    variants = [v for v in variants if v not in referenced]
 
     # Zero is not one-fewer-than-two. A site that asserts its own name nowhere
     # a machine reads has not passed this check; it has failed the thing the
@@ -4400,8 +4745,12 @@ def _check_naming_consistency(result, snapshot, pages, brand):
     for code in sorted(editions):
         names = editions[code]
         # A named part of the organisation is not a second spelling of it.
-        # See `_sub_brands`.
-        parts = _sub_brands(names)
+        # See `_sub_brands`. Except the name the homepage gives the whole site
+        # in og:site_name: "<Name>store" on the front door is the site's name,
+        # not its shop section, and setting it aside hid the one real split -
+        # og:site_name "<Name>store" against the Organization's "<Name>".
+        parts = {sub: whole for sub, whole in _sub_brands(names).items()
+                 if sub not in _site_names_on_the_front_door(snapshot.get("pages") or pages)}
         sub_brands.update(parts)
         names = [n for n in names if n not in parts]
         if len(names) < 2:
@@ -4412,8 +4761,15 @@ def _check_naming_consistency(result, snapshot, pages, brand):
             break
 
     if found is None:
-        result.skip("brand-naming-consistency", _naming_agreement_reason(
-            variants, compared, editions, sections, sub_brands))
+        reason = _naming_agreement_reason(variants, compared, editions, sections, sub_brands)
+        if any(_names_in_several_scripts(names) for names in editions.values()):
+            # Said, because a reader who sees two names in the list above will
+            # otherwise wonder why they were not compared. See
+            # `_within_one_script`.
+            reason += (". Names written in different scripts - one in the Latin alphabet, "
+                       "one in another writing system - were read as the name and its "
+                       "translation, not as two spellings of it")
+        result.skip("brand-naming-consistency", reason)
         return
 
     language, compared, spelling_conflicts, undeclared = found
@@ -4482,6 +4838,39 @@ def _check_naming_consistency(result, snapshot, pages, brand):
                   "spellings halve the evidence for each and make it harder to tell that both "
                   "refer to one company.",
     )
+
+
+def _named_only_inside_another_node(variants, pages):
+    """{name: property} for names declared only nested under another node.
+
+    A name counts as the site's own where a top-level node - one the page
+    declares for itself rather than one another node points at - or the
+    page's og:site_name gives it. A name found only under `founder`,
+    `publisher`, `author` and the like is the name of whoever that property
+    points at.
+    """
+    top, nested = set(), {}
+    for page in pages:
+        site_name = str((page.get("og") or {}).get("og:site_name") or "").strip()
+        if site_name:
+            top.add(site_name)
+        for node in page.get("jsonld") or []:
+            if not isinstance(node, dict):
+                continue
+            name = str(node.get("name") or "").strip()
+            if not name:
+                continue
+            if node.get("_nested_in"):
+                nested.setdefault(name, str(node.get("_nested_in")))
+            else:
+                top.add(name)
+    return {v: nested[v] for v in variants if v in nested and v not in top}
+
+
+def _site_names_on_the_front_door(pages):
+    """The og:site_name values the homepages declare."""
+    return {str((p.get("og") or {}).get("og:site_name") or "").strip()
+            for p in pages if p.get("page_type") == "home"} - {""}
 
 
 def _first_path_segment(url):
@@ -4626,7 +5015,49 @@ def _conflicting_names(variants, brand):
     # A second name already declared as `alternateName` is not a contradiction:
     # the site has explicitly said the two refer to one entity.
     undeclared = [g for g in groups if not (g["keys"] & declared_alternates)]
-    return spelling_conflicts, undeclared
+    return spelling_conflicts, _within_one_script(undeclared)
+
+
+def _writing_system(name):
+    """The script a name is written in: "latin", "cjk", or the script's own name."""
+    counts = {}
+    for char in str(name or ""):
+        if not char.isalpha():
+            continue
+        try:
+            script = unicodedata.name(char).split(" ")[0]
+        except ValueError:
+            continue
+        if script in ("CJK", "HIRAGANA", "KATAKANA", "HANGUL", "IDEOGRAPHIC"):
+            script = "CJK"
+        counts[script] = counts.get(script, 0) + 1
+    if not counts:
+        return ""
+    return max(sorted(counts), key=lambda s: counts[s]).lower()
+
+
+def _within_one_script(groups):
+    """The name groups that disagree with another group written in the same script.
+
+    A university's Japanese pages carry its name in Japanese in og:site_name,
+    and its contact forms - Japanese pages too - carry the English name there.
+    "The University of Tokyo" beside "東京大学" is one name and its translation,
+    not two names, and the fix "pick one written form and use it character for
+    character" would delete one of the two languages the institution works in.
+    Two names in different scripts cannot be a misspelling of each other, so
+    a group is only in conflict with a group written in its own script.
+    """
+    by_script = {}
+    for group in groups:
+        script = _writing_system(sorted(group["variants"])[0])
+        by_script.setdefault(script, []).append(group)
+    return [group for script, members in sorted(by_script.items())
+            if len(members) >= 2 for group in members]
+
+
+def _names_in_several_scripts(names):
+    """Do these declared names include one written in another script?"""
+    return len({_writing_system(name) for name in names if _writing_system(name)}) > 1
 
 
 def _set_aside_note(sections):

@@ -160,6 +160,45 @@ def test_the_title_is_read_as_well_as_the_description():
     assert "<title>" in result.findings[0]["evidence"]
 
 
+def _distinct(count, **over):
+    return [dict({"page_type": "other",
+                  "title": "Braided rope, part {} | Larkmoor".format(n),
+                  "meta_description": "Part {} of the rope guide, spliced by hand.".format(n),
+                  "url": "https://larkmoor.test/guide/{}".format(n)}, **over)
+            for n in range(count)]
+
+
+def test_the_hygiene_title_names_the_largest_fault_and_its_count():
+    """"Page titles and meta descriptions need attention" was the same
+    sentence on eleven of twelve sites audited together, whether 59 of 59 pages
+    had no description or two pages shared one."""
+    pages = _distinct(10)
+    for page in pages[:6]:
+        page["meta_description"] = ""
+    pages[8]["title"] = pages[9]["title"]
+    result = _Result()
+    SD._check_titles_and_descriptions(result, pages)
+    hygiene = [f for f in result.findings if f["id_hint"] == "title-and-description-hygiene"]
+    assert hygiene[0]["title"] == ("6 of the 10 crawled pages have no meta description, "
+                                   "and 1 more title or description fault")
+    assert hygiene[0]["severity"] == "medium"
+
+
+def test_one_working_label_is_low_and_lists_only_its_own_page():
+    """A coffee roaster with one "App LP - 2023" title was billed `medium`
+    and listed with undescribed pages its evidence never mentioned."""
+    pages = _distinct(12)
+    pages[0]["title"] = "App LP - 2023"
+    pages[1]["meta_description"] = ""
+    result = _Result()
+    SD._check_titles_and_descriptions(result, pages)
+    hygiene = [f for f in result.findings if f["id_hint"] == "title-and-description-hygiene"]
+    assert hygiene[0]["title"] == ("1 of the 12 crawled pages carries an editor's working "
+                                   "label as the <title>")
+    assert hygiene[0]["severity"] == "low"
+    assert hygiene[0]["affected_pages"] == [pages[0]["url"]]
+
+
 def test_one_page_is_enough_because_the_fault_is_a_template():
     """Unlike the hygiene counts, which need a share before they mean
     anything: one escaped value is one template, and the template renders

@@ -23,6 +23,7 @@ import html
 import os
 import re
 import sys
+from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -50,6 +51,9 @@ from audit_common import (
     pages_the_crawl_read, addresses_the_reader,
     # The one page every skill means by "the homepage".
     site_homepage,
+    # The one rule for "does this sentence say what the brand is", and the
+    # forms of the brand's name it reads.
+    defining_sentence, brand_forms, brand_pattern,
 )
 
 # Sub-skill order. Earlier skills own overlapping observations, so when two
@@ -530,6 +534,190 @@ def fold_one_job_findings(findings, checks_that_ran=(), checks_that_fired=()):
                     s for s in (action.get("how_to_fix") or [])
                     if not _mentions(s, phrase)]
     return out, folded
+
+
+# Pairs of findings that are one defect on one set of pages, billed twice.
+#
+# `fold_one_job_findings` merges two causes that are one edit. These are two
+# checks, in two skills or in one, each measuring the same broken thing from
+# its own side, and each printed as its own row in the severity table:
+#
+#   one dead address     a link to a page that answers 404 is a broken link to
+#                        the engagement skill and a failed fetch to the access
+#                        skill. One report billed one 404 twice, high and
+#                        medium, with two fixes for one link.
+#   one canonical tag    a page whose canonical names another host is also the
+#                        reason the site's canonicals are split across hosts.
+#                        One tag, two rows.
+#   one set of twins     addresses that differ only in their query string and
+#                        declare no canonical are, read by their text, the same
+#                        page at several addresses. The same eight addresses,
+#                        two rows, two copies of one fix.
+#
+# Each entry names the two id hints and how "the same pages" is decided, since
+# that is different for each: the dead address by the address, the canonical
+# tag by which pages carry the stray host, and the twins by their page lists.
+#
+# Two ways of making them one. Two findings with one root cause are merged
+# into one, because nothing the report names is lost. Two with different
+# root causes are both kept, and the lesser is marked `follows_from` the
+# other: it leaves "Start here" and the severity totals, and its root cause
+# stays in `findings[]` for anything that reads them.
+SAME_DEFECT_PAIRS = (
+    # `take_steps`: whether the merged finding's fix adds anything - the twin
+    # finding's step naming the address to declare is the one line the other
+    # lacks.
+    {"hints": ("broken-internal-links", "high-non-200-rate"), "match": "dead-address",
+     "take_steps": False,
+     "why": "the same dead address, reached once as a link and once as a fetch"},
+    {"hints": ("canonical-points-off-domain", "mixed-canonical-hosts"),
+     "match": "stray-canonical-host", "take_steps": False,
+     "why": "the same canonical tag: the page naming another host is the whole of the split"},
+    {"hints": ("the-same-page-at-several-addresses-with-no-canonical",
+               "filter-parameters-produce-pages-with-no-canonical"),
+     "match": "same-pages", "take_steps": True,
+     "why": "the same set of addresses serving one page with no canonical"},
+)
+
+# How many pages two lists of twins may differ by and still be one set. One: a
+# check that groups by title and a check that groups by text disagree about the
+# one address whose title the template wrote differently.
+SAME_PAGES_SLACK = 1
+
+
+def _host_of(url):
+    host = (urlparse(url or "").hostname or "").lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def _complete_pages(finding):
+    pages = set(finding.get("affected_pages") or [])
+    total = finding.get("affected_page_count") or len(pages)
+    return pages if pages and total <= len(pages) else None
+
+
+def _one_defect(pair, keep, drop, snapshot, signals):
+    """Do `keep` and `drop` describe the same defect on the same pages?"""
+    if pair["match"] == "dead-address":
+        link = keep if (keep.get("id_hint") or keep.get("stable_id")) == pair["hints"][0] \
+            else drop
+        fetch = drop if link is keep else keep
+        # The dead targets, from the engagement skill's own record of them:
+        # its page list now names the pages carrying the links, which are the
+        # pages to edit, and the targets are what the fetch finding lists.
+        targets = set(((signals or {}).get("broken_link_targets") or {}).keys()) \
+            or set(link.get("affected_pages") or [])
+        fetched = _complete_pages(fetch)
+        return bool(fetched) and fetched == targets
+    if pair["match"] == "stray-canonical-host":
+        tagged = keep if (keep.get("affected_pages") or []) else drop
+        split = drop if tagged is keep else keep
+        if split.get("affected_pages"):
+            return False
+        site = _host_of(snapshot.get("origin") or "")
+        stray = {page["url"] for page in snapshot.get("pages") or []
+                 if (page.get("canonical") or "").strip()
+                 and _host_of(page["canonical"]) not in ("", site)}
+        return bool(stray) and stray <= set(tagged.get("affected_pages") or [])
+    first, second = _complete_pages(keep), _complete_pages(drop)
+    if not first or not second or len(first) < 2 or len(second) < 2:
+        return False
+    small, large = sorted((first, second), key=len)
+    return small <= large and len(large) - len(small) <= SAME_PAGES_SLACK
+
+
+def _same_defect_pairs(findings, snapshot, signals=None):
+    """`[(pair, keep, drop)]` - the pairs above found in `findings`, one defect each.
+
+    The finding kept is the more severe, then the one naming more pages.
+    """
+    by_hint = {}
+    for finding in findings:
+        by_hint.setdefault(finding.get("id_hint") or finding.get("stable_id"), []).append(finding)
+    out = []
+    for pair in SAME_DEFECT_PAIRS:
+        first, second = (by_hint.get(h) or [] for h in pair["hints"])
+        if len(first) != 1 or len(second) != 1 or first[0] is second[0]:
+            continue
+        keep, drop = sorted(
+            (first[0], second[0]), key=lambda f: (SEVERITY_RANK.get(f.get("severity"), 99),
+                                                  -len(f.get("affected_pages") or [])))
+        if _one_defect(pair, keep, drop, snapshot, signals):
+            out.append((pair, keep, drop))
+    return out
+
+
+def defer_to_the_same_defect(findings, snapshot, signals=None):
+    """Mark the lesser of each pair above with different root causes `follows_from`
+    the other, and return the records written.
+
+    Runs after the ids exist and after the page-level deferrals, and leaves a
+    finding already attributed there alone. Nothing is removed: a 404 the
+    access skill fetched keeps its own root cause in `findings[]`, and stops
+    being counted a second time beside the broken link that points at it.
+    """
+    records = []
+    for pair, keep, drop in _same_defect_pairs(findings, snapshot, signals):
+        if keep.get("root_cause") == drop.get("root_cause"):
+            continue
+        if drop.get("follows_from") or drop.get("partly_follows_from") \
+                or keep.get("follows_from") or not keep.get("id"):
+            continue
+        pages = list(drop.get("affected_pages") or [])
+        record = {"id": keep["id"],
+                  "stable_id": keep.get("stable_id") or keep.get("id_hint"),
+                  "why": pair["why"], "basis": "same-defect",
+                  "pages": pages[:DEFERRED_PAGES_SHOWN],
+                  "page_count": drop.get("affected_page_count") or len(pages)}
+        drop["follows_from"] = record
+        records.append(dict(record, deferred=drop.get("id")))
+    return records
+
+
+def merge_one_defect_billed_twice(findings, snapshot, signals=None):
+    """`(findings, merged)` - each pair above with one root cause, made one finding.
+
+    The finding kept takes the other's evidence, its fix steps where they add
+    something, and the union of the two page lists where both list the same
+    kind of page. The merged check stays named, through `merged_from`, so the
+    appendix still accounts for it. Pairs with two root causes are left to
+    `defer_to_the_same_defect`, which keeps both.
+    """
+    out, merged = list(findings), []
+    for pair, keep, drop in _same_defect_pairs(findings, snapshot, signals):
+        if keep.get("root_cause") != drop.get("root_cause"):
+            continue
+        if keep not in out or drop not in out:
+            continue
+        action = keep.setdefault("suggested_action", {})
+        steps = list(action.get("how_to_fix") or [])
+        for step in ((drop.get("suggested_action") or {}).get("how_to_fix") or []
+                     if pair["take_steps"] else []):
+            if step not in steps:
+                steps.append(step)
+        action["how_to_fix"] = steps
+        other = drop.get("suggested_action") or {}
+        if other.get("snippet") and not action.get("snippet"):
+            action["snippet"] = other["snippet"]
+            if other.get("snippet_warning"):
+                action["snippet_warning"] = other["snippet_warning"]
+        keep["evidence"] = "{} The same defect, as {} reads it: {}".format(
+            (keep.get("evidence") or "").rstrip(), drop.get("detected_by") or "another check",
+            drop.get("evidence") or "")
+        if pair["match"] == "same-pages":
+            keep["affected_pages"] = sorted(set(keep.get("affected_pages") or [])
+                                            | set(drop.get("affected_pages") or []))
+            keep["affected_page_count"] = len(keep["affected_pages"])
+        if drop.get("detected_by") and drop.get("detected_by") != keep.get("detected_by"):
+            keep.setdefault("also_detected_by", []).append(drop["detected_by"])
+        keep.setdefault("merged_from", []).append(
+            {"skill": drop.get("detected_by") or "", "check": drop.get("check"),
+             "id_hint": drop.get("id_hint")})
+        out.remove(drop)
+        merged.append({"skill": drop.get("detected_by"), "id_hint": drop.get("id_hint"),
+                       "merged_into": keep.get("id_hint"),
+                       "reason": "because both describe {}".format(pair["why"])})
+    return out, merged
 
 
 # Words that make a finding a claim about something not being there.
@@ -1709,6 +1897,12 @@ def drop_dead_profile_links(snippet, dead):
 # spacing. See `hold_back_invented_values`.
 WHITESPACE_BLIND_MIN = 12
 
+# Keys whose value is a schema.org type or vocabulary address rather than a
+# fact about the site, and the shape such a value has: a type name written the
+# way schema.org writes them, or that name under the schema.org address.
+_TYPE_VALUED_KEYS = frozenset({"@type", "@context", "additionalType"})
+_SCHEMA_TYPE_RE = re.compile(r"^(?:https?://schema\.org/?)?(?:[A-Z][A-Za-z0-9]{1,60})?$")
+
 _SQUEEZED = {}
 
 
@@ -1753,6 +1947,16 @@ def hold_back_invented_values(snippet, haystack):
             return True
         low = stripped.lower()
         if low in _SCHEMA_VOCABULARY or low.startswith("@"):
+            return True
+        # A schema.org type is vocabulary, not a fact the site states. The
+        # audit chose it from what it measured - "this site reads as a software
+        # project, so the block below declares the program itself as a
+        # `SoftwareApplication`" - and the guard then replaced it with
+        # `<@type - not found on the site, fill this in>` two lines under that
+        # sentence, because no site writes its own type anywhere. Exempt by
+        # key and by shape, at any depth of the block, so a nested node's type
+        # passes too and a name in a type-valued key does not.
+        if key in _TYPE_VALUED_KEYS and _SCHEMA_TYPE_RE.match(stripped):
             return True
         squeezed_haystack = _without_whitespace(haystack)
         # A value carrying a `{token}` is part site and part format. Verify the
@@ -2720,6 +2924,44 @@ def defer_to_the_page_level_cause(findings, signals=None):
     return records
 
 
+def follows_another(finding):
+    """The id of the finding this one is a consequence of, wholly or partly, or ""."""
+    return (finding.get("follows_from") or finding.get("partly_follows_from") or {}).get("id") or ""
+
+
+def severity_table(report):
+    """`(rows, follows)` - the severity table both documents print.
+
+    `rows` is `[(label, confident, worth checking)]` over the findings that
+    stand on their own. `follows` is `[(cause id, [ids], confident, worth
+    checking)]`: the findings that are another one's defect read again, on a
+    row of their own, so the table neither drops them nor counts one defect
+    five times. One real table said "Medium: 6 + 8" over a museum whose one
+    page pair was billed as five medium findings.
+    """
+    by_id = {f["id"]: f for f in report.get("findings") or []}
+    demoted = set(report.get("worth_checking") or [])
+    standing = [f for f in by_id.values() if not follows_another(f)]
+    rows = [(label,
+             sum(1 for f in standing if f["severity"] == key and f["id"] not in demoted),
+             sum(1 for f in standing if f["severity"] == key and f["id"] in demoted))
+            for key, label, _ in SEVERITY_HEADINGS]
+    groups = collections.OrderedDict()
+    for finding in sorted(by_id.values(), key=lambda f: f["id"]):
+        cause = follows_another(finding)
+        if cause:
+            groups.setdefault(cause, []).append(finding)
+    follows = [(cause, [f["id"] for f in group],
+                sum(1 for f in group if f["id"] not in demoted),
+                sum(1 for f in group if f["id"] in demoted))
+               for cause, group in groups.items()]
+    return rows, follows
+
+
+def _follows_row_label(cause, ids):
+    return "Follows from {}, not counted again ({})".format(cause, ", ".join(ids))
+
+
 def deferral_note(finding):
     """The consequence, in one sentence, or "".
 
@@ -2733,31 +2975,37 @@ def deferral_note(finding):
     pages = follows.get("pages") or []
     total = follows.get("page_count") or len(pages)
     more = "" if total <= len(pages) else " and {} more".format(total - len(pages))
+    # The pages, named here, are the finding's page list: a consequence prints
+    # no second list under its note.
+    which = "Every page this names - {}{} - is".format(", ".join(pages), more) if pages \
+        else "Every page this names is"
+    if follows.get("basis") == "same-defect":
+        # Two checks, two root causes, one broken thing. Both are kept, so
+        # the reader is told which one carries the fix.
+        return ("{} reports {}, read by another check. The fix is the one under {}; do "
+                "that and re-run this audit. If this is still here afterwards, the fix below "
+                "is the one to make.".format(follows["id"], follows["why"], follows["id"]))
     if follows.get("basis") == "page":
         # A page whose own defect is what it is - a redirect, a cover page, a
         # frame - rather than a text that did not arrive, so the closing
         # sentence names the page and not the text.
-        return ("Every page this names - {}{} - is a page {} reports {}. That is the thing "
-                "to fix on {}, and this is the same page read from another angle rather "
-                "than separate work: do {} first, then re-run this audit. If this is still "
-                "here afterwards, the fix below is the one to make.".format(
-                    ", ".join(pages), more, follows["id"], follows["why"],
-                    "it" if total == 1 else "them", follows["id"]))
+        return ("{} a page {} reports {}. This is the same page read again, not separate "
+                "work: do {} first and re-run this audit. If this is still here afterwards, "
+                "the fix below is the one to make.".format(
+                    which, follows["id"], follows["why"], follows["id"]))
     if follows.get("basis") == "copy":
         # Pages the render skill measured as delivering none of their own copy
         # without any shell finding listing them, so the sentence names the
         # measurement rather than claiming the finding reports these pages.
-        return ("Every page this names - {}{} - delivered almost none of its own copy in "
-                "the HTML, on a site {} reports building its pages in the browser. This is "
-                "that same defect read from another angle rather than separate work: do {} "
-                "first, then re-run this audit. If this is still here afterwards, it is a "
-                "real gap in the text and the fix below is the one to make.".format(
-                    ", ".join(pages), more, follows["id"], follows["id"]))
-    return ("Every page this names - {}{} - is a page {} reports {}. This is that same "
-            "defect read from another angle rather than separate work: do {} first, then "
-            "re-run this audit. If this is still here afterwards, it is a real gap in the "
-            "text and the fix below is the one to make.".format(
-                ", ".join(pages), more, follows["id"], follows["why"], follows["id"]))
+        return ("{} a page that delivered almost none of its own copy in the HTML, on a site "
+                "{} reports building its pages in the browser. This is that defect read "
+                "again, not separate work: do {} first and re-run this audit. If this is "
+                "still here afterwards, it is a real gap in the text and the fix below is the "
+                "one to make.".format(which, follows["id"], follows["id"]))
+    return ("{} a page {} reports {}. This is that defect read again, not separate work: do "
+            "{} first and re-run this audit. If this is still here afterwards, it is a real "
+            "gap in the text and the fix below is the one to make.".format(
+                which, follows["id"], follows["why"], follows["id"]))
 
 
 def partial_deferral_note(finding):
@@ -2808,6 +3056,23 @@ def partial_deferral_note(finding):
 # stripper uses: a block repeated across one subsection is that subsection's
 # chrome even when it is a tenth of the crawl.
 QUOTE_REPEAT_LIMIT = 3
+
+
+# A sentence's closing mark, with any closing quote or bracket after it. Latin,
+# CJK full-width and the ellipsis.
+_SENTENCE_END_RE = re.compile(u"[.!?。！？…][\"'”’）)\\]」』]*\\s*$")
+_SENTENCE_END_ANYWHERE_RE = re.compile(u"[.!?](?:\\s|$)|[。！？]")
+# How many finished sentences a page needs before an unfinished one is read
+# as a headline rather than as the way the page writes.
+FINISHED_SENTENCES_TO_ASK = 3
+# A teaser the page cut short: "...", "…", or either before a "[read more]".
+_CUT_SHORT_RE = re.compile(u"(?:\\.\\.\\.|…)[\\W_]*(?:\\[[^\\]]{1,20}\\])?\\s*$")
+
+
+def _finished(sentence):
+    """Does this sentence end the way a sentence the page finished ends?"""
+    return bool(_SENTENCE_END_RE.search(sentence or "")) and not _CUT_SHORT_RE.search(
+        sentence or "")
 
 
 def _quote_key(sentence):
@@ -2920,7 +3185,20 @@ def simulate_citations(snapshot, brand_name):
         for paragraph in (page.get("paragraphs") or [])[:25]:
             candidates.extend(sentences(paragraph))
         if not candidates:
-            candidates = sentences(page.get("body_text", ""))
+            # The first "sentence" of the flattened text is never one: it is
+            # the title, the logo and the menu run into whatever the first
+            # full stop ends. A national museum's homepage has no paragraphs,
+            # and its row - and the verdict above it - quoted "<museum name>
+            # previous next opening hours Mon/Tue/Thu ..." as the site's own
+            # sentence, carousel buttons included.
+            candidates = sentences(page.get("body_text", ""))[1:]
+        # A sentence the page ends is one it finished. Where the page's own
+        # writing uses full stops, a line without one is a headline or a
+        # notice title - a university homepage's row quoted a list of
+        # admission-document titles as what an assistant would lift. Thai and
+        # other writing that does not end sentences with a mark is not asked.
+        finishes = len(_SENTENCE_END_ANYWHERE_RE.findall(
+            page.get("body_text", ""))) >= FINISHED_SENTENCES_TO_ASK
         # Source is not a sentence, and this is the boundary where a sentence
         # becomes something a report prints back to a site as its own words.
         # `reads_as_source_not_prose` is the extractor's own test: an angle
@@ -2935,10 +3213,15 @@ def simulate_citations(snapshot, brand_name):
         reason = ""
         # Priority 1: a definition naming the brand. That is what an assistant
         # needs before it can say anything else.
+        # The shared definition rule, not a verb list of its own. "Today,
+        # <Brand> is proud to be B Corp certified" carries the brand and
+        # "is", and a furniture shop's verdict quoted it as the one sentence
+        # saying what the brand is; `defining_sentence` rejects "proud to"
+        # and every other shape `fact-extractability-audit` rejects, so the
+        # table and that finding cannot disagree about one sentence.
         if pattern:
             for sentence in candidates:
-                if re.search(pattern, sentence, re.I) and re.search(
-                        r"\b(?:is|are|was|provides|offers|helps|builds|makes)\b", sentence, re.I):
+                if re.search(pattern, sentence, re.I) and defining_sentence(sentence, brand_name):
                     best, reason = sentence, "names the brand and says what it is"
                     break
         # How long a sentence has to be before it is worth quoting depends on
@@ -2968,12 +3251,16 @@ def simulate_citations(snapshot, brand_name):
         # Priority 3: a self-contained sentence carrying a number.
         if best is None:
             for sentence in candidates:
+                if _CUT_SHORT_RE.search(sentence) or (finishes and not _finished(sentence)):
+                    continue
                 if floor <= len(sentence) <= 300 and NUMERIC_RE.search(sentence):
                     best, reason = sentence, "states a number a reader could act on"
                     break
         # Priority 4: any self-contained sentence that defines something.
         if best is None:
             for sentence in candidates:
+                if _CUT_SHORT_RE.search(sentence) or (finishes and not _finished(sentence)):
+                    continue
                 if floor <= len(sentence) <= 300 and CONCRETE_RE.search(sentence):
                     best, reason = sentence, "defines something, though it states no figure"
                     break
@@ -3389,9 +3676,22 @@ def build_recommendations(snapshot, signals, findings):
     # second - and unlike a finding it accuses nobody. What it may not do is
     # instruct. `enough_to_grade` is the same predicate, so the two halves of
     # the report cannot now disagree about whether the crawl saw enough.
-    graded = enough_to_grade(len(readable_text_pages(snapshot)),
-                             readable_share(snapshot))
+    read_here = len(readable_text_pages(snapshot))
+    graded = enough_to_grade(read_here, readable_share(snapshot))
     out = []
+
+    # Every entry below says what it was measured on, on this site. Four
+    # reports out of five printed "Design newsletters text-first" and "Write
+    # the comparison that concedes something" word for word, and seven sites
+    # got the same llms.txt, boilerplate, dates and "Read next" paragraphs:
+    # advice that reads the same everywhere reads as not measured anywhere.
+    def cited(causes):
+        """The ids of the published findings carrying any of these causes."""
+        return [f["id"] for f in findings if f.get("root_cause") in causes and f.get("id")]
+
+    def naming(ids):
+        return " ({} {} the pages)".format(", ".join(ids[:3]), "lists" if len(ids) == 1
+                                           else "list") if ids else ""
 
     def add(rec_id, title, condition, summary, steps, mechanism, why, effort, owner,
             snippet=None, rests_on_absence=False):
@@ -3417,6 +3717,7 @@ def build_recommendations(snapshot, signals, findings):
             entry["snippet"] = snippet
         out.append(entry)
 
+    key_pages = llms_txt_key_pages(snapshot, signals)
     # No `rests_on_absence`. This condition is one request to one URL at the
     # site root that answered, and how many content pages the crawl reached has
     # no bearing on it: the file is there or it is not. The tri-state below
@@ -3430,7 +3731,19 @@ def build_recommendations(snapshot, signals, findings):
         # never answered at all.
         signals.get("llms_txt_present") is False,
         "Add a short plain-text file at the site root summarising what this is, its key pages "
-        "and its canonical facts.",
+        "and its canonical facts. This crawl asked for {}/llms.txt and got no such file.{}"
+        .format(
+            (snapshot.get("origin") or "").rstrip("/"),
+            " The starter below names {} this crawl read that {} with content of {} own: "
+            "{}.".format(
+                plural(len(key_pages), "page", "pages"),
+                "answered" if len(key_pages) == 1 else "each answered",
+                "its" if len(key_pages) == 1 else "their",
+                ", ".join(url for _, url in key_pages))
+            if key_pages else
+            " No page this crawl read qualified as a key page - one that answered with "
+            "content of its own rather than a redirect or a form - so the starter below "
+            "leaves the list for you to fill in."),
         # "a one-line brand definition" was the wording, and a program, a
         # weather service and a heritage archive do not have a brand to define.
         # The instruction is the same for all of them once it says what it
@@ -3444,7 +3757,7 @@ def build_recommendations(snapshot, signals, findings):
         "It hands a machine the exact summary you want quoted, instead of leaving it to "
         "assemble one from whichever page it happened to fetch.",
         "low", "marketing",
-        _llms_txt_template(snapshot, brand))
+        _llms_txt_template(snapshot, brand, signals))
 
     # `R-ANSWER-FIRST` was retired here, and the deletion is the change.
     #
@@ -3475,7 +3788,10 @@ def build_recommendations(snapshot, signals, findings):
     add("R-FAQ-SCHEMA", "Publish FAQ content with FAQPage schema",
         not signals.get("has_faq_schema") and not has_faq_page
         and not signals.get("pages_with_unmarked_qa"),
-        "Add a page of real questions, phrased the way people ask assistants, marked up as FAQPage.",
+        "Add a page of real questions, phrased the way people ask assistants, marked up as "
+        "FAQPage. None of the {} this crawl read is an FAQ page, carries FAQPage markup or "
+        "prints answers under question headings.".format(
+            plural(read_here, "page", "pages")),
         # Only the first step moves. There is no sales team behind a program
         # and no support desk behind a municipal register, and a step naming
         # one is a step nobody there can carry out - but every kind of site has
@@ -3645,9 +3961,26 @@ def build_recommendations(snapshot, signals, findings):
             ", ".join(named),
             " and the others you have claimed"
             if len(published_profiles) > len(named) else "")
+    # What there is to start from, read off this site: its own definition, or
+    # its homepage's description. Named, so the entry says something about this
+    # site rather than about sites in general.
+    says = what_the_site_says_it_is(snapshot, signals)
+    if says and says.get("source") == "definition":
+        starting_point = (' Start from the sentence the site already uses: "{}". This crawl '
+                          "found no Organization `description` carrying it.".format(
+                              truncate(says["text"], 160)))
+    elif says:
+        starting_point = (' The nearest thing this crawl found is the homepage\'s {}: "{}". '
+                          "Start from it, and make it say what this is rather than what the "
+                          "page is.".format(says["source"], truncate(says["text"], 160)))
+    else:
+        starting_point = (" This crawl found nothing on the homepage - no definition, no meta "
+                          "description, no og:description - that says what this is, so there "
+                          "is no sentence to start from yet.")
     add("R-BOILERPLATE", "Write one canonical boilerplate and reuse it verbatim",
         True,  # always: the cheapest corroboration win there is
-        "Agree a single paragraph describing what this is and use it, unchanged, everywhere.",
+        "Agree a single paragraph describing what this is and use it, unchanged, "
+        "everywhere.{}".format(starting_point),
         [_worded_for(kind, _BOILERPLATE_FIRST_STEP, _BOILERPLATE_FIRST_STEP_DEFAULT),
          "Paste it, character for character, into {}.".format(boilerplate_destinations),
          "Change it in one place and propagate; never let two versions coexist.",
@@ -3713,7 +4046,12 @@ def build_recommendations(snapshot, signals, findings):
         # classifier cannot place is asked for it exactly as it is today.
         and kind.might_be(LOCAL_BUSINESS, ONLINE_SELLER, ORGANISATION,
                           PUBLIC_BODY, PUBLICATION),
-        press_wording,
+        press_wording + (
+            " The facts this crawl could not find stated in plain text: {}.".format(
+                ", ".join(core_facts_missing)) if core_facts_missing else
+            " The site states its facts in more than one version{}.".format(
+                naming(cited({"nap-inconsistency", "name-inconsistency"})))
+            if {"nap-inconsistency", "name-inconsistency"} & root_causes else ""),
         ["Publish one page carrying the canonical boilerplate and the facts below. It can be "
          "a section of your about page; it does not need to be called a press page.",
          press_figures,
@@ -3766,7 +4104,8 @@ def build_recommendations(snapshot, signals, findings):
         # dates 99% of them, one line above a threshold of 25%.
         + ("" if date_coverage is None else
            " {}% of the pages crawled here carry any date signal.".format(
-               int(round(date_coverage * 100)))),
+               int(round(date_coverage * 100))))
+        + naming(cited({"no-date-signal", "stale-content"})),
         ["Add \"Last updated <date>\" to every substantive page, wrapped in "
          "<time datetime=\"YYYY-MM-DD\">.",
          "Mirror it in `dateModified` in structured data.",
@@ -3808,10 +4147,19 @@ def build_recommendations(snapshot, signals, findings):
     # step two, under a step telling the reader to go and list competitors.
     # A reader who stops after the first step gets only the obvious half, so
     # the half worth having leads.
+    selling = [p["url"] for p in pages_of(snapshot, content_only=True)
+               if sells_something(snapshot, [p])]
     add("R-COMPARISON-PAGES", "Write the comparison that concedes something",
         sells_something(snapshot) and "comparison" not in page_types,
         'Cover the framings people actually search - "X vs Y", "X for <use case>" - and be '
-        "honest in them, because the honesty is what makes them usable as a source.",
+        "honest in them, because the honesty is what makes them usable as a source. {} this "
+        "crawl read {}, and none of the {} it read compares what is on offer with an "
+        "alternative.".format(
+            plural(len(selling), "page", "pages") if selling else "The pages",
+            "sells something, such as {}".format(selling[0]) if len(selling) == 1 else
+            "sell something, such as {}".format(", ".join(selling[:2])) if selling else
+            "sell something",
+            plural(read_here, "page", "pages")),
         ["Say plainly who each option suits better, including where somebody else's is the "
          "right answer. A comparison that concedes nothing reads as marketing and is "
          "discounted; the version that concedes is the one that gets quoted, and it gets "
@@ -3881,7 +4229,8 @@ def build_recommendations(snapshot, signals, findings):
     # PDF and a page that does not state its numbers were both read.
     add("R-HTML-FOR-PDF", "Publish HTML versions of PDF-only content",
         "pdf-locked-facts" in root_causes,
-        "Move the numbers out of the PDF and onto a page.",
+        "Move the numbers out of the PDF and onto a page.{}".format(
+            naming(cited({"pdf-locked-facts"}))),
         ["Create an HTML page carrying the same table or figures as the PDF.",
          "Keep the PDF as a download from that page, not as the only source.",
          "Generate the PDF from the HTML so the two cannot diverge."],
@@ -3891,9 +4240,14 @@ def build_recommendations(snapshot, signals, findings):
         "medium", "content owner")
 
     # No `rests_on_absence`: an email capture form was found on a page.
+    signing_up = [p["url"] for p in pages_of(snapshot) if p.get("newsletter_signup")]
     add("R-EMAIL-TEXT-FIRST", "Design newsletters and transactional email text-first",
         signals.get("newsletter_signup"),
-        "Put the substance in the first two lines of readable text, never in an image.",
+        "Put the substance in the first two lines of readable text, never in an image.{}"
+        .format(" This crawl found an email sign-up form on {}, such as {}, so this site "
+                "sends email a machine will summarise.".format(
+                    plural(len(signing_up), "page", "pages"), ", ".join(signing_up[:2]))
+                if signing_up else ""),
         ["Lead every email with two lines of plain text stating what it is and what changed.",
          "Never put the main message in an image; use images to support text, not replace it.",
          "Give every email a subject line that states the fact rather than teasing it.",
@@ -3919,6 +4273,20 @@ def build_recommendations(snapshot, signals, findings):
     # finding may *trigger* a recommendation, and may not be *restated* by one.
     #
     # No `rests_on_absence`. Every branch names something that was read.
+    furniture_only = signals.get("deep_pages_offering_only_site_wide_links") or []
+    wayfinding_ids = cited({"dead-end", "orphan-pages", "no-breadcrumbs", "broken-links"})
+    wayfinding_measured = ""
+    if len(furniture_only) >= TEMPLATE_EVIDENCE_MINIMUM:
+        wayfinding_measured = (" On this site {} offer only the links every page carries, "
+                               "such as {}.".format(plural(len(furniture_only), "deep page",
+                                                           "deep pages"),
+                                                    ", ".join(sorted(furniture_only)[:2])))
+    elif wayfinding_ids:
+        wayfinding_measured = (" This rests on {} above, each a page a visitor reaches and "
+                               "cannot go on from.".format(", ".join(wayfinding_ids[:3])))
+    elif signals.get("search_box_queries_another_site"):
+        wayfinding_measured = (" This site's search box sends the visitor to another site's "
+                               "search, so the page itself is the only way on.")
     add("R-WAYFINDING", 'Give deep pages a "Read next" of their own',
         # Also when the site's search box submits to a web search engine.
         # That is not on-site search, and the check that noticed could only
@@ -3934,7 +4302,8 @@ def build_recommendations(snapshot, signals, findings):
         or len(signals.get("deep_pages_offering_only_site_wide_links") or []
                 ) >= TEMPLATE_EVIDENCE_MINIMUM,
         "Add a related-content block to the article and product templates, so a page that "
-        "answered the question has somewhere to send the reader that is not the back button.",
+        "answered the question has somewhere to send the reader that is not the back "
+        "button.{}".format(wayfinding_measured),
         ['Add a "Read next" block to the article and product templates carrying 2-4 links '
          "chosen for this page, not the same four on every page.",
          "Pick them by what the page is about rather than by what is newest, so the block is "
@@ -3981,7 +4350,9 @@ def build_recommendations(snapshot, signals, findings):
         pages_that_sell >= TEMPLATE_EVIDENCE_MINIMUM
         and products_name_nothing_distinctive(snapshot),
         "Give the things that make the product distinctive proper names, and define those "
-        "names in both the page text and the structured data.",
+        "names in both the page text and the structured data. {} this crawl read sell "
+        "something, and nothing in their markup names a property of its own.".format(
+            plural(pages_that_sell, "page", "pages")),
         # Step three leads now, and the four steps are three.
         #
         # Read line by line, this entry had one non-obvious thing in it -
@@ -4047,7 +4418,15 @@ def build_recommendations(snapshot, signals, findings):
         or len(signals.get("landing_pages_that_bury_the_price") or []
                ) >= TEMPLATE_EVIDENCE_MINIMUM,
         "Put the price, the stock state and the delivery promise above the brand copy on the "
-        "pages an answer sends people to, and mirror all three in the markup.",
+        "pages an answer sends people to, and mirror all three in the markup.{}".format(
+            "".join(" {} {}, such as {}.".format(plural(len(urls), "page", "pages"), what,
+                                                 ", ".join(sorted(urls)[:2]))
+                    for urls, what in (
+                        (signals.get("landing_pages_stating_only_a_price") or [],
+                         "state a price and nothing a buyer asks next"),
+                        (signals.get("landing_pages_that_bury_the_price") or [],
+                         "put the price below the first screen"))
+                    if len(urls) >= TEMPLATE_EVIDENCE_MINIMUM)),
         ["Move the price, whether it is in stock and when it arrives into the first screen of "
          "the product or service template, above the brand story and above the carousel.",
          "Add all three to the template itself rather than to individual pages, so a new "
@@ -4168,6 +4547,10 @@ def compose(snapshot, skill_results, audited_at=None):
         [(c["skill"], c["check"]) for c in checks_run],
         fired_checks)
     duplicates += folded
+    # The same place and the same reason: one defect seen by two checks is one
+    # finding with one score, one row in the severity table and one fix.
+    findings, billed_twice = merge_one_defect_billed_twice(findings, snapshot, signals)
+    duplicates += billed_twice
     findings, unverifiable = withhold_absence_claims(findings, snapshot)
     findings = price_one_observation_once(findings, snapshot)
     for finding in findings:
@@ -4236,6 +4619,9 @@ def compose(snapshot, skill_results, audited_at=None):
     defer_to_the_page_that_did_not_arrive(findings, signals)
     # The same rule for a page that is a redirect, a cover page or a frame.
     defer_to_the_page_level_cause(findings, signals)
+    # And for one defect two checks each report under their own root cause:
+    # one dead address, one canonical tag. See `SAME_DEFECT_PAIRS`.
+    defer_to_the_same_defect(findings, snapshot, signals)
     for finding in findings:
         finding["tier"] = published_tier(finding)
 
@@ -4278,6 +4664,13 @@ def compose(snapshot, skill_results, audited_at=None):
     # has failed at prioritising in the most visible place there is.
     counts = {level: sum(1 for f in findings if f["severity"] == level)
               for level in ("critical", "high", "medium", "low", "info")}
+    # What the verdict weighs, and what the severity table counts: the findings
+    # that stand on their own. A page read again from four angles is one
+    # defect, and "12 medium-severity items" over a report whose four of them
+    # say "this is the same defect as F-005" counted it five times.
+    standing_counts = {level: sum(1 for f in findings
+                                  if f["severity"] == level and not follows_another(f))
+                       for level in counts}
 
     # Built before the verdict, because the verdict's closing sentence points
     # the reader at this section and must not do so when it is empty. The
@@ -4296,10 +4689,13 @@ def compose(snapshot, skill_results, audited_at=None):
     # counting it as one is what pushed this ratio under the bar.
     attempted = len(page_shaped_urls(snapshot))
     share = readable_share(snapshot)
+    # Before the verdict, which reads it: the verdict may not say an assistant
+    # has nothing to repeat above a table quoting what it would repeat.
+    citations = simulate_citations(snapshot, brand.get("name") or "")
     # Written before "Start here", because which findings lead that list is a
     # question about what the verdict says, and the only way to know what it
     # says is to have written it.
-    verdict = _verdict(counts, findings, crawl, signals,
+    verdict = _verdict(standing_counts, findings, crawl, signals,
                        (snapshot.get("brand") or {}).get("name") or "",
                        readable_share=share,
                        has_recommendations=bool(recommendations),
@@ -4307,7 +4703,9 @@ def compose(snapshot, skill_results, audited_at=None):
                        pages_reached=attempted,
                        why_unread=why_little_was_read(snapshot),
                        origin_redirect=snapshot.get("origin_redirect"),
-                       site_not_serving=snapshot.get("site_not_serving"))
+                       site_not_serving=snapshot.get("site_not_serving"),
+                       quotable=what_an_assistant_can_repeat(signals, citations,
+                                                             brand.get("name") or ""))
     # The findings the verdict names as the cause of the rest - and only when
     # it does name them. On a storefront delivered as a JavaScript shell the
     # verdict opened on the shell, and "Start here" still held a place for the
@@ -4401,6 +4799,10 @@ def compose(snapshot, skill_results, audited_at=None):
             # numbers alone can see how much of the report is a firm reading.
             "confident": sum(1 for f in findings if f["tier"] == CONFIDENT),
             "worth_checking": sum(1 for f in findings if f["tier"] == WORTH_CHECKING),
+            # Of the totals above, how many are another finding's defect read
+            # again. The severity table prints them on a row of their own
+            # rather than counting them a second time.
+            "follow_from_another_finding": sum(1 for f in findings if follows_another(f)),
             # Both halves of the report, counted together, because the reader
             # has to carry out both halves.
             "actions": len(actions),
@@ -4432,7 +4834,7 @@ def compose(snapshot, skill_results, audited_at=None):
         # report prints them.
         "worth_checking": [f["id"] for f in ranked if f["tier"] == WORTH_CHECKING],
         "recommendations": recommendations,
-        "citation_simulation": simulate_citations(snapshot, brand.get("name") or ""),
+        "citation_simulation": citations,
         "crawl": {
             "origin": snapshot["origin"],
             "brand_name": brand.get("name"),
@@ -4850,6 +5252,8 @@ def skills_whose_every_finding_is_published(skill_results, findings):
         result.get("skill") or ""
         for result in skill_results for _ in result.get("findings") or [])
     published = collections.Counter(f.get("detected_by") or "" for f in findings)
+    # Folded into another finding as one defect, and printed there whole.
+    published.update(m.get("skill") or "" for f in findings for m in f.get("merged_from") or [])
     return {skill for skill, count in raised.items()
             if count and published.get(skill) == count}
 
@@ -4918,27 +5322,60 @@ def named_check_pairs(findings):
     it over-counted the other way too, giving 3 named against 2 run, when two
     skills registered a check of the same name.
     """
-    return {(f.get("detected_by") or "", f.get("check"))
-            for f in findings if f.get("check")}
+    named = {(f.get("detected_by") or "", f.get("check"))
+             for f in findings if f.get("check")}
+    # A finding `merge_one_defect_billed_twice` folded into another is still
+    # printed, inside the one it joined, so its check is still named.
+    named |= {(m.get("skill") or "", m.get("check"))
+              for f in findings for m in f.get("merged_from") or [] if m.get("check")}
+    return named
 
-def _llms_txt_template(snapshot, brand):
-    """A starter /llms.txt listing pages that actually exist on this site.
+# The kinds of page a key-pages list leads with, in order: what the site is,
+# how to reach it, what it offers, how to use it. Pricing last, because on a
+# site that sells nothing the crawl's "pricing" is whatever page mentions a fee.
+LLMS_KEY_PAGE_TYPES = ("about", "contact", "product", "service", "documentation", "faq",
+                       "pricing")
+# The least a key page has to say in its own words.
+LLMS_KEY_PAGE_MIN_TEXT = 300
+# A form this many fields long, that is neither a search box nor a newsletter
+# box, is the page's whole job - a sign-up or an application - unless the page
+# is the contact page, whose form is the point.
+LLMS_FORM_PAGE_FIELDS = 6
 
-    It used to hard-code `<origin>/pricing` and `<origin>/about`. On a site
-    with neither - which is most small sites - the file labelled paste-ready
-    told the owner to publish two links that 404 on their own domain, guessed
-    from a naming convention the crawl had already disproved.
+
+def llms_txt_key_pages(snapshot, signals=None):
+    """`[(label, url)]` - pages worth naming as a site's key pages, one per kind.
+
+    A page that answered 200 with content of its own. Not a page that sends
+    the browser on by script, and not a sign-up form: one report's starter
+    file named "[Pricing](.../membership.do)" as a museum's key page - a
+    member sign-up that redirects by script, which the same report set aside
+    as a page with no content.
     """
-    wanted = ("about", "pricing", "product", "service", "faq", "contact")
+    signals = signals or {}
+    redirects = set(signals.get(SCRIPT_REDIRECT_SIGNAL) or [])
     titles = {}
     for page in pages_of(snapshot):
         title = (page.get("title") or "").strip()
         if title:
             titles[title] = titles.get(title, 0) + 1
-    seen, lines = set(), []
-    for page_type in wanted:
+
+    def has_content(page):
+        if page["url"] in redirects or page.get("script_redirect"):
+            return False
+        if (page.get("body_text_len") or 0) < LLMS_KEY_PAGE_MIN_TEXT:
+            return False
+        if page.get("page_type") != "contact" and any(
+                (form.get("field_count") or 0) >= LLMS_FORM_PAGE_FIELDS
+                and not form.get("is_search") and not form.get("is_newsletter")
+                for form in page.get("forms") or []):
+            return False
+        return True
+
+    seen, out = set(), []
+    for page_type in LLMS_KEY_PAGE_TYPES:
         for page in pages_of(snapshot, types=(page_type,)):
-            if page["url"] in seen:
+            if page["url"] in seen or not has_content(page):
                 continue
             seen.add(page["url"])
             # Not the page's <title> when titles are duplicated across the
@@ -4948,10 +5385,23 @@ def _llms_txt_template(snapshot, brand):
             # propagates the bug it is reporting is worse than one that says
             # nothing.
             title = (page.get("title") or "").strip()
-            label = title if title and titles.get(title, 0) == 1 else page_type.upper()[:1] + page_type[1:]
-            lines.append("- [{}]({}): <one line saying what is on this page>".format(
-                truncate(label, 60), page["url"]))
+            label = title if title and titles.get(title, 0) == 1 else \
+                page_type.upper()[:1] + page_type[1:]
+            out.append((truncate(label, 60), page["url"]))
             break
+    return out
+
+
+def _llms_txt_template(snapshot, brand, signals=None):
+    """A starter /llms.txt listing pages that actually exist on this site.
+
+    It used to hard-code `<origin>/pricing` and `<origin>/about`. On a site
+    with neither - which is most small sites - the file labelled paste-ready
+    told the owner to publish two links that 404 on their own domain, guessed
+    from a naming convention the crawl had already disproved.
+    """
+    lines = ["- [{}]({}): <one line saying what is on this page>".format(label, url)
+             for label, url in llms_txt_key_pages(snapshot, signals)]
     if not lines:
         lines.append("- [<page name>](<url>): <one line saying what is on this page>")
 
@@ -5230,10 +5680,59 @@ def _access_verdict(blocking, readable_pages=None):
                 "it names" if len(blocking) == 1 else "they name"))
 
 
+# The longest quotation the verdict carries. The citation table below it
+# prints the whole sentence; the verdict needs enough to recognise it.
+VERDICT_QUOTE_CHARS = 180
+
+
+def what_an_assistant_can_repeat(signals, citations=(), brand_name=""):
+    """`{"text", "url"}` - the sentence an assistant could lift about this site - or None.
+
+    The one-sentence definition `fact-extractability-audit` found first, then
+    the citation table's sentences: one naming the brand and saying what it
+    is, then the homepage's, then any page's. Read by the verdict so it cannot
+    say "no fact it can safely repeat" above a table quoting one.
+    """
+    signals = signals or {}
+    definition = signals.get("entity_definition") if signals.get("entity_definition_found") else ""
+    if definition and reads_as_a_description(definition):
+        return {"text": truncate(definition.strip(), VERDICT_QUOTE_CHARS), "url": ""}
+    quoted = [c for c in citations or () if c.get("likely_citation")
+              and not _CUT_SHORT_RE.search(c["likely_citation"])]
+    # A sentence that reads as the site describing itself, and failing that the
+    # homepage's own sentence where it reads as one. Never any page's sentence
+    # at all: the verdict frames what it quotes as "the fact it has" about the
+    # brand, and the last two fallbacks put a national museum's child-privacy
+    # notice and a university's event teaser in that place. Where nothing
+    # qualifies the verdict says no such fact was found, which is what the
+    # table beneath it then shows.
+    # And the homepage's sentence only where it names the brand: the verdict
+    # calls it the fact an assistant has about the brand. Without the name a
+    # furniture shop's verdict quoted "New arrivals are here - plus $100 off
+    # outdoor collections", then "enjoy an extra 5% off add-ons".
+    names = [p for p in (brand_pattern(form) for form in brand_forms(brand_name)) if p] \
+        if brand_name else []
+
+    def names_the_brand(text):
+        return any(re.search(r"\b(?:{})\b".format(p), text, re.I) for p in names)
+
+    for test in (lambda c: c.get("why") == "names the brand and says what it is",
+                 lambda c: c.get("page_type") == "home"
+                 and not str(c.get("why") or "").startswith(("states a price",
+                                                             "states a way to make contact"))
+                 and names_the_brand(c["likely_citation"])
+                 and reads_as_a_description(c["likely_citation"])):
+        chosen = next((c for c in quoted if test(c)), None)
+        if chosen is not None:
+            return {"text": truncate(chosen["likely_citation"], VERDICT_QUOTE_CHARS),
+                    "url": chosen.get("url") or ""}
+    return None
+
+
 def _verdict(counts, findings, crawl=None, signals=None, brand_label="",
              readable_share=None, has_recommendations=True,
              readable_pages=None, pages_reached=0, why_unread="",
-             origin_redirect=None, site_not_serving=None):
+             origin_redirect=None, site_not_serving=None, quotable=None):
     """The verdict, with the address it is about stated before it.
 
     A crawl whose seed URL leaves its own origin produces a report about a
@@ -5254,13 +5753,13 @@ def _verdict(counts, findings, crawl=None, signals=None, brand_label="",
     return prefix + _verdict_body(
         counts, findings, crawl, signals, brand_label, readable_share,
         has_recommendations, readable_pages, pages_reached, why_unread, redirect,
-        site_not_serving)
+        site_not_serving, quotable)
 
 
 def _verdict_body(counts, findings, crawl=None, signals=None, brand_label="",
                   readable_share=None, has_recommendations=True,
                   readable_pages=None, pages_reached=0, why_unread="",
-                  redirect=None, not_serving=None):
+                  redirect=None, not_serving=None, quotable=None):
     """One paragraph naming what is actually wrong, not how many things are.
 
     This used to be a pure severity ladder, and on a site with no off-site
@@ -5543,6 +6042,27 @@ def _verdict_body(counts, findings, crawl=None, signals=None, brand_label="",
         # exists and the front door omits it, the claim narrows to the front
         # door - which is what the crawl measured and all it measured.
         front_door_only = homepage_only and not no_org
+        # "No fact about this brand it can safely repeat" is a claim about three
+        # measurements at once, and it was printed on the strength of one: no
+        # Organization markup. One report carrying it quoted "<a central bank>
+        # is a public institution with a mandate..." in its own table of what an
+        # assistant would lift. So the sentence is now built from all three: it
+        # stands only where no definition was found, no page offers a quotable
+        # sentence and corroboration is weak. Otherwise the report quotes what
+        # an assistant can repeat and says what is missing around it.
+        repeatable = quotable or what_an_assistant_can_repeat(signals, ())
+        if repeatable and not front_door_only and not own_item and not item_linked:
+            where = (" ({})".format(repeatable["url"]) if repeatable.get("url")
+                     else ", from its own one-sentence definition")
+            lead = ("{} What it cannot do is establish who the brand is from anything a "
+                    "machine can check: {}. ".format(
+                        _reach_lead(findings, brand_label or "this site"),
+                        "; ".join(missing) or "the identity is undeclared"))
+            return lead + ('Nothing on the site says it in a form a machine reads, and {}. '
+                           'What an assistant can repeat is the site\'s own sentence "{}"{} - '
+                           "that is the fact it has - but nothing this audit read confirms "
+                           "it, so an assistant repeating it has only the site's word for "
+                           "it.".format(off_site, repeatable["text"], where))
         if front_door_only:
             cannot = ("What a machine landing on its front page cannot do is establish "
                       "who the brand is")
@@ -5553,8 +6073,13 @@ def _verdict_body(counts, findings, crawl=None, signals=None, brand_label="",
         else:
             cannot = "What it cannot do is establish who the brand is"
             scope = "Nothing on the site says it in a form a machine reads"
-            tail = ("so an assistant asked about this category has no fact about this "
-                    "brand it can safely repeat")
+            # What was measured, and no more. "No fact about this brand it can
+            # safely repeat" was printed above a table quoting the shop's
+            # prices and opening hours - facts, just not facts about who the
+            # brand is. The claim is about identity, so it says identity.
+            tail = ("so an assistant asked about this category has no sentence from this "
+                    "site saying what the brand is, and nothing it can safely repeat about "
+                    "who the brand is")
         # A Wikidata item is a fact a machine can repeat, so "no fact it can
         # safely repeat" is false wherever one was found. What stays true is
         # where that fact lives.
@@ -6512,17 +7037,18 @@ def render_markdown(report):
     demoted_ids = report.get("worth_checking") or []
     demoted = [by_id[i] for i in demoted_ids if i in by_id]
     graded = [f for f in report["findings"] if f["id"] not in set(demoted_ids)]
+    table_rows, follows_rows = severity_table(report)
     if demoted:
         # Three columns, not one. A reader who saw "High: 2" and then found one
         # of the two under a heading saying it might be wrong would reasonably
         # conclude the table was lying, so the table shows the split itself.
         add("| Severity | Reported with confidence | Worth checking |")
         add("| --- | --- | --- |")
-        for key, label, _ in SEVERITY_HEADINGS:
-            add("| {} | {} | {} |".format(
-                label,
-                sum(1 for f in graded if f["severity"] == key),
-                sum(1 for f in demoted if f["severity"] == key)))
+        for label, confident_count, worth_count in table_rows:
+            add("| {} | {} | {} |".format(label, confident_count, worth_count))
+        for cause, ids, confident_count, worth_count in follows_rows:
+            add("| {} | {} | {} |".format(_follows_row_label(cause, ids),
+                                          confident_count, worth_count))
         add("")
         add("{} of the {} below {} on a weaker reading, so {} listed under \"{}\" rather "
             "than beside the findings the audit read directly. They are still counted in "
@@ -6535,8 +7061,11 @@ def render_markdown(report):
     else:
         add("| Severity | Count |")
         add("| --- | --- |")
-        for key, label, _ in SEVERITY_HEADINGS:
-            add("| {} | {} |".format(label, report["summary"].get(key, 0)))
+        for label, confident_count, worth_count in table_rows:
+            add("| {} | {} |".format(label, confident_count + worth_count))
+        for cause, ids, confident_count, worth_count in follows_rows:
+            add("| {} | {} |".format(_follows_row_label(cause, ids),
+                                     confident_count + worth_count))
         add("")
 
     if report["start_here"]:
@@ -6746,6 +7275,9 @@ def render_markdown(report):
     # The print order, worked out first so a repeated step is written out
     # under the first finding that prints it and referred to after.
     plan = repeated_steps_plan(_findings_in_print_order(graded, demoted))
+    # What has been written out once in this document already. See
+    # `_render_finding`.
+    printed = {}
     for key, label, blurb in SEVERITY_HEADINGS:
         group = [f for f in graded if f["severity"] == key]
         if not group:
@@ -6760,7 +7292,7 @@ def render_markdown(report):
             add("")
             explained_the_ids = True
         for finding in group:
-            add(_render_finding(finding, steps=display_steps(finding, plan)))
+            add(_render_finding(finding, steps=display_steps(finding, plan), context=printed))
         add("")
 
     if demoted:
@@ -6773,7 +7305,8 @@ def render_markdown(report):
             add("")
             explained_the_ids = True
         for finding in demoted:
-            add(_render_finding(finding, demoted=True, steps=display_steps(finding, plan)))
+            add(_render_finding(finding, demoted=True, steps=display_steps(finding, plan),
+                                context=printed))
         add("")
 
     if report["recommendations"]:
@@ -6869,8 +7402,15 @@ def render_markdown(report):
             "these ran, found nothing on this site for it to judge, and stopped there - which "
             "is not the same as looking and finding the site clean:")
         add("")
+        # One bullet per skill, each check or group of checks with the first
+        # sentence of its reason. Sixty bullets of full reasons were a third
+        # of one report; every word of every reason is in report.json.
+        by_skill = collections.OrderedDict()
         for checks, skill, reason in grouped_declines(declines):
-            add("- {} ({}): {}".format(_names_in_prose(checks), skill, reason))
+            by_skill.setdefault(skill, []).append("{}: {}".format(
+                _names_in_prose(checks), first_sentence_of_a_reason(reason).rstrip(".")))
+        for skill, entries in by_skill.items():
+            add("- *{}* - {}".format(skill, "; ".join(entries)))
         if did_not_run:
             add("- {} of the {} counted above {} whole {} that did not run at all, which is "
                 "not the same thing. {} listed under \"{}\" above.".format(
@@ -7221,13 +7761,39 @@ def _appendix_paragraph(report):
                 report["crawl"]["render_mode"]))
 
 
-def _render_finding(finding, demoted=False, steps=None):
+# "Where we looked" in the body of a report: the first place looked, cut at its
+# first clause, and how many more there were. Paragraphs of 150 words of
+# method sat under every finding; report.json keeps every word of `checked`.
+WHERE_WE_LOOKED_CHARS = 140
+
+
+def where_we_looked_short(checked):
+    """One short sentence for the body of a document, from `checked`."""
+    checked = [c for c in checked or [] if c]
+    if not checked:
+        return ""
+    first = re.split(r";\s|\s-\s|, which\b|: ", checked[0], maxsplit=1)[0].strip()
+    first = shorten_long_code_lists(first).rstrip(" .")
+    if len(first) > WHERE_WE_LOOKED_CHARS:
+        # Cut at a word, and said to be cut, rather than mid-word.
+        first = first[:WHERE_WE_LOOKED_CHARS].rsplit(" ", 1)[0].rstrip(",;:- ") + "..."
+    if len(checked) == 1:
+        return ("{}{} That is one source, so this is reported at reduced confidence.".format(
+            first, "" if first.endswith("...") else "."))
+    return "{}, and {}, all listed in report.json.".format(
+        first, plural(len(checked) - 1, "other source", "other sources"))
+
+
+def _render_finding(finding, demoted=False, steps=None, context=None):
     """One finding as markdown. `steps`: the fix steps as `display_steps` wrote
-    them for this document, or None for the finding's own list."""
+    them for this document, or None for the finding's own list. `context` is
+    shared by every finding one document prints, so a line that would be the
+    same under each of them - the mechanism, the language note - is written
+    out once and referred to after."""
     action = finding["suggested_action"]
+    context = context if context is not None else {}
     out = []
     out.append("### {} — {}".format(finding["id"], finding["title"]))
-    out.append("")
     # The letter alone is an unexplained code, and this document is written for
     # a marketing manager. The expansion lives in report.json and in a
     # reference file, neither of which the person reading report.md has.
@@ -7243,25 +7809,50 @@ def _render_finding(finding, demoted=False, steps=None):
     # are compared on, and printing only one of them is how F-014 came to mean
     # two different problems to anyone running the same site twice.
     name = " · `{}`".format(finding["stable_id"]) if finding.get("stable_id") else ""
+    also = (" and " + ", ".join(finding["also_detected_by"])
+            if finding.get("also_detected_by") else "")
+    # "Check this one against the site before acting on it" was printed under
+    # every entry of a section whose heading and blurb already say exactly that.
     if demoted:
-        out.append("**{} severity if confirmed** · priority {} · confidence {} · found by "
-                   "{}{}{}".format(
-                       finding["severity"].capitalize(), action["priority"],
-                       finding["confidence"], finding["detected_by"],
-                       " and " + ", ".join(finding["also_detected_by"])
-                       if finding.get("also_detected_by") else "", name))
-        out.append("")
-        out.append("*Check this one against the site before acting on it.*")
-        out.append("")
+        meta = ("**{} severity if confirmed** · priority {} · confidence {} · found by "
+                "{}{}{}".format(finding["severity"].capitalize(), action["priority"],
+                                finding["confidence"], finding["detected_by"], also, name))
     else:
-        out.append("**Priority: {}** · confidence {} · found by {}{}{}".format(
-            action["priority"], finding["confidence"], finding["detected_by"],
-            " and " + ", ".join(finding["also_detected_by"])
-            if finding.get("also_detected_by") else "", name))
+        meta = "**Priority: {}** · confidence {} · found by {}{}{}".format(
+            action["priority"], finding["confidence"], finding["detected_by"], also, name)
+    # A consequence of another finding, in four lines. Its cause carries the
+    # fix; what is left here is what it measured, which finding it follows
+    # from, and what to do if it outlives that fix - every step still printed,
+    # in one paragraph. The reasoning and the sources are in report.json.
+    # Five findings about one museum page pair each printed a full block.
+    deferral = deferral_note(finding)
+    if deferral:
+        out.append("- {}".format(meta))
+        out.append("- **What we found.** {}".format(
+            shorten_long_code_lists(finding["evidence"])))
+        out.append("- **This is the same defect as {}.** {}".format(
+            finding["follows_from"]["id"], deferral))
+        out.append("- **What to do if it is still here afterwards.** {} Who does it: {}. "
+                   "Roughly: {}. {}".format(
+                       action["summary"], action["owner"],
+                       effort_time(action["effort"], action["owner"]),
+                       " ".join(action["how_to_fix"])).rstrip())
+        follows = finding["follows_from"]
+        listed = _affected_pages_lines(finding)
+        if listed and (follows.get("page_count") or 0) > len(follows.get("pages") or []):
+            out.append("- {}".format(listed[-1]))
         out.append("")
-    out.append("*Why this class of problem matters: {}.*".format(
-        MECHANISMS[finding["mechanism"]].rstrip(".")))
+        return "\n".join(out)
+    out.append(meta)
     out.append("")
+    # Once per mechanism per document. Seven mechanisms, one sentence each, and
+    # a museum report printed them fifteen times.
+    seen_mechanisms = context.setdefault("mechanisms", set())
+    if finding["mechanism"] not in seen_mechanisms:
+        seen_mechanisms.add(finding["mechanism"])
+        out.append("*Why this class of problem matters: {}.*".format(
+            MECHANISMS[finding["mechanism"]].rstrip(".")))
+        out.append("")
     out.append("**What we found.** {}".format(shorten_long_code_lists(finding["evidence"])))
     out.append("")
     # Directly under the claim it qualifies, and not at the foot of the block:
@@ -7272,11 +7863,6 @@ def _render_finding(finding, demoted=False, steps=None):
         out.append("")
     # Under the evidence, above the fix, because it is the order to do the two
     # in: a reader who has read the fix has already started costing it.
-    deferral = deferral_note(finding)
-    if deferral:
-        out.append("> **This is the same defect as {}.** {}".format(
-            finding["follows_from"]["id"], deferral))
-        out.append("")
     partial = partial_deferral_note(finding)
     if partial:
         out.append("> **This is partly the same defect as {}.** {}".format(
@@ -7285,30 +7871,36 @@ def _render_finding(finding, demoted=False, steps=None):
     # A finding that says something is missing states where it looked. The
     # reader can then judge the claim instead of taking it, and can tell us
     # when we looked in the wrong place - which is how every one of this
-    # audit's own false positives was eventually caught.
+    # audit's own false positives was eventually caught. One sentence here and
+    # the whole list in report.json: see `where_we_looked_short`.
+    looked = []
     if finding.get("checked"):
-        out.append("**Where we looked.** {}.{}".format(
-            shorten_long_code_lists("; ".join(finding["checked"])),
-            "" if len(finding["checked"]) > 1 else
-            " That is one source, so this is reported at reduced confidence: if the "
-            "page states it somewhere this audit did not read, the finding is wrong "
-            "and worth telling us about."))
-        out.append("")
+        looked.append("**Where we looked.** {}".format(
+            where_we_looked_short(finding["checked"])))
     # Directly under where we looked, because it is a limit on that looking:
     # the places were read in a language, and on a site this audit did not
     # establish as English the word patterns behind the claim were written for
     # a different one. Absent on every English site and on every finding that
-    # read no prose.
+    # read no prose. One report gives one answer about the language, so the
+    # sentence is written out once and pointed at after.
     if finding.get("read_in"):
-        out.append("**What language this was read in.** {}".format(finding["read_in"]))
+        first = context.setdefault("read_in", {})
+        if finding["read_in"] in first:
+            looked.append("**What language this was read in.** The same as under {} "
+                          "above.".format(first[finding["read_in"]]))
+        else:
+            first[finding["read_in"]] = finding["id"]
+            looked.append("**What language this was read in.** {}".format(
+                finding["read_in"]))
+    if looked:
+        # Two lines of one paragraph: both are about how the claim was read.
+        out.extend(looked)
         out.append("")
     out.append("**Why it matters.** {}".format(action["rationale"]))
     out.append("")
-    out.append("**What to do.** {}".format(action["summary"]))
-    out.append("")
-    out.append("Who does it: {}. Roughly: {}.".format(
-        action["owner"], effort_time(action["effort"], action["owner"])))
-    out.append("")
+    # The steps follow the line that introduces them, as a list under it.
+    out.append("**What to do.** {} Who does it: {}. Roughly: {}.".format(
+        action["summary"], action["owner"], effort_time(action["effort"], action["owner"])))
     for step in (action["how_to_fix"] if steps is None else steps):
         out.append("- {}".format(step))
     if action.get("snippet"):
@@ -7373,34 +7965,95 @@ def _findings_in_print_order(graded, demoted):
     return ordered + list(demoted)
 
 
+# A sentence at least this long, printed word for word inside the steps of two
+# findings or more, is boilerplate even where the step around it differs: the
+# platform note "This audit could not tell what this site is built with..."
+# sat inside four differently worded steps of one report, so the step-level
+# plan above never saw it repeat.
+REPEATED_SENTENCE_MIN = 80
+_STEP_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z`(])")
+
+
 def repeated_steps_plan(ordered):
     """`{step text: id of the first finding printing it}`, for long repeated steps.
 
     `ordered` is the findings in the order the document prints them, so "above"
-    in the reference is true.
+    in the reference is true. Long repeated sentences are in the same plan
+    under `("sentence", text)`. A finding that is another one's defect read
+    again prints no steps, so it is never where a step is first written out.
     """
     seen, first = collections.Counter(), {}
+    sentence_seen, sentence_first = collections.Counter(), {}
     for finding in ordered:
+        if finding.get("follows_from"):
+            continue
+        sentences_here = set()
         for step in dict.fromkeys(finding["suggested_action"]["how_to_fix"]):
             if len(step) >= REPEATED_STEP_MIN:
                 seen[step] += 1
                 first.setdefault(step, finding["id"])
-    return {step: first[step] for step, count in seen.items() if count > 1}
+            for sentence in _STEP_SENTENCE_RE.split(step):
+                if len(sentence) >= REPEATED_SENTENCE_MIN:
+                    sentences_here.add(sentence)
+        for sentence in sentences_here:
+            sentence_seen[sentence] += 1
+            sentence_first.setdefault(sentence, finding["id"])
+    plan = {step: first[step] for step, count in seen.items() if count > 1}
+    plan.update({("sentence", sentence): sentence_first[sentence]
+                 for sentence, count in sentence_seen.items() if count > 1})
+    return plan
+
+
+def _lead_of(text):
+    """A step's or a sentence's own opening clause, so the reader knows which
+    paragraph is meant without reading it again."""
+    return re.split(r"[,:;.]\s|\s-\s", text, maxsplit=1)[0].strip()
 
 
 def display_steps(finding, plan):
     """The fix steps as a document prints them: a repeat becomes a reference."""
     out = []
     for step in finding["suggested_action"]["how_to_fix"]:
+        sentences = _STEP_SENTENCE_RE.split(step)
         where = plan.get(step)
-        if where is None or where == finding["id"]:
-            out.append(step)
+        if where is not None and where != finding["id"]:
+            # Pointed at where the words are actually printed: the first
+            # finding carrying any of its long sentences, which is earlier than
+            # the first carrying the whole step wherever the two differ.
+            where = next((plan[("sentence", s)] for s in sentences
+                          if ("sentence", s) in plan), where)
+            out.append("{} - written out in full under {} above.".format(_lead_of(step), where))
             continue
-        # The step's own opening clause, so the reader knows which paragraph
-        # is meant without reading it again.
-        lead = re.split(r"[,:;.]\s|\s-\s", step, maxsplit=1)[0].strip()
-        out.append("{} - written out in full under {} above.".format(lead, where))
+        kept, pointing_at = [], None
+        for sentence in sentences:
+            origin = plan.get(("sentence", sentence))
+            if origin is not None and origin != finding["id"]:
+                if pointing_at != origin:
+                    kept.append("{} - written out in full under {} above.".format(
+                        _lead_of(sentence), origin))
+                    pointing_at = origin
+                continue
+            pointing_at = None
+            kept.append(sentence)
+        out.append(" ".join(kept))
     return out
+
+
+# The longest reason a decline prints in the appendix. Its first sentence says
+# what the check found to decline on; the measurements after it are in
+# report.json, and printed for sixty checks they were a third of one report.
+DECLINE_REASON_CHARS = 120
+
+
+def first_sentence_of_a_reason(reason):
+    """A decline's reason as the appendix prints it: its first sentence."""
+    text = (reason or "").strip()
+    first = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text, maxsplit=1)[0]
+    if len(first) > DECLINE_REASON_CHARS:
+        first = truncate(first, DECLINE_REASON_CHARS)
+    if first == text:
+        return text
+    return "{} (the rest is in report.json)".format(first.rstrip("."))
 
 
 def grouped_declines(declines):
@@ -7457,7 +8110,21 @@ def _affected_pages_lines(finding):
                    "order, not a ranking):".format(total, len(shown)))
     else:
         heading = "Affected pages:"
-    return [""] + [heading] + ["- {}".format(url) for url in shown]
+    # Not again where the evidence has just named every one of them: under
+    # most findings of one report the list repeated its examples word for
+    # word. Then only the count is added, where there are more than it shows.
+    evidence = finding.get("evidence") or ""
+    if all(url in evidence for url in shown):
+        if total <= len(shown):
+            return []
+        # Which five still has to be said: the evidence names them as
+        # examples, and a reader cannot tell from that whether they are the
+        # worst five or the first five.
+        return ["", "Affected pages: {} in total; the {} listed are the first in alphabetical "
+                    "order, not a ranking, and each is named above.".format(total, len(shown))]
+    # One line, the addresses separated, rather than a bullet each: five
+    # bullets under every finding were a sixth of one report's length.
+    return ["", "{} {}".format(heading, " · ".join(shown))]
 
 
 def _escape_cell(text):
@@ -7623,16 +8290,21 @@ def render_html(report):
                          esc(WORTH_CHECKING_HEADING)))
 
     if demoted:
+        table_rows, follows_rows = severity_table(report)
         parts.append("<table><tr><th>Severity</th><th>Reported with confidence</th>"
                      "<th>Worth checking</th></tr>")
-        for key, label, _ in SEVERITY_HEADINGS:
+        for label, confident_count, worth_count in table_rows:
             parts.append("<tr><td>{}</td><td>{}</td><td>{}</td></tr>".format(
-                esc(label),
-                sum(1 for f in graded if f["severity"] == key),
-                sum(1 for f in demoted if f["severity"] == key)))
+                esc(label), confident_count, worth_count))
+        # The same row report.md prints, so the two tables add up alike.
+        for cause, ids, confident_count, worth_count in follows_rows:
+            parts.append("<tr><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+                esc(_follows_row_label(cause, ids)), confident_count, worth_count))
         parts.append("</table>")
 
     plan = repeated_steps_plan(_findings_in_print_order(graded, demoted))
+    # The same record of what has been written out once as report.md keeps.
+    printed = {"mechanisms": set(), "read_in": {}}
 
     def render_one(finding, unsure=False):
         action = finding["suggested_action"]
@@ -7652,13 +8324,14 @@ def render_html(report):
                              esc(key.capitalize()), esc(action["priority"]),
                              esc(finding["confidence"]), esc(action["owner"]),
                              esc(effort_time(action["effort"], action["owner"]))))
-            parts.append("<p><em>Check this one against the site before acting on it.</em></p>")
         else:
             parts.append('<p class="meta">Priority: {} · confidence {} · {} · {}</p>'.format(
                 esc(action["priority"]), esc(finding["confidence"]),
                 esc(action["owner"]), esc(effort_time(action["effort"], action["owner"]))))
-        parts.append('<p class="meta"><em>Why this class of problem matters: {}.</em></p>'
-                     .format(esc(MECHANISMS[finding["mechanism"]].rstrip("."))))
+        if finding["mechanism"] not in printed["mechanisms"]:
+            printed["mechanisms"].add(finding["mechanism"])
+            parts.append('<p class="meta"><em>Why this class of problem matters: {}.</em></p>'
+                         .format(esc(MECHANISMS[finding["mechanism"]].rstrip("."))))
         parts.append("<p><strong>What we found.</strong> {}</p>".format(
             esc(shorten_long_code_lists(finding["evidence"]))))
         # Same sentence, same place as report.md, from the one function that
@@ -7674,22 +8347,33 @@ def render_html(report):
         if deferral:
             parts.append('<p class="dispute"><strong>This is the same defect as {}.</strong> '
                          '{}</p>'.format(esc(finding["follows_from"]["id"]), esc(deferral)))
+            # The same short block report.md prints for a consequence.
+            parts.append("<p><strong>What to do if it is still here afterwards.</strong> {} "
+                         "Who does it: {}. Roughly: {}. {}</p></div>".format(
+                             esc(action["summary"]), esc(action["owner"]),
+                             esc(effort_time(action["effort"], action["owner"])),
+                             esc(" ".join(action["how_to_fix"]))))
+            return
         partial = partial_deferral_note(finding)
         if partial:
             parts.append('<p class="dispute"><strong>This is partly the same defect as '
                          '{}.</strong> {}</p>'.format(
                              esc(finding["partly_follows_from"]["id"]), esc(partial)))
         if finding.get("checked"):
-            parts.append("<p><strong>Where we looked.</strong> {}.{}</p>".format(
-                esc(shorten_long_code_lists("; ".join(finding["checked"]))),
-                "" if len(finding["checked"]) > 1 else esc(
-                    " That is one source, so this is reported at reduced confidence.")))
+            parts.append("<p><strong>Where we looked.</strong> {}</p>".format(
+                esc(where_we_looked_short(finding["checked"]))))
         # Same field, same place as report.md. Printed from the finding rather
         # than re-derived, so the two documents cannot disagree about what
         # language one claim was read in.
         if finding.get("read_in"):
-            parts.append("<p><strong>What language this was read in.</strong> {}</p>".format(
-                esc(finding["read_in"])))
+            if finding["read_in"] in printed["read_in"]:
+                parts.append("<p><strong>What language this was read in.</strong> The same "
+                             "as under {} above.</p>".format(
+                                 esc(printed["read_in"][finding["read_in"]])))
+            else:
+                printed["read_in"][finding["read_in"]] = finding["id"]
+                parts.append("<p><strong>What language this was read in.</strong> {}</p>".format(
+                    esc(finding["read_in"])))
         parts.append("<p><strong>Why it matters.</strong> {}</p>".format(esc(action["rationale"])))
         parts.append("<p><strong>What to do.</strong> {}</p><ul>".format(esc(action["summary"])))
         for step in display_steps(finding, plan):

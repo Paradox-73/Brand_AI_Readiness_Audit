@@ -125,14 +125,25 @@ SEARCH, USER_FETCH, TRAINING, CONTROL = "search", "user-fetch", "training", "con
 # Roles whose block removes the brand from an answer someone is reading.
 ANSWER_ROLES = (SEARCH, USER_FETCH)
 
+# `published_ua` is the user-agent string the operator publishes for the
+# crawler, word for word from the page in `source`, read 2026-09-11. It is what
+# the live probes send. They used to send the bare token, and an edge can tell
+# the two apart: a shop's CDN answered a request carrying the token with the
+# page and refused the crawler's own published string with 403, so "these
+# crawler names are served" was a statement about a string no crawler sends.
+# Where an operator publishes only the token, this is empty and the token is
+# what is sent - guessing the rest would measure a string nobody published.
+# Amazon publishes its Chrome version as a placeholder, `Chrome/W.X.Y.Z`; a
+# current build number stands in for it.
 CrawlerAgent = namedtuple(
-    "CrawlerAgent", "token operator role purpose source checked vendor_documented")
+    "CrawlerAgent",
+    "token operator role purpose source checked vendor_documented published_ua")
 
 
 def _agent(token, operator, role, purpose, source, checked="2026-09-03",
-           vendor_documented=True):
+           vendor_documented=True, published_ua=""):
     return CrawlerAgent(token, operator, role, purpose, source, checked,
-                        vendor_documented)
+                        vendor_documented, published_ua)
 
 
 _OPENAI = "https://developers.openai.com/api/docs/bots"
@@ -151,11 +162,18 @@ _UNDOCUMENTED = ""
 AI_CRAWLER_AGENTS = (
     # --- OpenAI ---
     _agent("OAI-SearchBot", "OpenAI", SEARCH,
-           "surfaces websites in search results in ChatGPT's search features", _OPENAI),
+           "surfaces websites in search results in ChatGPT's search features", _OPENAI,
+           published_ua="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36; compatible; "
+                        "OAI-SearchBot/1.4; +https://openai.com/searchbot"),
     _agent("ChatGPT-User", "OpenAI", USER_FETCH,
-           "visits a web page when a user asks ChatGPT a question", _OPENAI),
+           "visits a web page when a user asks ChatGPT a question", _OPENAI,
+           published_ua="Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; "
+                        "ChatGPT-User/1.0; +https://openai.com/bot"),
     _agent("GPTBot", "OpenAI", TRAINING,
-           "crawls content that may be used in training OpenAI's foundation models", _OPENAI),
+           "crawls content that may be used in training OpenAI's foundation models", _OPENAI,
+           published_ua="Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; "
+                        "GPTBot/1.4; +https://openai.com/gptbot"),
 
     # --- Anthropic ---
     _agent("Claude-SearchBot", "Anthropic", SEARCH,
@@ -171,13 +189,20 @@ AI_CRAWLER_AGENTS = (
     # --- Perplexity ---
     _agent("PerplexityBot", "Perplexity", SEARCH,
            "surfaces and links websites in Perplexity search results; explicitly not used "
-           "for foundation-model training", _PERPLEXITY),
+           "for foundation-model training", _PERPLEXITY,
+           published_ua="Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; "
+                        "PerplexityBot/1.0; +https://perplexity.ai/perplexitybot)"),
     _agent("Perplexity-User", "Perplexity", USER_FETCH,
-           "visits a web page to help answer a question a user just asked", _PERPLEXITY),
+           "visits a web page to help answer a question a user just asked", _PERPLEXITY,
+           published_ua="Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; "
+                        "Perplexity-User/1.0; +https://perplexity.ai/perplexity-user)"),
 
     # --- Apple ---
     _agent("Applebot", "Apple", SEARCH,
-           "powers Spotlight, Siri and Safari search", _APPLE),
+           "powers Spotlight, Siri and Safari search", _APPLE,
+           published_ua="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+                        "(KHTML, like Gecko) Version/17.4 Safari/605.1.15 "
+                        "(Applebot/0.1; +http://www.apple.com/go/applebot)"),
     _agent("Applebot-Extended", "Apple", CONTROL,
            "opt-out token for training Apple's foundation models; does not affect Siri or "
            "Spotlight, which follow Applebot", _APPLE),
@@ -185,21 +210,29 @@ AI_CRAWLER_AGENTS = (
     # --- Amazon ---
     _agent("Amzn-SearchBot", "Amazon", SEARCH,
            "improves search experiences in Amazon products such as Alexa; does not crawl "
-           "for generative AI training", _AMAZON),
+           "for generative AI training", _AMAZON,
+           published_ua="Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; "
+                        "Amzn-SearchBot/0.1) Chrome/131.0.0.0 Safari/537.36"),
     _agent("Amzn-User", "Amazon", USER_FETCH,
            "supports user actions such as answering an Alexa query that needs current "
-           "information; does not crawl for generative AI training", _AMAZON),
+           "information; does not crawl for generative AI training", _AMAZON,
+           published_ua="Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; "
+                        "Amzn-User/0.1) Chrome/131.0.0.0 Safari/537.36"),
     _agent("Amazonbot", "Amazon", TRAINING,
            "fetches content for Amazon products and services, and may be used to train "
-           "Amazon AI models", _AMAZON),
+           "Amazon AI models", _AMAZON,
+           published_ua="Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; "
+                        "Amazonbot/0.1) Chrome/131.0.0.0 Safari/537.36"),
 
     # --- Meta ---
     _agent("Meta-ExternalFetcher", "Meta", USER_FETCH,
            "fetches individual links at a user's request, including helping AI navigate "
-           "sites to complete tasks", _META),
+           "sites to complete tasks", _META,
+           published_ua="meta-externalfetcher/1.1"),
     _agent("Meta-ExternalAgent", "Meta", TRAINING,
            "crawls for use cases such as training foundation AI models or indexing content "
-           "directly", _META),
+           "directly", _META,
+           published_ua="meta-externalagent/1.1"),
 
     # --- Google ---
     _agent("Google-Extended", "Google", CONTROL,
@@ -208,7 +241,8 @@ AI_CRAWLER_AGENTS = (
 
     # --- The rest ---
     _agent("DuckAssistBot", "DuckDuckGo", SEARCH,
-           "gathers passages that DuckAssist cites in instant answers", _DUCK),
+           "gathers passages that DuckAssist cites in instant answers", _DUCK,
+           published_ua="DuckAssistBot/1.2; (+http://duckduckgo.com/duckassistbot.html)"),
     _agent("YouBot", "You.com", SEARCH,
            "indexes pages for an answer engine that links its sources", _UNDOCUMENTED,
            vendor_documented=False),
@@ -562,13 +596,16 @@ def run(snapshot, allow_network=True, time_budget=None):
     _check_sitemaps(result, snapshot, fetcher, robots)
     _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher, ua_verdict,
                                    robots, refusal_recheck)
-    _check_transport_and_hosts(result, snapshot, ok_pages)
 
     _check_agent_files(result, snapshot, robots, fetcher, time_budget=time_budget)
     # Last, because it is the only check here that spends a request on a
     # question no other check needs answered, and because it spends nothing at
     # all on a site with one language edition - which is nearly every site.
     _check_hreflang(result, snapshot, ok_pages, fetcher, robots)
+    # After that, because the one request it may spend - the homepage under
+    # the site's other hostname - answers a question no other check asks, so
+    # it takes only what every check above has left of the budget.
+    _check_transport_and_hosts(result, snapshot, ok_pages, fetcher, robots)
     # A robots.txt that answered 200 with an HTML page is not a robots.txt. The
     # signal said `True` for it, which is the same wrong answer this file
     # corrects in four other places.
@@ -4656,8 +4693,15 @@ def _recheck_a_refusal(result, snapshot, fetcher, robots=None, ua_verdict=None):
 
 
 def _ua_string(name):
-    """The probe identifies itself as both the crawler and this audit tool."""
-    return "{} ({}; comparison probe)".format(name, USER_AGENT)
+    """The crawler's published string, then this audit's own name.
+
+    The operator's string comes first and whole, so a rule reading it sees
+    what the crawler sends; see `published_ua` on the agent table. This
+    audit's name follows it, so the request still says who actually sent it.
+    """
+    agent = AGENT_BY_TOKEN.get((name or "").lower())
+    published = agent.published_ua if agent is not None else ""
+    return "{} ({}; comparison probe)".format(published or name, USER_AGENT)
 
 
 def _name_by_name_probe_step(limit=5):
@@ -6205,9 +6249,8 @@ def _landed_on_https(ok_pages):
     return bool(landed) and all(u.startswith("https://") for u in landed)
 
 
-def _check_transport_and_hosts(result, snapshot, ok_pages):
+def _check_transport_and_hosts(result, snapshot, ok_pages, fetcher=None, robots=None):
     result.check("https-transport")
-    result.check("canonical-host-consistency")
 
     host = urlparse(snapshot["origin"]).hostname or ""
     # A local or IP-addressed origin is a development server, not a published
@@ -6250,7 +6293,22 @@ def _check_transport_and_hosts(result, snapshot, ok_pages):
                       "or refuse them, which suppresses the site before content is ever assessed.",
         )
     else:
-        result.skip("https-transport", "the site is served over HTTPS")
+        # Served over HTTPS is not the same as linked over HTTPS. A museum's
+        # own menu links two of its sections as `http://www.<host>/<section>/`,
+        # each answering 307 to the https:// address, and this check passed
+        # the site as "served over HTTPS" - true of where the pages end up, and
+        # silent about every crawler being sent through plain HTTP and a
+        # temporary redirect to reach them.
+        written = _internal_links_written_as_http(snapshot, ok_pages)
+        if written:
+            _add_internal_http_links_finding(result, written)
+        else:
+            result.skip("https-transport", "the site is served over HTTPS")
+
+    # Registered here rather than beside `https-transport`, so a transport
+    # finding above is stamped with the check that produced it and not with
+    # this one.
+    result.check("canonical-host-consistency")
 
     # `www.` is kept here, unlike everywhere else that compares hosts: a site
     # whose canonicals name both `example.test` and `www.example.test` has a
@@ -6350,11 +6408,292 @@ def _check_transport_and_hosts(result, snapshot, ok_pages):
         )
         return
 
+    # No path was read twice, which is not the same as no site on two names.
+    # A database library's crawl read 54 pages on `www.` and 6 on the bare
+    # domain, every one answering 200 where it was asked, with no canonical
+    # anywhere - and this check reported "no path answered on more than one
+    # hostname", because the two halves of the crawl happened to visit
+    # different pages. See `_one_site_on_both_names`.
+    split, asked = _one_site_on_both_names(snapshot, ok_pages, hosts, fetcher, robots)
+    if split:
+        _add_both_names_finding(result, split, hosts)
+        return
+
     result.skip("canonical-host-consistency",
-                "every canonical URL uses a single hostname" if hosts
-                else "no canonical URL was declared anywhere, and no path answered on more "
-                     "than one hostname during this crawl, so there is no host split to "
-                     "resolve")
+                ("every canonical URL uses a single hostname" if hosts
+                 else "no canonical URL was declared anywhere, and no path answered on more "
+                      "than one hostname during this crawl, so there is no host split to "
+                      "resolve") + asked)
+
+
+# Labels a registry groups names under, so that `www.` in front of
+# `example.co.uk` is the same registrant's other address and not a subdomain
+# of a subdomain. The crawl's `registrable_name` peels the same labels.
+_REGISTRY_GROUPING_LABELS = frozenset({
+    "co", "com", "net", "org", "edu", "gov", "mil", "int", "ac", "sch",
+    "or", "ne", "go", "gob", "gouv", "nom", "biz", "info", "web", "ltd", "plc",
+})
+
+
+def _other_name_of(host):
+    """The same site's other hostname - `www.` added or taken away - or "".
+
+    Only the ordinary pair. `docs.example.test` has no `www.` twin worth
+    asking about, and an address or a local host has no names at all.
+    """
+    host = (host or "").lower().rstrip(".")
+    if (not host or ":" in host or host == "localhost"
+            or re.match(r"^\d+(?:\.\d+){3}$", host)):
+        return ""
+    if host.startswith("www."):
+        rest = host[4:]
+        return rest if "." in rest else ""
+    labels = host.split(".")
+    if len(labels) == 2 or (len(labels) == 3 and labels[1] in _REGISTRY_GROUPING_LABELS):
+        return "www." + host
+    return ""
+
+
+def _landed_path(page):
+    parts = urlparse(page.get("final_url") or page.get("url") or "")
+    return (parts.path.rstrip("/") or "/"), parts.query
+
+
+def _one_site_on_both_names(snapshot, ok_pages, canonical_hosts, fetcher, robots):
+    """The bare domain and its `www.` form both serving the site.
+
+    Returns `(split, note)`: `split` is None when there is nothing to report,
+    and `note` is a clause for the decline line saying what was asked.
+
+    Like is compared with like. Where a path was read under both names, the
+    path comparison has already answered - a copy that differs is a different
+    document, and a matching one was reported before this is reached. Where
+    no path was read twice, the names themselves are the evidence: a bare
+    domain and its `www.` form each answering 200 on the name that was asked,
+    rather than handing over to the other, is one site on two names, unless
+    the copies carry canonicals that say which is real.
+
+    When the crawl only ever reached one name, one request settles it: the
+    homepage under the other name. That request respects robots.txt, spends
+    this skill's own budget, and is made only when no canonical anywhere has
+    already named the real address.
+    """
+    by_host = {}
+    for page in ok_pages:
+        name = (urlparse(page.get("final_url") or page.get("url") or "").hostname or "").lower()
+        if name:
+            by_host.setdefault(name, []).append(page)
+
+    for bare in sorted(by_host):
+        www = "www." + bare
+        if bare.startswith("www.") or www not in by_host:
+            continue
+        paths = {name: {_landed_path(p) for p in by_host[name]} for name in (bare, www)}
+        if paths[bare] & paths[www]:
+            return None, ""
+        declared = next(iter(canonical_hosts)) if len(canonical_hosts) == 1 else ""
+        unnamed = [p for name in (bare, www) if name != declared for p in by_host[name]
+                   if not (p.get("canonical") or "").strip()]
+        if not unnamed:
+            return None, ""
+        return {"how": "crawl", "hosts": (bare, www), "declared": declared,
+                "pages": {bare: by_host[bare], www: by_host[www]},
+                "unnamed": unnamed}, ""
+
+    return _ask_the_other_name(snapshot, ok_pages, canonical_hosts, fetcher, robots)
+
+
+def _ask_the_other_name(snapshot, ok_pages, canonical_hosts, fetcher, robots):
+    """One GET of the homepage under the site's other name. See above."""
+    origin = snapshot.get("origin") or ""
+    parts = urlparse(origin)
+    own = (parts.hostname or "").lower()
+    other = _other_name_of(own)
+    if not other or canonical_hosts:
+        return None, ""
+    # The crawl already watched one name hand over to the other: the audit
+    # was started on one of them and settled on this one, or it followed a
+    # link to the other name and was sent back here.
+    requested = (urlparse(snapshot.get("requested_origin") or "").hostname or "").lower()
+    if requested and requested != own:
+        return None, ""
+    for page in snapshot.get("pages") or []:
+        if (urlparse(page.get("url") or "").hostname or "").lower() == other:
+            return None, ""
+    if fetcher is None or not fetcher.budget_left or not fetcher.time_left:
+        return None, ""
+    # The audited host's robots.txt is the only one this audit has read, and
+    # the other name serves the same site; a path it closes is not asked for.
+    if is_disallowed(robots or {}, USER_AGENT, "/"):
+        return None, ""
+    url = "{}://{}/".format(parts.scheme or "https", other)
+    response = fetcher.try_get(url)
+    if response is None:
+        return None, ""
+    status = response.status_code
+    landed = getattr(response, "url", "") or url
+    landed_host = (urlparse(landed).hostname or "").lower()
+    if landed_host != other:
+        return None, "; {} was asked for once and redirected to {}".format(url, landed)
+    if status != 200:
+        return None, "; {} was asked for once and answered HTTP {}".format(url, status)
+    home_url = origin.rstrip("/") + "/"
+    home = _homepage_record(snapshot.get("pages") or [], home_url)
+    ours = ((home or {}).get("title") or "").strip()
+    soup = make_soup(response_text(response) or "")
+    theirs = soup.title.get_text(strip=True) if soup is not None and soup.title else ""
+    if ours and theirs and ours != theirs:
+        return None, ("; {} answered HTTP 200 with a different homepage title, so it is read "
+                      "as a different site rather than a second name for this one".format(url))
+    return {"how": "probe", "hosts": (own, other), "url": url,
+            "home": (home or {}).get("url") or home_url, "title": ours or theirs}, ""
+
+
+_TWO_NAMES_RATIONALE = (
+    "Two hostnames serving the same content look like two sources that half-agree. "
+    "Links, citations and reputation split between them, and a consumer deciding which "
+    "version to quote has nothing to decide on. It also makes a page look duplicated to "
+    "anything counting pages, which hides the real problem behind an invented one.")
+
+
+def _add_both_names_finding(result, split, canonical_hosts):
+    result.check("canonical-host-consistency")
+    first, second = split["hosts"]
+    if split["how"] == "crawl":
+        pages = split["pages"]
+        example = {name: sorted(p.get("final_url") or p.get("url") for p in pages[name])[0]
+                   for name in (first, second)}
+        if not canonical_hosts:
+            named = ("No page crawled on either hostname declares a canonical URL, so nothing "
+                     "tells a reader which address is the original.")
+        else:
+            named = ("Every canonical URL names {}, but {} crawled on the other hostname "
+                     "{} none, so those copies do not say which address is real.".format(
+                         split["declared"], plural(len(split["unnamed"]), "page", "pages"),
+                         "declares" if len(split["unnamed"]) == 1 else "declare"))
+        evidence = ("The crawl read {} on {} and {} on {}, and each answered HTTP 200 on the "
+                    "hostname it was asked for instead of redirecting to the other - for "
+                    "example {} and {}. {}".format(
+                        plural(len(pages[first]), "page", "pages"), first,
+                        plural(len(pages[second]), "page", "pages"), second,
+                        example[first], example[second], named))
+        affected = sorted({p.get("url") for p in split["unnamed"] if p.get("url")})
+    else:
+        evidence = ("{} answered HTTP 200 without redirecting, with the same homepage{} as {}, "
+                    "so the homepage is served under both {} and {}. The crawl itself stayed "
+                    "on {}, and no page it read declares a canonical URL naming either.".format(
+                        split["url"],
+                        " title (\"{}\")".format(split["title"]) if split["title"] else "",
+                        split["home"], first, second, first))
+        affected = [split["home"], split["url"]]
+    result.add(
+        id_hint="site-answers-on-more-than-one-hostname",
+        title="The site is served under both {} and {}, and nothing says which is the real "
+              "one".format(first, second),
+        severity="medium", confidence="high",
+        evidence=evidence,
+        mechanism="A", root_cause="host-inconsistency",
+        summary="Serve the site on one hostname, redirect the other to it, and declare a "
+                "canonical URL on every page.",
+        how_to_fix=[
+            "Choose the hostname you want to be the real one - {} or {}.".format(first, second),
+            "Redirect every address on the other hostname permanently (301) to the same path "
+            "on the one you chose.",
+            "Add `<link rel=\"canonical\">` to every page naming its address on the chosen "
+            "hostname, so a crawler that reaches the other one still knows.",
+            "Point internal links, the sitemap and any structured-data URLs at that hostname "
+            "too.",
+        ],
+        effort="low", owner="developer",
+        rationale=_TWO_NAMES_RATIONALE,
+        affected_pages=affected,
+    )
+
+
+# Temporary redirects: the address asked for is still the real one.
+_TEMPORARY_REDIRECTS = (302, 303, 307)
+
+
+def _internal_links_written_as_http(snapshot, ok_pages):
+    """Internal links written `http://` that the crawl followed to `https://`.
+
+    Returns `{"followed": [(asked, landed, statuses)], "written": [url],
+    "sources": {url: {page}}}`, or None. A link the crawl never followed is
+    not known to redirect, so it is counted only once at least one of its kind
+    has been seen to.
+    """
+    own = strip_www((urlparse(snapshot.get("origin") or "").hostname or "").lower())
+    if not own:
+        return None
+
+    def ours_over_http(url):
+        parts = urlparse(url or "")
+        return (parts.scheme == "http"
+                and strip_www((parts.hostname or "").lower()) == own)
+
+    sources = {}
+    for page in ok_pages:
+        links = page.get("links") or {}
+        for item in (links.get("internal") or []) if isinstance(links, dict) else []:
+            url = item.get("url") if isinstance(item, dict) else item
+            if isinstance(url, str) and ours_over_http(url):
+                sources.setdefault(url, set()).add(page.get("url"))
+
+    followed = []
+    for page in snapshot.get("pages") or []:
+        asked = page.get("url") or ""
+        landed = page.get("final_url") or ""
+        if (page.get("status") is None or asked not in sources
+                or not landed.startswith("https://")):
+            continue
+        followed.append((asked, landed, [s for s in page.get("redirect_statuses") or [] if s]))
+    if not followed:
+        return None
+    return {"followed": sorted(followed), "written": sorted(sources), "sources": sources}
+
+
+def _add_internal_http_links_finding(result, found):
+    result.check("https-transport")
+    followed, written = found["followed"], found["written"]
+    asked, landed, _ = followed[0]
+    first_hops = sorted({hops[0] for _, _, hops in followed if hops})
+    temporary = [code for code in first_hops if code in _TEMPORARY_REDIRECTS]
+    parts = urlparse(asked)
+    result.add(
+        id_hint="internal-links-use-http",
+        title="Internal links are written with http:// and redirect to https://",
+        severity="low", confidence="high",
+        evidence="{} on this HTTPS site {} written with http://. The crawl followed {} of them "
+                 "and each answered with a redirect to its https:// address{}: {} went to "
+                 "{}.{}".format(
+                     plural(len(written), "internal link address", "internal link addresses"),
+                     "is" if len(written) == 1 else "are", len(followed),
+                     " (HTTP {})".format(", ".join(str(c) for c in first_hops))
+                     if first_hops else "",
+                     asked, landed,
+                     " A temporary redirect tells a crawler the http:// address is still the "
+                     "real one, so every visit through these links goes over plain HTTP first."
+                     if temporary else
+                     " Every such link costs a crawler a request over plain HTTP before it "
+                     "reaches the page."),
+        mechanism="A", root_cause="insecure-transport",
+        summary="Write internal links with https:// or as root-relative paths, and make the "
+                "http:// redirect permanent.",
+        how_to_fix=[
+            "Find where these links are written - a menu, a template or a content field - and "
+            "change `http://{}` to `https://{}`, or to a root-relative path such as "
+            "`{}`.".format(parts.netloc, parts.netloc, parts.path or "/"),
+            "Make the http:// to https:// redirect permanent (301 or 308), so anything still "
+            "holding an old address is told where the page now lives.",
+        ],
+        effort="low", owner="developer",
+        rationale="A crawler following one of these links asks over plain HTTP first and is "
+                  "sent elsewhere. That spends a request on every such link, and a temporary "
+                  "redirect leaves the http:// address standing as the one the site vouches "
+                  "for.",
+        affected_pages=sorted({src for pages in found["sources"].values()
+                               for src in pages if src}) or [asked],
+    )
 
 
 def _paths_served_by_more_than_one_host(ok_pages):

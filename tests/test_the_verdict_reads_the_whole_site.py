@@ -193,7 +193,7 @@ def test_the_homepage_gap_can_still_be_named_beside_a_second_identity_gap():
     # And the three sentences around it narrow with it: a site declaring the
     # block on its deep pages has established who it is somewhere.
     assert "front page" in verdict, verdict
-    assert "no fact about this brand it can safely repeat" not in verdict, verdict
+    assert "nothing it can safely repeat about who the brand is" not in verdict, verdict
 
 
 def test_a_site_that_really_has_none_still_gets_the_sentence():

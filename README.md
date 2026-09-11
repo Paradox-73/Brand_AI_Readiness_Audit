@@ -30,7 +30,7 @@ matters if the one before it passed.
 | `freshness-corroboration-audit` | Is it current, and does anywhere else agree? Dates, staleness, off-site profile breadth, name collisions | Trusted |
 | `engagement-audit` | Does the person who clicks through stay? Orientation, dead ends, orphans, broken links, breadcrumbs, interstitials, forms | Visitor stays |
 
-Between them the six run **96 checks**, drawing on a catalogue of **127 distinct findings**
+Between them the six run **96 checks**, drawing on a catalogue of **128 distinct findings**
 and **59 named root causes**. A single audit reports only the ones its evidence supports — a
 typical small site produces ten to twenty. Six is the number of gates there are, and a test
 fails the build if any two skills ever claim the same root cause.
@@ -172,7 +172,7 @@ specified in `skills/audit-orchestrator/references/report-schema.json`.
 | Flag | Default | Effect |
 |---|---|---|
 | `--max-pages` | 60 | Page ceiling |
-| `--budget` | 240 | Wall-clock seconds for the crawl. Clamped to 115 s at the default run ceiling: 148 s is held back for the six sub-skills before the crawl starts, so a site too slow for both is read less deeply rather than analysed less widely. Measured on a site answering in six seconds a page, that is the difference between five of the six skills running and all six |
+| `--budget` | 240 | Wall-clock seconds for the crawl. Clamped to 142 s at the default 285 s run ceiling: 118 s is held back for the six sub-skills and 12 s for composing the report before the crawl starts, so a site too slow for both is read less deeply rather than analysed less widely. Measured on a site answering in six seconds a page, that is the difference between five of the six skills running and all six |
 | `--render` | on when Playwright is installed | Compare static HTML against a browser-rendered DOM. `--no-render` turns it off |
 | `--no-network` | off | Snapshot only; no extra probes |
 | `--format html` | md | Also write `report.html` |

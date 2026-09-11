@@ -361,6 +361,35 @@ _ENDPOINT_ROOT_RULE = re.compile(r"^/(?:api|graphql)(?:[/*.]|$)", re.I)
 # was reported alongside a real content path as something to unblock.
 _NUMERIC_PATH_RE = re.compile(r"^/\d+/?$")
 
+# A path made of a random token is a trap, not a page. A fashion shop's
+# robots.txt closes four addresses shaped like `/QX47RT2MZP9K` and
+# `/kd8vn3w1pq5z` - twelve characters, capitals and digits shuffled together,
+# no word in them - beside one real section, and all five were reported as
+# "paths that look like real content". Nobody links a reader to a string like
+# that. It exists so that a crawler which ignores robots.txt and requests it
+# can be recognised and refused, and the rule is the site doing exactly that.
+#
+# The shape is the class, not the strings. One segment, letters and digits
+# only, eight or more of them, and the two kinds switching back and forth at
+# least four times. A name with a number in it switches once or twice -
+# `/phone15pro`, `/covid19-update`, `/2024collection`, `/mp3players` - and a
+# separator anywhere means somebody chose words, so none of those is excused.
+RANDOM_TOKEN_MIN_LENGTH = 8
+RANDOM_TOKEN_MIN_SWITCHES = 4
+
+
+def _is_a_random_token(rule):
+    """True for `/QX47RT2MZP9K`: a crawler trap, not a section. See above."""
+    segment = (rule or "").strip().rstrip("$").strip("/")
+    if (len(segment) < RANDOM_TOKEN_MIN_LENGTH or not segment.isascii()
+            or not segment.isalnum()):
+        return False
+    digits = sum(ch.isdigit() for ch in segment)
+    if digits < 2 or len(segment) - digits < 2:
+        return False
+    switches = sum(1 for a, b in zip(segment, segment[1:]) if a.isdigit() != b.isdigit())
+    return switches >= RANDOM_TOKEN_MIN_SWITCHES
+
 # A copy of the site that is not the site. A broadcaster's robots.txt blocks
 # `club-preprod`, `digital-preprod`, `magazine-dev` and `magazine-test`, and
 # all eleven "paths that look like real content" in its report were of that
@@ -493,6 +522,8 @@ def benign_disallow(rule, siblings=None):
     if not rule or rule in ("/", "/*"):
         return False
     if _NUMERIC_PATH_RE.match(rule):
+        return True
+    if _is_a_random_token(rule):
         return True
     if _BENIGN_COMMERCE_DISALLOW.match(rule):
         return True

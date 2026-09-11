@@ -11,6 +11,7 @@ Nothing here performs a write to a target site. The only network primitive is
 
 from __future__ import annotations
 
+import codecs
 import http.client
 import json
 import os
@@ -233,7 +234,21 @@ FORBIDDEN_PATH_SEGMENTS = (
     "signup", "sign-up", "register", "account", "accounts", "cart", "checkout",
     "logout", "password", "xmlrpc.php",
     "my-account",
+    # A visitor's own saved list, which is the same private area as their
+    # account whichever app renders it.
+    "wishlist", "wishlists", "iwish",
 )
+
+# A storefront's app routes. A hosted store platform serves installed apps
+# through a proxy prefix - `/apps/<app>` or `/a/<app>` - and the app behind a
+# wishlist, an account area, a review form or a loyalty wallet renders the
+# visitor's own state there. The crawl fetched a wishlist app's page, read an
+# empty basket and a footer off it, and published findings about "the page".
+# Read by shape: the prefix, then an app whose name says whose state it is.
+_APP_PROXY_RE = re.compile(
+    r"^/(?:[a-z]{2}(?:[-_][a-z]{2,4})?/)?(?:apps|a)/[^/]*"
+    r"(?:wish|account|login|review|loyalty|reward|referral|subscription|order"
+    r"|customer|profile)", re.I)
 
 # The words that name a shop's basket, and where in an address they may stand
 # to mean one.
@@ -1243,10 +1258,46 @@ def response_text(response):
         if not candidate:
             continue
         try:
-            return content.decode(candidate, errors="strict")
+            text = content.decode(candidate, errors="strict")
         except (LookupError, UnicodeDecodeError):
             continue
+        return _utf8_if_misread(content, candidate, text)
     return content.decode("utf-8", errors="replace")
+
+
+# What UTF-8 looks like read one byte at a time in a Western single-byte
+# encoding: a lead byte read as `Â`, `Ã` or `â`, then a continuation byte read
+# as a Latin-1 symbol or one of the Windows-1252 punctuation marks. `â€˜` is a
+# curly quote, `Ã©` an e with an acute, `Â ` a non-breaking space. A single-
+# byte encoding accepts every byte, so decoding UTF-8 as one never fails - it
+# only turns every curly quote on the page into three characters of noise,
+# which then reach the brand name, the quoted evidence and the report.
+_MOJIBAKE_RE = re.compile(
+    u"[\u00c2\u00c3\u00e2][\u0080-\u00bf\u0152\u0153\u0160\u0161\u0178\u017d"
+    u"\u017e\u0192\u02c6\u02dc\u2013\u2014\u2018-\u201e\u2020-\u2022\u2026"
+    u"\u2030\u2039\u203a\u20ac\u2122]")
+
+
+def _utf8_if_misread(content, encoding, text):
+    """The body as UTF-8 where the encoding it was read in turned it to noise.
+
+    Both halves have to hold: the text read in the declared or detected
+    encoding carries UTF-8's signature, and the bytes are valid UTF-8. A page
+    genuinely in Windows-1252 is almost never valid UTF-8 once it holds a
+    single accented letter, so the second half is what keeps this from
+    rewriting a page that meant what it said.
+    """
+    try:
+        if codecs.lookup(encoding).name.startswith("utf"):
+            return text
+    except LookupError:
+        return text
+    if not _MOJIBAKE_RE.search(text):
+        return text
+    try:
+        return content.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return text
 
 
 # How much of a body to read before deciding it is an HTML page rather than the
@@ -1743,6 +1794,18 @@ def detect_site_language(pages):
         if contradicting:
             source = ("declared as {}, contradicted by page text written in the {} "
                       "script".format(code, contradicting))
+        elif script == "latin":
+            # Latin leading is not evidence against a declaration - see the
+            # block above `SCRIPT_CONTRADICTION_SHARE` - and the test just run
+            # found the declared script holding more than a trace of the
+            # letters. So the record names the declared script, and a report
+            # reading it cannot print "written in the latin script" over a
+            # declaration this function has just accepted.
+            expected = LANGUAGE_SCRIPTS.get(code) or ()
+            counts = script_counts(sample)
+            held = [name for name in expected if counts.get(name)]
+            if held and "latin" not in expected:
+                script = max(sorted(held), key=counts.get)
         return {"code": code, "source": source, "script": script,
                 "pages_declaring": sum(declared.values()),
                 "prose_checks_apply": code == PROSE_LANGUAGE and not non_latin}
@@ -2233,16 +2296,36 @@ def scripts_in(text):
     return set(script_counts(text))
 
 
+# The scripts one East Asian page writes in together. Japanese prose is kanji
+# and kana in the same sentence, and Korean mixes hanja into hangul. Counted
+# one by one, each is a minority of a page that is entirely theirs: a
+# university's Japanese pages held 1,599 han and 1,922 kana letters against
+# 2,014 Latin ones from brand names, codes and an English edition in the same
+# sample, so Latin led the plurality and the report said the site was "written
+# in the latin script" while every page declared `lang="ja"`.
+_EAST_ASIAN_SCRIPTS = ("han", "kana", "hangul")
+
+
 def dominant_script(text):
     """The writing system most of this text is in, or None if it is too short.
 
     A page of English quoting one Japanese product name is English. The answer
     is the script holding most of the letters, not every script present.
+
+    Han, kana and hangul are weighed together against whatever leads, because
+    they are one page's writing and not three rival ones - see
+    `_EAST_ASIAN_SCRIPTS`. Where together they outnumber the leader, the answer
+    is whichever of them holds the most letters, which is the name every caller
+    already knows.
     """
     counts = script_counts(text)
     if sum(counts.values()) < SCRIPT_SAMPLE_MINIMUM:
         return None
-    return max(sorted(counts), key=counts.get)
+    leader = max(sorted(counts), key=counts.get)
+    east_asian = {name: counts[name] for name in _EAST_ASIAN_SCRIPTS if counts.get(name)}
+    if leader not in east_asian and sum(east_asian.values()) > counts[leader]:
+        return max(sorted(east_asian), key=east_asian.get)
+    return leader
 
 
 # How many English characters one character of each script is worth.
@@ -3868,6 +3951,9 @@ def is_forbidden_path(url):
     # refused, a shop's `/c/basket` category is read. See `CART_WORDS`.
     if cart_path_word(path, _POSITIONAL_ONLY_CART_WORDS):
         return True
+    # A store app rendering one visitor's state. See `_APP_PROXY_RE`.
+    if _APP_PROXY_RE.search(path):
+        return True
     # `api` and `graphql` at the first segment only. See `_ENDPOINT_ROOT_RE`:
     # matched anywhere, they cost a documentation tree its reference manual.
     if _ENDPOINT_ROOT_RE.search(path):
@@ -4016,9 +4102,14 @@ _URL_TYPE_SLUGS = (
     # finding named were episodes of it - subjected to a check about what the
     # organisation is, because a bare content word sat in this list. The
     # qualified forms are unambiguous and the bare one never was.
+    # `story` as a whole segment: a fashion retailer's brand story lives at
+    # `/<region>/global/story`, typed `article`, and was asked for a
+    # publication date. The segment has to be the whole word, so a blog post
+    # slugged `story-behind-the-range` is still not an about page.
     ("about", ("about", "about-us", "company", "who-we-are", "our-story", "our-team",
                "team", "mission", "our-history", "company-history",
-               "our-mission", "our-values", "leadership")),
+               "our-mission", "our-values", "leadership", "story", "brand-story",
+               "our-brand")),
     ("location", ("location", "showroom", "find-us", "visit-us", "where-we-are",
                   "where-to-find-us", "store-finder", "store-locator")),
     # Episodes are articles for our purposes: dated published pieces that a
@@ -5812,6 +5903,7 @@ def _site_kind_signals(snapshot):
         "type_counts": counts,
         "page_types": {p.get("page_type") for p in pages},
         "sells": sells_something(snapshot, pages),
+        "sells_online": sells_online(snapshot, pages),
         "has_basket": matched(_BASKET_PATH_RE),
         "declared_places": len(declared_locations(snapshot)),
         "own_address_pages": len(pages_with_their_own_address(snapshot)),
@@ -5830,6 +5922,270 @@ def _site_kind_signals(snapshot):
             for repo in _ACCOUNT_IS_FIRST_SEGMENT_HOSTS),
         "licence": matched(_LICENCE_PATH_RE) or licence_text,
     }
+
+
+# The markup a shop puts on the thing it sells, as opposed to the markup a
+# place puts on itself. `store` is deliberately absent: it is the schema.org
+# type of a shop you walk into, which is the other half of the question.
+_SELLS_ONLINE_JSONLD = frozenset({
+    "product", "productgroup", "productmodel", "individualproduct", "onlinestore",
+})
+
+
+def sells_online(snapshot, pages=None):
+    """What says this site takes an order on the site itself, or "".
+
+    A product detail page, an add-to-basket control, product markup, or a
+    basket address - each is the site selling from its own pages, which a
+    showroom or a branch does not do. Returned as a phrase so the kind can say
+    which one it read.
+    """
+    pages = pages if pages is not None else (snapshot.get("pages") or [])
+    for page in pages:
+        if page.get("page_type") == "product":
+            return "product pages"
+        if ((page.get("add_to_cart_controls") or {}).get("count") or 0) > 0:
+            return "an add-to-basket control"
+    for page in pages:
+        declared = {str(t).split("/")[-1].lower()
+                    for t in (page.get("jsonld_types") or [])}
+        declared |= {str(t).split("/")[-1].lower()
+                     for t in (page.get("microdata_types") or [])}
+        if declared & _SELLS_ONLINE_JSONLD:
+            return "product markup"
+    for page in pages:
+        for link in [{"url": page.get("url")}] + list(
+                (page.get("links") or {}).get("internal") or []):
+            try:
+                path = urlparse((link or {}).get("url") or "").path or "/"
+            except ValueError:
+                continue
+            if _BASKET_PATH_RE.search(path):
+                return "a basket"
+    return ""
+
+
+# --------------------------------------------------------------------------
+# An institution under an academic suffix
+#
+# The education suffix was read as "a person, a university, a lab" and the
+# answer was always the person. A national university's report told it to say
+# "what you work on, where you are based, and what you are known for", to
+# claim "your researcher identifier" and to repeat its boilerplate in "every
+# conference or speaker biography" - advice for one researcher's homepage,
+# given to an institution with ten faculties and a name that is the word
+# "university" in its own language.
+#
+# The suffix says the site is academic; it cannot say whether it is one
+# academic or the whole institution. Three things the site states can:
+#
+#   its name     the brand name or the homepage's H1 is an institution's name -
+#                University, College, Institute, or the same noun in the
+#                site's own language. Never the title segments: a professor's
+#                page is titled "<name> | <University>", and that names where
+#                she works, not what the site is.
+#   its markup   a top-level `CollegeOrUniversity` or `EducationalOrganization`
+#                node. A nested one is a Person's `affiliation`.
+#   its shape    many faculties and departments linked from its own pages.
+#
+# A person speaking for the site in its markup outranks all three, and a
+# person's role word beside the name ("Professor", "Lab") vetoes the name
+# reading, so a researcher's page under the same suffix stays hers.
+#
+# The kind returned is `organisation`, not `public-body`. Nothing in an
+# address or a name says whether a university is national, state or private,
+# and `organisation` is the advice that fits every one of them: a founding
+# year, a register entry, the professional network where universities keep
+# school pages. `public-body` would tell a private college to find "the
+# official register of public bodies that lists you".
+# --------------------------------------------------------------------------
+
+_INSTITUTION_NAME_RE = re.compile(
+    r"\b(?:university|universit(?:y|ies)|universit[äaé]t|universit[ée]|universidad|"
+    r"universidade|universit[àa]|universiteit|uniwersytet|univerzit[ae]t?|college|"
+    r"institute|institut|instituto|istituto|polytechnic|politecnico|hochschule|"
+    r"academy\s+of|school\s+of\s+(?:economics|medicine|law|business|engineering))\b"
+    u"|大学|大學|学院|學院|대학교|"
+    u"มหาวิทยาลัย|"
+    u"جامعة", re.I)
+
+# Words that put one person or one group in front of the institution's name.
+_ONE_ACADEMIC_RE = re.compile(
+    r"\b(?:prof(?:essor)?\.?|dr\.?|lecturer|researcher|scientist|student|"
+    r"candidate|ph\.?\s?d|postdoc|fellow|lab|laboratory|research\s+group|"
+    r"homepage|personal|cv|curriculum\s+vitae)\b", re.I)
+
+_INSTITUTION_JSONLD = frozenset({"collegeoruniversity", "educationalorganization"})
+
+# A faculty or a department, in the words an institution's own menu uses.
+_DEPARTMENT_RE = re.compile(
+    r"\b(?:faculty|faculties|department|departments|school\s+of|graduate\s+school|"
+    r"college\s+of|fakult[äa]t|facult[ée]|facultad|faculdade|dipartimento)\b"
+    u"|学部|研究科|학부|대학원|"
+    u"คณะ", re.I)
+INSTITUTION_MIN_DEPARTMENTS = 5
+
+
+def _names_an_academic_institution(snapshot):
+    """The name the site calls itself that is an institution's, or ""."""
+    brand = snapshot.get("brand") or {}
+    names = [str(brand.get("name") or "")]
+    names += [str(v) for v in (brand.get("authoritative_variants") or [])]
+    names += [str(v) for v in (brand.get("alternate_names") or [])]
+    home_h1s, home_titles = [], []
+    for page in snapshot.get("pages") or []:
+        if page.get("page_type") == "home":
+            home_h1s += [str(h) for h in ((page.get("headings") or {}).get("h1") or [])]
+            home_titles.append(str(page.get("title") or ""))
+    # A person's role anywhere the homepage names itself is a person's site,
+    # whatever institution the same line also names. The titles are read for
+    # this veto and for nothing else.
+    if any(_ONE_ACADEMIC_RE.search(value) for value in names + home_h1s + home_titles):
+        return ""
+    for value in names + home_h1s:
+        value = re.sub(r"\s+", " ", value).strip()
+        if value and _INSTITUTION_NAME_RE.search(value):
+            return value
+    return ""
+
+
+def _declares_an_academic_institution(snapshot):
+    """Does a top-level markup node say the site is a university or college?"""
+    for page in snapshot.get("pages") or []:
+        for node in page.get("jsonld") or []:
+            if not isinstance(node, dict) or node.get("_nested_in"):
+                continue
+            if jsonld_type_names(node.get("@type")) & _INSTITUTION_JSONLD:
+                return True
+    return False
+
+
+def _departments_linked(snapshot):
+    """How many distinct faculties and departments the site's own links name."""
+    seen = set()
+    for page in snapshot.get("pages") or []:
+        for link in (page.get("links") or {}).get("internal") or []:
+            label = re.sub(r"\s+", " ", str((link or {}).get("text") or "")).strip()
+            if label and len(label) <= 120 and _DEPARTMENT_RE.search(label):
+                seen.add(label.lower())
+    return len(seen)
+
+
+def academic_institution(snapshot, person_is_the_site=None):
+    """`(confidence, evidence)` where an academic site is an institution, else None.
+
+    See the block above for the three readings and the one veto.
+    """
+    if person_is_the_site is True:
+        return None
+    name = _names_an_academic_institution(snapshot)
+    if name:
+        return "high", 'the site calls itself "{}", which is the name of an ' \
+                       "institution rather than of one person".format(truncate(name, 80))
+    if _declares_an_academic_institution(snapshot):
+        return "high", ("the site declares itself a university or college in its "
+                        "own markup")
+    departments = _departments_linked(snapshot)
+    if departments >= INSTITUTION_MIN_DEPARTMENTS:
+        return "medium", ("its own pages link {} faculties and departments".format(
+            departments))
+    return None
+
+
+# --------------------------------------------------------------------------
+# One document, in several languages
+#
+# A one-page essay - one page and its translations, nothing else - was given
+# the whole of the business advice: claim LinkedIn, Instagram and X, state a
+# founding year and a street address, add a call to action. Every rule below
+# asks for a structure the essay does not have, so every one of them passed it
+# by and the kind came back undetermined, which is the answer that changes
+# nothing.
+#
+# The shape itself is the evidence. The crawl found one substantial page, the
+# other pages it found are that page in other languages (a leading segment
+# shaped like a language code, on a page declaring a different language), and
+# its links lead almost nowhere else. And none of the things a body has: nothing
+# for sale, no organisation markup, no contact, about, careers or location
+# page, no street address or telephone number on it.
+# --------------------------------------------------------------------------
+
+_LANGUAGE_SEGMENT_RE = re.compile(r"^[a-z]{2,3}(?:[-_][a-z0-9]{2,8})?$", re.I)
+SINGLE_DOCUMENT_MIN_CHARS = 1000
+# Other addresses the document may link or the crawl may have read and still
+# be one document: a stray relative link, a colophon.
+SINGLE_DOCUMENT_OTHER_ADDRESSES = 2
+_SINGLE_DOCUMENT_REFUSING_TYPES = frozenset({
+    "about", "contact", "location", "careers", "pricing", "product", "category",
+    "service", "press",
+})
+
+
+def _document_path(url, lang, home_language):
+    """The address with a language edition's leading segment taken off."""
+    try:
+        path = urlparse(url or "").path or "/"
+    except ValueError:
+        return ""
+    segments = [s for s in path.split("/") if s]
+    if segments and re.match(r"^index\.[a-z]{3,4}$", segments[-1], re.I):
+        segments = segments[:-1]
+    code = primary_subtag(lang)
+    if segments and code and _LANGUAGE_SEGMENT_RE.match(segments[0]):
+        segment_code = re.split(r"[-_]", segments[0].lower())[0]
+        if code != home_language or segment_code == code:
+            segments = segments[1:]
+    return "/" + "/".join(segments)
+
+
+def single_document_site(snapshot):
+    """`(editions, others)` where the site is one document, else None.
+
+    `editions` is how many crawled pages are that document, the original
+    included, and `others` how many other addresses the crawl met. See the
+    block above.
+    """
+    pages = pages_of(snapshot)
+    if not pages:
+        return None
+    home = next((p for p in pages
+                 if (urlparse(p.get("url") or "").path or "/") == "/"), pages[0])
+    home_language = primary_subtag(home.get("lang"))
+    by_document = {}
+    for page in pages:
+        if page.get("page_type") in _SINGLE_DOCUMENT_REFUSING_TYPES:
+            return None
+        facts = page.get("contact_facts") or {}
+        if facts.get("phones") or facts.get("street"):
+            return None
+        key = _document_path(page.get("url"), page.get("lang"), home_language)
+        by_document.setdefault(key, []).append(page)
+    document = max(sorted(by_document), key=lambda k: (
+        len(by_document[k]),
+        max(english_equivalent_length(p.get("body_text") or "") for p in by_document[k])))
+    editions = by_document[document]
+    if max(english_equivalent_length(p.get("body_text") or "")
+           for p in editions) < SINGLE_DOCUMENT_MIN_CHARS:
+        return None
+    edition_segments = {s for p in editions
+                        for s in [(urlparse(p.get("url") or "").path or "/").strip("/")
+                                  .split("/")[0]] if s}
+    others = {key for key in by_document if key != document}
+    for page in pages:
+        for link in (page.get("links") or {}).get("internal") or []:
+            try:
+                path = urlparse((link or {}).get("url") or "").path or "/"
+            except ValueError:
+                continue
+            segments = [s for s in path.split("/") if s]
+            if segments and segments[0] in edition_segments:
+                segments = segments[1:]
+            key = "/" + "/".join(segments)
+            if key != document:
+                others.add(key)
+    if len(others) > SINGLE_DOCUMENT_OTHER_ADDRESSES:
+        return None
+    return len(editions), len(others)
 
 
 def _dominant_content_type(facts, page_type):
@@ -5902,6 +6258,18 @@ def site_kind(snapshot):
                             truncate(facts["public_self_description"], 140)),
                          "nothing is for sale"])
 
+    # An academic site that is the institution rather than one of its people.
+    # See `academic_institution`: the suffix says academic, and the site's own
+    # name, markup or faculties say which.
+    if facts["registry"] == PERSONAL_OR_ACADEMIC or said & _ACADEMIC_JSONLD:
+        institution = academic_institution(snapshot, facts["person_is_the_site"])
+        if institution:
+            confidence, evidence = institution
+            where = ("the address sits under a suffix reserved for education"
+                     if facts["registry"] == PERSONAL_OR_ACADEMIC
+                     else "the site declares itself an educational organisation in "
+                          "its own markup")
+            return SiteKind(ORGANISATION, confidence, [where, evidence])
     if facts["registry"] == PERSONAL_OR_ACADEMIC:
         return SiteKind(PERSONAL_OR_ACADEMIC, "high",
                         ["the address sits under a suffix reserved for education"])
@@ -5959,6 +6327,22 @@ def site_kind(snapshot):
                          "nothing is for sale and there is no team, careers "
                          "page or address"])
 
+    # One document and its translations. See `single_document_site`; every
+    # rule above asks for a structure such a site does not have, and every
+    # rule below would give it advice for a body it is not.
+    if not (facts["sells"] or facts["has_basket"] or facts["declared_places"]
+            or facts["has_team_page"] or said & ORG_IDENTITY_TYPES):
+        single = single_document_site(snapshot)
+        if single:
+            editions, others = single
+            return SiteKind(PERSONAL_OR_ACADEMIC, "medium", [
+                "the crawl found one document{}{}".format(
+                    "" if editions < 2 else " in {} language editions".format(editions),
+                    " and nothing else" if not others else
+                    " and {} other address{}".format(others, "" if others == 1 else "es")),
+                "nothing is for sale, and there is no organisation markup, contact "
+                "or about page, or address"])
+
     if said & _PUBLICATION_JSONLD and not facts["sells"]:
         return SiteKind(PUBLICATION, "medium",
                         ["the site declares itself a publication in its own markup",
@@ -5968,6 +6352,22 @@ def site_kind(snapshot):
         return SiteKind(PUBLICATION, "medium",
                         ["most of the crawled content pages are dated articles",
                          "nothing is for sale and no address is declared"])
+
+    # Selling on the site outranks having somewhere to visit. A furniture
+    # retailer with product pages, a basket and two showrooms was typed a local
+    # business on the strength of one showroom page, and every tailored line
+    # after that - map listings, a trade association's directory - was advice
+    # for a shop you walk into, given to a shop whose trade is its own website.
+    # A local business is one that does not sell from its pages; see
+    # `sells_online` for what counts as doing so.
+    if facts["sells_online"] and (facts["sells"] or facts["has_basket"]):
+        places = facts["declared_places"] or "location" in facts["page_types"]
+        return SiteKind(
+            ONLINE_SELLER,
+            "high" if facts["sells"] and facts["has_basket"] else "medium",
+            ["the site sells from its own pages ({})".format(facts["sells_online"]),
+             "it also names places to visit, which a retailer with showrooms or "
+             "stores does" if places else "it declares no place to visit"])
 
     if facts["declared_places"] or "location" in facts["page_types"]:
         return SiteKind(LOCAL_BUSINESS, "high",
@@ -6991,10 +7391,16 @@ def detect_page_type(url, html_meta):
     is_a_link_list = reads_as_a_link_list({
         "links": html_meta.get("links") or {}, "text": text})
 
+    # A sign-up address is a pricing page only where the page prices
+    # something. See `_SIGN_UP_PRICING_PATTERN`.
+    not_pricing = _signs_up_without_a_price(path, text)
+
     # Unambiguous URL slugs win outright. A pricing page that also carries
     # Product schema is still a pricing page, and classifying it as a product
     # would make every downstream expectation wrong.
     for page_type, pattern in _URL_TYPE_PATTERNS:
+        if page_type == "pricing" and not_pricing:
+            continue
         if page_type in _STRONG_URL_TYPES and re.search(pattern, path):
             return page_type
 
@@ -7010,7 +7416,10 @@ def detect_page_type(url, html_meta):
         return "category"
     if jsonld_types & {"product", "productgroup"}:
         return "product"
-    if jsonld_types & {"faqpage", "qapage"}:
+    # Unless the questions are one block on a page about something else. See
+    # `_reads_as_a_page_of_questions`.
+    if jsonld_types & {"faqpage", "qapage"} and _reads_as_a_page_of_questions(
+            headings, html_meta.get("title") or ""):
         return "faq"
     if jsonld_types & {"blogposting", "newsarticle", "article", "techarticle"}:
         # Unless the page is the index of those articles. A blog template
@@ -7024,6 +7433,8 @@ def detect_page_type(url, html_meta):
         return "location"
 
     for page_type, pattern in _URL_TYPE_PATTERNS:
+        if page_type == "pricing" and not_pricing:
+            continue
         if re.search(pattern, path):
             # The product/category distinction is decided by the page, not the
             # slug, and it runs both ways: `/products` with no buying
@@ -7087,6 +7498,56 @@ def detect_page_type(url, html_meta):
     if _looks_like_product_detail(lower_text, html_meta):
         return "product"
     return "other"
+
+
+# The pricing slugs that name joining rather than paying. A national museum's
+# five membership sign-up pages - choose a membership type, agree to the terms,
+# enter your details - sit at `/membership.do` and carry forms and no figure
+# at all; all five were typed `pricing`, and the sign-up form became the site's
+# "Pricing" key page. The address word is the evidence for a pricing page only
+# where it is the word for a price; a word for signing up needs the page to
+# price something before it means the same.
+_SIGN_UP_PRICING_SLUGS = ("subscribe", "membership", "memberships")
+_SIGN_UP_PRICING_PATTERN = _url_type_pattern("pricing", _SIGN_UP_PRICING_SLUGS)
+_PRICE_WORD_PATTERN = _url_type_pattern("pricing", tuple(
+    slug for page_type, slugs in _URL_TYPE_SLUGS if page_type == "pricing"
+    for slug in slugs if slug not in _SIGN_UP_PRICING_SLUGS))
+
+
+def _signs_up_without_a_price(path, text):
+    """Is this a sign-up address whose page states no price?"""
+    if not re.search(_SIGN_UP_PRICING_PATTERN, path or ""):
+        return False
+    if re.search(_PRICE_WORD_PATTERN, path or ""):
+        return False
+    return not find_prices(text or "", limit=1)
+
+
+# A heading or title that says the page is the questions.
+_NAMES_ITSELF_A_FAQ_RE = re.compile(
+    r"\b(?:faqs?|frequently\s+asked\s+questions|q\s*&\s*a)\b", re.I)
+
+
+def _reads_as_a_page_of_questions(headings, title):
+    """Does a page declaring FAQPage markup read as a page of questions?
+
+    The markup describes a block, and a block can sit on any page. An app's
+    landing page - what the app does, why to download it, and a "Frequently
+    asked questions" section at the foot - declares FAQPage for that section,
+    was typed `faq` on the markup alone, and a finding then counted it as "1
+    of the 2 faq pages". The page says what it is in its headings: its H1 or
+    its title naming the questions, questions for most of its headings, or no
+    sections at all beside them.
+    """
+    headings = headings or {}
+    if _NAMES_ITSELF_A_FAQ_RE.search(title or "") or any(
+            _NAMES_ITSELF_A_FAQ_RE.search(str(h)) for h in headings.get("h1") or []):
+        return True
+    sections = list(headings.get("h2") or []) + list(headings.get("h3") or [])
+    if not headings.get("h2"):
+        return True
+    questions = sum(1 for heading in sections if is_question_heading(heading))
+    return questions * 2 >= len(sections)
 
 
 _SECTION_ROOTS = frozenset({
@@ -8727,7 +9188,10 @@ _DEFINITION_COPULAR = (
 # findings below used that very sentence as the brand's description.
 DEFINING_VERBS = ("provides", "offers", "makes", "builds", "publishes",
                   "sells", "designs", "runs", "helps", "lets", "gives",
-                  "delivers", "supplies", "creates", "tracks", "maintains")
+                  "delivers", "supplies", "creates", "tracks", "maintains",
+                  # A maker's verbs, which a furniture or a clothing brand
+                  # uses where a software company writes "builds".
+                  "crafts", "produces", "manufactures")
 
 # What may not follow a defining verb, because the sentence reports an event
 # rather than saying what the brand is. A design studio's press page reads
@@ -8822,6 +9286,18 @@ _DEFINITION_HEAD_RE = re.compile(
 # more of somebody else's clause.
 _DEFINITION_DETERMINERS = frozenset({"the", "a", "an", "each", "every"})
 
+# The one clause that may stand in front of the name: a past participle of
+# coming into being or being placed, its complement, and the comma that closes
+# it. "Founded in Singapore in 2013, <Brand> creates quality furniture for real
+# life" was refused because two words - and a year - stood before the name, and
+# the report put "no page states in one sentence what the brand is" second in
+# its Start-here list, over that sentence. The phrase describes the subject it
+# precedes; it is not somebody else's clause. The predicate guards - slogan,
+# news, event - still run on what follows the verb.
+_LEADING_PARTICIPLE_RE = re.compile(
+    r"^\W*(?:founded|established|started|launched|born|based|headquartered|"
+    r"incorporated|created|built|designed|made)\b[^,;:.!?]{1,120},\s*$", re.I)
+
 # English function words, so a predicate can be judged on the nouns it carries.
 #
 # "one" sits beside "some", "any", "both" and "each" for the same reason they
@@ -8880,7 +9356,8 @@ _DEFINITION_NUMBER_RUN_RE = re.compile(r"\b\d+\s+\d+\b")
 _DEFINITION_GLUE = frozenset("""
 is are was were be been being remains has have had provides offers makes builds
 publishes sells designs runs helps lets gives delivers supplies creates tracks
-maintains a an the of for with to in on at by from and or that which who whose
+maintains crafts produces manufactures
+a an the of for with to in on at by from and or that which who whose
 where when it its our your their
 """.split())
 
@@ -9064,6 +9541,12 @@ def _starts_a_sentence(text, index):
     it, or any digit, and the name is inside somebody else's clause again.
     """
     head = _DEFINITION_HEAD_RE.search(text[:index] or "").group(0)
+    # "Founded in <city> in 2013, <Brand> creates ..." - a participle phrase
+    # set off by its comma, and the name after it still the subject. The
+    # phrase carries the digits a founding year is written in, which is why
+    # it is read before the digit test below and not after it.
+    if _LEADING_PARTICIPLE_RE.match(head):
+        return True
     if any(ch.isdigit() for ch in head):
         return False
     words = [word.lower() for word in letter_runs(head, 1)]

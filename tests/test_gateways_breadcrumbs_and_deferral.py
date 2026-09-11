@@ -478,7 +478,7 @@ def test_the_verdict_names_the_wikidata_item_another_skill_found():
                                 "wikidata_item_exists": True}, "Northwind Anvils")
     assert "Q4242424" in verdict, verdict
     assert "nothing off the site corroborates it" not in verdict, verdict
-    assert "no fact about this brand it can safely repeat" not in verdict, verdict
+    assert "nothing it can safely repeat about who the brand is" not in verdict, verdict
 
 
 def test_the_appendix_says_how_many_checks_the_marketplace_has():

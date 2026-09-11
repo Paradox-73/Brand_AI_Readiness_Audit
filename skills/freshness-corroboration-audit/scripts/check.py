@@ -310,9 +310,15 @@ def run(snapshot, now=None, allow_network=True, time_budget=None):
 
     _check_article_freshness(result, snapshot, pages, now, fetcher)
     _check_date_signals(result, pages, snapshot)
-    _check_copyright_year(result, pages, now, brand.get("name") or "")
+    _check_copyright_year(result, pages, now, brand.get("name") or "",
+                          brand.get("host") or urlparse(snapshot.get("origin") or "").netloc)
     _check_stale_year_references(result, pages, now, brand.get("name") or "")
-    profiles = _check_authoritative_profiles(result, snapshot, pages)
+    # Every readable page, not the content pages. An account is linked from the
+    # site's chrome, and a software project's own repository account sits in
+    # the header of its download page, which the content filter sets aside - so
+    # the report led with "No off-site profile is linked" about a project whose
+    # every download page links its account.
+    profiles = _check_authoritative_profiles(result, snapshot, pages_of(snapshot))
     _check_sitemap_lastmod(result, snapshot, now)
     _check_fact_consistency(result, snapshot, pages)
 
@@ -706,9 +712,27 @@ _UTILITY_PAGE_LABELS = (
     "登录", "注册", "预约", "预订",
     "connexion", "inscription", "réservation", "anmelden", "registrieren", "reservierung",
     "iniciar sesión", "registro", "reserva",
+    # Describing an app, a service or a facility the visitor uses. A museum's
+    # page introducing its exhibition-guide app - titled "...>전시 해설 안내>
+    # 전시안내앱" - sat in a dated section and was counted among the pages
+    # "where a date is expected". It says what the app does and where to get
+    # it; it was never written on a date and no reader asks when.
+    "app", "apps", "mobile app", "mobile apps", "our app", "the app", "audio guide",
+    "facilities", "amenities", "visitor facilities", "wi-fi", "wifi", "lockers",
+    "cloakroom", "accessibility",
+    "앱", "어플", "애플리케이션", "편의시설", "시설 안내",
+    "アプリ", "施設案内", "館内施設",
+    "应用", "應用", "设施", "設施",
 )
 _UTILITY_LABEL_KEYS = frozenset(" ".join(label.casefold().split())
                                 for label in _UTILITY_PAGE_LABELS)
+
+# The same labels as the last word of a compound. Korean, Japanese and Chinese
+# build "exhibition-guide app" as one word ending in the word for app, so
+# `전시안내앱` is `앱` with the thing it guides in front of it. Only the scripts
+# that write compounds without spaces; "Snapp" is not an app page.
+_UTILITY_LABEL_ENDINGS = ("앱", "어플", "애플리케이션", "편의시설", "アプリ", "施設案内",
+                          "应用", "應用")
 
 # The same pages, as the words an address spells them with.
 # `/contents/membership.do?schM=public_signup` and `/...?menuId=subway-map`
@@ -737,6 +761,8 @@ def _label_is_a_utility(label):
     if not key:
         return False
     if key in _UTILITY_LABEL_KEYS:
+        return True
+    if any(key.endswith(ending) for ending in _UTILITY_LABEL_ENDINGS):
         return True
     return any(key.startswith(word) and len(key) - len(word) <= 2
                for word in _UTILITY_LABEL_KEYS
@@ -774,6 +800,65 @@ def _a_page_for_doing_something_else(page):
     headings = page.get("headings") or {}
     labels += list(headings.get("h1") or []) + list(headings.get("h2") or [])[:1]
     return any(_label_is_a_utility(label) for label in labels)
+
+
+# The last path segment of a page that says who the site is: its story, its
+# history, its mission. Such a page is the about page, and it is not written
+# on a date.
+_ABOUT_THE_SITE_SEGMENTS = frozenset({
+    "story", "our-story", "brand-story", "about", "about-us", "who-we-are", "our-history",
+    "history", "mission", "our-mission", "heritage", "our-heritage", "company",
+})
+
+
+def _a_page_about_the_site(page):
+    """Is this page the site's own story or about page, by its address or its type?"""
+    if page.get("page_type") == "about":
+        return True
+    segments = [s for s in urlparse(page.get("url") or "").path.lower().split("/") if s]
+    return bool(segments) and re.sub(r"\.(?:html?|php|aspx?)$", "", segments[-1]) \
+        in _ABOUT_THE_SITE_SEGMENTS
+
+
+# How many of the crawled pages have to print one date before it is the
+# template's rather than any page's. Four in five, and never fewer than three
+# pages: two articles published on the same day are not a clock.
+_CHROME_DATE_SHARE = 0.8
+_CHROME_DATE_MIN_PAGES = 3
+
+
+def _dates_on_most_pages(pages):
+    """The visible dates printed on most of these pages, as one string each.
+
+    A site whose header shows today's date puts that one date on every page,
+    and each page then counted as dated - an article with no date of its own
+    among them - because a date appears on it. The extractor already sets
+    aside a date beside a copyright sign or inside the footer; a date repeated
+    across the crawl is the same furniture, and only the whole crawl can see
+    that.
+    """
+    if len(pages) < _CHROME_DATE_MIN_PAGES:
+        return frozenset()
+    counts = {}
+    for page in pages:
+        for value in set((page.get("dates") or {}).get("visible") or []):
+            counts[value] = counts.get(value, 0) + 1
+    return frozenset(value for value, seen in counts.items()
+                     if seen >= _CHROME_DATE_SHARE * len(pages))
+
+
+def _carries_its_own_date(page, chrome=frozenset()):
+    """Does this page carry a date that is its own, not the template's?"""
+    dates = page.get("dates") or {}
+    if not dates.get("has_any"):
+        return False
+    if not chrome:
+        return True
+    if (dates.get("jsonld_date_published") or dates.get("jsonld_date_modified")
+            or dates.get("machine_readable")):
+        return True
+    visible = set(dates.get("visible") or [])
+    return not visible or bool(visible - chrome)
 
 
 def _check_date_signals(result, pages, snapshot=None):
@@ -817,6 +902,11 @@ def _check_date_signals(result, pages, snapshot=None):
     items = [p for p in pages if not is_listing_page(p) and not _lists_its_own_section(p)]
     listing_count = len(pages) - len(items)
     result.signal("listing_pages_not_expected_to_carry_a_date", listing_count)
+    # A date the template prints on every page - a clock in the header, today's
+    # date beside the menu - is the day the page was served, not a date the
+    # page was written on. See `_dates_on_most_pages`.
+    chrome = _dates_on_most_pages(pages)
+    result.signal("dates_repeated_across_the_site", sorted(chrome))
 
     section_pages, section_dated = {}, {}
     for page in items:
@@ -824,7 +914,7 @@ def _check_date_signals(result, pages, snapshot=None):
         if not section:
             continue
         section_pages[section] = section_pages.get(section, 0) + 1
-        if (page.get("dates") or {}).get("has_any"):
+        if _carries_its_own_date(page, chrome):
             section_dated[section] = section_dated.get(section, 0) + 1
     # Two dated pages, and at least half the section. One was enough, and
     # `has_any` is true for any full date printed anywhere in the body - so a
@@ -850,10 +940,18 @@ def _check_date_signals(result, pages, snapshot=None):
                and _a_page_for_doing_something_else(p)]
     result.signal("utility_pages_not_expected_to_carry_a_date", len(utility))
     utility_urls = {p.get("url") for p in utility}
+    # A brand's story page is its about page, whatever the page typer called it.
+    # A fashion retailer's `/<region>/story` pages were typed as articles by
+    # their address and graded as "undated articles" - the page that says who
+    # the company is, told to add a published date. See `_a_page_about_the_site`.
+    about_pages = [p for p in items if _a_page_about_the_site(p)]
+    result.signal("about_pages_not_expected_to_carry_a_date", len(about_pages))
+    about_urls = {p.get("url") for p in about_pages}
     expect_dates = [p for p in items
-                    if p["page_type"] in ("article", "press")
-                    or (_section_of(p["url"]) in dated_sections
-                        and p.get("url") not in utility_urls)]
+                    if p.get("url") not in about_urls
+                    and (p["page_type"] in ("article", "press")
+                         or (_section_of(p["url"]) in dated_sections
+                             and p.get("url") not in utility_urls))]
     if not expect_dates:
         result.skip("date-signals-present",
                     "no article or press page was crawled, and no section of the site holds "
@@ -878,7 +976,7 @@ def _check_date_signals(result, pages, snapshot=None):
     # it did would be the invented corroboration this field exists to stop.
     has_sitemap = bool((snapshot or {}).get("sitemaps"))
     lastmod = _sitemap_lastmod_by_page(snapshot)
-    undated = [p for p in expect_dates if not (p.get("dates") or {}).get("has_any")]
+    undated = [p for p in expect_dates if not _carries_its_own_date(p, chrome)]
     result.signal("no_date_signals", len(undated) == len(expect_dates))
     dated_only_in_sitemap = [p for p in undated if _page_key(p.get("url")) in lastmod]
     # The machine-readable half of what `has_any` combines, read apart. A page
@@ -1046,7 +1144,85 @@ def _copyright_notices(page):
     return out
 
 
-def _notice_names_another_party(line, brand_name=""):
+def _notice_names_the_site(line, brand_name="", host=""):
+    """Does this copyright line name the audited site, by its name or its address?
+
+    The name alone was the only test, and the name this audit arrives with can
+    be the whole of the homepage's `<title>` - "The Programming Language
+    <Name>" - which no copyright line ever repeats. A project's own notice,
+    "(c) 1994-2026 <name>.org, <University>", was then read as crediting
+    somebody else, left out, and a newspaper's line reproduced on the
+    project's press page was reported as the site's stale footer instead.
+
+    A notice that writes the site's own address, or the word its address is
+    built from, is the site's notice: that is how a great many sites sign
+    their footers, and it is the one spelling of the name the site cannot have
+    got wrong.
+    """
+    if speaks_about_itself(line, brand_name):
+        return True
+    host = strip_www(str(host or "").lower())
+    if not host or not line:
+        return False
+    lowered = line.lower()
+    if host in lowered:
+        return True
+    words = {w.lower() for w in letter_runs(line, 2)}
+    return any(label in words for label in host_name_forms(host))
+
+
+def _notice_parties(line, brand_name="", host=""):
+    """The words this notice names somebody with, beyond its years and boilerplate."""
+    tail = _COPYRIGHT_NOTICE_RE.sub(" ", line or "")
+    return [w for w in letter_runs(tail, 2) if w.lower() not in _NOTICE_BOILERPLATE]
+
+
+# How many different parties a page's notices have to credit before the page is
+# a collection of other people's material. Two: a site's own footer carries one
+# notice, and a page reprinting press clippings carries one per clipping.
+_REPRODUCED_MATERIAL_PARTIES = 2
+
+# The words a page puts in front of material it is reproducing.
+_REPRODUCED_FROM_RE = re.compile(
+    r"\b(?:reprint(?:ed)?\s+from|reproduced\s+(?:from|by\s+permission)|courtesy\s+of"
+    r"|republished\s+from|originally\s+published\s+in)\b", re.I)
+_REPRODUCED_FROM_WINDOW = 160
+
+
+def _reproduces_other_material(page, notices, brand_name="", host=""):
+    """Is this a page of reproduced clippings, whose notices credit their publishers?
+
+    A project's press page reprints thirty newspaper and magazine articles,
+    each followed by that publication's notice - "Copyright (c) 2015 <paper>.
+    <All rights reserved in Portuguese>." A one-word remainder is let through
+    as possibly the site's own name in a spelling this audit does not know
+    (see `_NOTICE_OTHER_PARTY_WORDS`), so the newest clipping's year was
+    reported as the site's own footer year, eleven years stale, on a site whose
+    own notice reads 2026.
+
+    Two readings, either of which settles it: the notices on the page credit
+    two or more different parties, or the page introduces a notice as the
+    credit of something reprinted. On such a page only a notice that names the
+    site is the site's.
+    """
+    parties = set()
+    for _years, line, _at_end in notices:
+        if _notice_names_the_site(line, brand_name, host):
+            continue
+        named = tuple(w.lower() for w in _notice_parties(line, brand_name, host))
+        if named:
+            parties.add(named)
+    if len(parties) >= _REPRODUCED_MATERIAL_PARTIES:
+        return True
+    text = page.get("text") or page.get("body_text") or ""
+    for match in _COPYRIGHT_NOTICE_RE.finditer(text):
+        before = text[max(0, match.start() - _REPRODUCED_FROM_WINDOW):match.start()]
+        if _REPRODUCED_FROM_RE.search(before):
+            return True
+    return False
+
+
+def _notice_names_another_party(line, brand_name="", host=""):
     """Does this copyright line credit somebody other than the audited site?
 
     The class this belongs to has produced a wrong finding on every batch of
@@ -1062,15 +1238,16 @@ def _notice_names_another_party(line, brand_name=""):
     line names anyone at all: words beyond the year and the boilerplate. This
     is deliberately script-neutral - it counts words, it does not read them -
     because the sites this gets wrong are the ones this audit cannot read.
+
+    `host` adds the site's own address to what counts as naming the site. See
+    `_notice_names_the_site`.
     """
-    if speaks_about_itself(line, brand_name):
+    if _notice_names_the_site(line, brand_name, host):
         return False
-    tail = _COPYRIGHT_NOTICE_RE.sub(" ", line or "")
-    words = [w for w in letter_runs(tail, 2) if w.lower() not in _NOTICE_BOILERPLATE]
-    return len(words) >= _NOTICE_OTHER_PARTY_WORDS
+    return len(_notice_parties(line, brand_name, host)) >= _NOTICE_OTHER_PARTY_WORDS
 
 
-def _check_copyright_year(result, pages, now, brand_name=""):
+def _check_copyright_year(result, pages, now, brand_name="", host=""):
     result.check("footer-copyright-year")
     years = set()
     carriers = []
@@ -1086,7 +1263,11 @@ def _check_copyright_year(result, pages, now, brand_name=""):
             continue
         notices = _copyright_notices(page)
         if notices:
-            mine = [n for n in notices if not _notice_names_another_party(n[1], brand_name)]
+            if _reproduces_other_material(page, notices, brand_name, host):
+                mine = [n for n in notices if _notice_names_the_site(n[1], brand_name, host)]
+            else:
+                mine = [n for n in notices
+                        if not _notice_names_another_party(n[1], brand_name, host)]
             someone_elses.extend(n[1] for n in notices if n not in mine)
             if not mine:
                 continue
@@ -1242,8 +1423,39 @@ def _is_archive_or_index(page):
     return False
 
 
-def _stale_currency_claim(page, now, brand_name):
-    """(year, sentence) where this page claims a currency it no longer has."""
+# "As of" and a whole calendar date: a figure stamped with the day it was
+# measured. A database engine's size page reads "As of 2023-07-04, the size of
+# <Name> library is generally less than 1 megabyte", and the advice was to
+# "update or remove the year" - which would delete the one thing that makes the
+# figure checkable. A figure that says when it was true is a correctly dated
+# fact; the currency claim this check is for says "as of 2023" and means now.
+_AS_OF_A_FULL_DATE_RE = re.compile(
+    r"\bas\s+of\s+(?:(?:19|20)[0-9]{2}-[0-9]{1,2}-[0-9]{1,2}"
+    r"|[0-9]{1,2}(?:st|nd|rd|th)?\s+[a-z]{3,9}\.?,?\s+(?:19|20)[0-9]{2}"
+    r"|[a-z]{3,9}\.?\s+[0-9]{1,2}(?:st|nd|rd|th)?,?\s+(?:19|20)[0-9]{2}"
+    r"|[0-9]{1,2}/[0-9]{1,2}/(?:19|20)[0-9]{2})", re.I)
+
+
+def _a_dated_measurement(sentence, match):
+    """Is this "as of" a full date stamped on a figure the sentence gives?
+
+    Both halves. The date has to be a whole day, and the sentence has to carry
+    a number other than that date - a size, a count, a share - for the date
+    to be dating.
+    """
+    stamp = _AS_OF_A_FULL_DATE_RE.match(sentence, match.start())
+    if not stamp:
+        return False
+    rest = sentence[:stamp.start()] + " " + sentence[stamp.end():]
+    return bool(re.search(r"[0-9]", rest))
+
+
+def _stale_currency_claim(page, now, brand_name, measured=None):
+    """(year, sentence) where this page claims a currency it no longer has.
+
+    `measured`, when a list, collects the dated measurements set aside so the
+    caller can say so.
+    """
     if _is_archive_or_index(page):
         return None
     text = page.get("body_text") or page.get("text") or ""
@@ -1260,7 +1472,13 @@ def _stale_currency_claim(page, now, brand_name):
             continue
         for match in _CURRENCY_CLAIM_RE.finditer(sentence):
             year = int(match.group(1))
-            if floor <= year <= ceiling and (best is None or year > best[0]):
+            if not floor <= year <= ceiling:
+                continue
+            if _a_dated_measurement(sentence, match):
+                if measured is not None:
+                    measured.append(page.get("url"))
+                continue
+            if best is None or year > best[0]:
                 best = (year, truncate(sentence.strip(), 160))
     return best
 
@@ -1268,15 +1486,25 @@ def _stale_currency_claim(page, now, brand_name):
 def _check_stale_year_references(result, pages, now, brand_name=""):
     result.check("stale-year-references")
     offenders = []
+    measured = []
     for page in pages:
-        claim = _stale_currency_claim(page, now, brand_name)
+        claim = _stale_currency_claim(page, now, brand_name, measured)
         if claim:
             offenders.append((page, claim[0], claim[1]))
+    measured = sorted(set(u for u in measured if u))
+    result.signal("dated_measurements_not_counted", measured)
+    measured_note = (
+        " {} a figure stamped \"as of\" a whole calendar date ({}), which dates the figure "
+        "rather than claiming it is current; refreshing the figure is worth doing, removing "
+        "the date is not".format(
+            "1 page gives" if len(measured) == 1 else "{} pages give".format(len(measured)),
+            ", ".join(example_urls(measured))) if measured else "")
     if not offenders:
         result.skip("stale-year-references",
                     'no page claims to be current as of a year more than {} years old. Dated '
                     '"last updated" stamps, citations, credits and archive indexes carry years '
-                    "without claiming currency, and are not counted".format(AS_OF_LAG_YEARS))
+                    "without claiming currency, and are not counted.{}".format(
+                        AS_OF_LAG_YEARS, measured_note))
         return
 
     result.add(
@@ -1793,13 +2021,39 @@ _REGISTER_ENTRY_STEP = (
     "asked who is behind the site finds an answer that is not the site itself.")
 
 
-def _how_to_widen_the_footprint(kind):
-    """The steps for claiming more profiles, named for this kind of site."""
+# A site that is one document - an essay, a manifesto, a single reference
+# page, published in however many languages. A one-page essay that links its
+# own source repository in its footer was told to "cover the obvious ones
+# first: LinkedIn, Instagram, YouTube, X, Facebook" and to claim a register
+# entry "where organisations like this one are listed". An essay has no
+# employer page and is listed in no register; the places that say the same
+# name about it are where its source lives, a knowledge base, and the forums
+# that link it when somebody asks the question it answers.
+_PLATFORMS_FOR_ONE_DOCUMENT = (
+    "the repository host its source lives on, Wikidata, and the forums, wikis and "
+    "communities where people already link to it")
+
+
+def _how_to_widen_the_footprint(kind, one_document=False):
+    """The steps for claiming more profiles, named for this kind of site.
+
+    `one_document` is the site being a single document; see
+    `_one_document_site`. It outranks an undetermined kind, and never a kind
+    this audit determined, because a business with a one-page site is still a
+    business.
+    """
     platforms = _PLATFORMS_WHATEVER_THE_SITE_IS
     for name, named_for_that_kind in _PLATFORMS_TO_CLAIM:
         if kind.is_certainly(name):
             platforms = named_for_that_kind
             break
+    # A document outranks "a person, a university or a research group": the
+    # classifier reaches that kind for a one-page essay because nothing else
+    # fits, and a researcher identifier and a staff directory are no more an
+    # essay's than an employer page is.
+    if one_document and not kind.is_certainly(
+            LOCAL_BUSINESS, ONLINE_SELLER, ORGANISATION, PUBLIC_BODY, PUBLICATION, PROJECT):
+        platforms = _PLATFORMS_FOR_ONE_DOCUMENT
     steps = [
         "Claim the profiles that apply to your category. Breadth is what matters here, not "
         "prestige: the brands assistants name are on more platforms, not better ones.",
@@ -1813,7 +2067,8 @@ def _how_to_widen_the_footprint(kind):
     #
     # Which wording is `is_certainly`: a company record is named only where
     # the site has been determined to be a business. See `_COMPANY_RECORD_STEP`.
-    if kind.might_be(LOCAL_BUSINESS, ONLINE_SELLER, ORGANISATION, PUBLICATION):
+    if (kind.might_be(LOCAL_BUSINESS, ONLINE_SELLER, ORGANISATION, PUBLICATION)
+            and not (one_document and not kind.determined)):
         steps.append(_COMPANY_RECORD_STEP if kind.is_certainly(LOCAL_BUSINESS, ONLINE_SELLER)
                      else _REGISTER_ENTRY_STEP)
     steps += [
@@ -1824,6 +2079,119 @@ def _how_to_widen_the_footprint(kind):
         "Link back to the site from each profile, so the connection is stated from both ends.",
     ]
     return steps
+
+
+# Hosts where the first path segment is an account and the second is one of its
+# repositories. The list the extractor reads repository owners from.
+_REPOSITORY_HOSTS = ("github.com", "gitlab.com", "bitbucket.org", "codeberg.org",
+                     "sourceforge.net", "gitea.com")
+
+
+def _own_repository(pages, names, host=""):
+    """(platform, url) of a repository the site links whose name is the site's own.
+
+    The extractor counts a repository link as the site's account when the
+    *account* segment names the site, or when one account is linked twice.
+    A one-page essay's footer reads "Source on GitHub" and links
+    `<repository host>/<a person>/<the site's own address>`: the account is the
+    author's, the repository is the site, and it is linked once per page - so
+    it was never counted, and the report said the site links no off-site
+    profile while the site's own source was one click away.
+
+    The repository segment is read here, and it has to be the site's name or
+    its whole address - not a word that merely contains it - so a dependency
+    the site credits is still somebody else's.
+    """
+    own = {brand_key(name) for name in names if name}
+    bare_host = strip_www(str(host or "").lower())
+    if bare_host:
+        own.add(brand_key(bare_host))
+        own.update(brand_key(label) for label in host_name_forms(bare_host))
+    own.discard("")
+    if not own:
+        return None
+    for page in pages:
+        links = page.get("links") or {}
+        for bucket in ("footer", "nav", "external"):
+            for link in links.get(bucket) or []:
+                url = link.get("url") if isinstance(link, dict) else link
+                parts = urlparse(str(url or ""))
+                link_host = strip_www(parts.netloc.lower())
+                if link_host not in _REPOSITORY_HOSTS:
+                    continue
+                segments = [s for s in parts.path.split("/") if s]
+                if len(segments) < 2:
+                    continue
+                if brand_key(re.sub(r"\.git$", "", segments[1])) in own:
+                    return (SOCIAL_PLATFORMS.get(link_host) or link_host,
+                            "https://{}/{}/{}".format(link_host, segments[0], segments[1]))
+    return None
+
+
+# A path segment that names a language edition: `/de/`, `/pt-br/`, `/fil/`.
+_EDITION_SEGMENT_RE = re.compile(r"^[a-z]{2,3}(?:[-_][a-z0-9]{2,4})?$", re.I)
+
+# How many words a page needs before it is a document rather than a stub.
+_ONE_DOCUMENT_MIN_WORDS = 150
+
+
+def _document_key(url):
+    """The path of a page with a leading language-edition segment set aside."""
+    segments = [s for s in urlparse(str(url or "")).path.split("/") if s]
+    if segments and _EDITION_SEGMENT_RE.match(segments[0]):
+        segments = segments[1:]
+    return "/".join(segments)
+
+
+def _one_document_site(pages, every_record=()):
+    """Is this site a single document, published in one or more languages?
+
+    `every_record` is the whole crawl, content or not, so a link to an address
+    the crawl fetched and set aside - a copy of the page reached through a
+    broken relative link - is resolved to the document it served.
+
+    Three conditions, all read off the crawl. Every page with enough words to
+    be a document is the same document - one path once its language segment is
+    set aside, or the same text word for word. No page links to a page of the
+    site that is not an edition of it, so the crawl did not merely stop short
+    of the rest. And at least one page has enough words to be a document.
+
+    A one-page essay published in nine languages is the case: nine pages typed
+    home or other, the same essay in each, no internal link anywhere.
+    """
+    bodies, keys, crawled = {}, set(), {}
+    substantial = 0
+    content = {id(page) for page in pages}
+    for page in list(pages) + [p for p in every_record or () if id(p) not in content]:
+        body = " ".join((page.get("body_text") or "").split())
+        key = _document_key(page.get("final_url") or page.get("url"))
+        # A second address serving the same text is the same document, which
+        # is what a relative link resolved against an edition's path produces.
+        if body and body in bodies:
+            key = bodies[body]
+        elif body:
+            bodies[body] = key
+        for address in (page.get("url"), page.get("final_url")):
+            if address:
+                crawled[str(address).rstrip("/")] = key
+        if id(page) not in content:
+            continue
+        words = page.get("word_count") or len(body.split())
+        if words < _ONE_DOCUMENT_MIN_WORDS:
+            continue
+        substantial += 1
+        keys.add(key)
+    if not substantial or len(keys) != 1:
+        return False
+    for page in pages:
+        for link in (page.get("links") or {}).get("internal") or []:
+            url = str((link.get("url") if isinstance(link, dict) else link) or "")
+            if not url:
+                continue
+            key = crawled.get(url.split("#")[0].rstrip("/"), _document_key(url))
+            if key not in keys | {""}:
+                return False
+    return True
 
 
 def _check_authoritative_profiles(result, snapshot, pages):
@@ -1880,6 +2248,14 @@ def _check_authoritative_profiles(result, snapshot, pages):
     for platform, url in sorted(from_llms_txt.items()):
         profiles.setdefault(platform, url)
     result.signal("profiles_declared_in_llms_txt", sorted(from_llms_txt))
+    # The site's own source repository, named after the site. See
+    # `_own_repository`.
+    repository = _own_repository(pages, names, brand.get("host") or "")
+    if repository and repository[0] not in profiles:
+        profiles[repository[0]] = repository[1]
+    result.signal("own_repository", repository[1] if repository else "")
+    one_document = _one_document_site(pages_of(snapshot), snapshot.get("pages") or ())
+    result.signal("one_document_site", one_document)
 
     authoritative = {k: v for k, v in profiles.items() if k in AUTHORITATIVE}
     result.signal("profile_platforms", sorted(profiles.keys()))
@@ -1936,7 +2312,7 @@ def _check_authoritative_profiles(result, snapshot, pages):
         mechanism="D", root_cause="weak-corroboration",
         summary="Claim more of the places that independently confirm the brand exists, and list "
                 "every one of them in Organization `sameAs`.",
-        how_to_fix=_how_to_widen_the_footprint(kind),
+        how_to_fix=_how_to_widen_the_footprint(kind, one_document),
         effort="medium", owner="marketing",
         rationale="A fact stated only on the brand's own site is one source's word "
                   "for it. Each additional profile that repeats the same name and description is "

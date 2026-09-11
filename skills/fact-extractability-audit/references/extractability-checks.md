@@ -70,8 +70,9 @@ same report quotes.
 - **Threshold:** none. Presence or absence.
 - **Declines:** multiple H1s and skipped heading levels are **measured against nothing** and
   the pass says so in as many words. Reporting them fired this check on 27 of 29 real sites.
-- **Ceiling:** **medium** at medium confidence, single tier — nothing corroborates it, and an
-  H1 this audit cannot see is still an H1. `mechanism="C"`,
+- **Ceiling:** **medium** at medium confidence — nothing corroborates it, and an H1 this
+  audit cannot see is still an H1. **low** when neither the homepage nor a quarter of the
+  crawled pages is affected. The title states the count. `mechanism="C"`,
   `root_cause="heading-structure"`.
 
 ### `headings-name-their-topic` — do the H2s use words the page uses?

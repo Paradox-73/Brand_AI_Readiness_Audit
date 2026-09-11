@@ -928,6 +928,20 @@ TEMPLATE_ARTEFACT_PATTERNS = (
     # `_template_artefacts_by_page`.
     ("shortcode",
      re.compile(r"\[[a-z][a-z0-9_-]{2,39}(?:\s+[a-z0-9_-]+=[^\]\n]{1,80})*\]")),
+    # A translation key printed where its text should be. The i18n libraries
+    # print a fixed phrase and the dotted key when a string has no translation:
+    # `Translation missing: en.general.social.share_on_facebook`, and
+    # `[missing "en.cart.title" translation]`. The phrase is the library's own
+    # output and is the same whatever language the site is written in, and the
+    # key after it has a shape no sentence has - a locale, then dotted
+    # identifiers. A product page printing two of those beside its price was
+    # passed as publishing no template artefact.
+    ("missing translation",
+     re.compile(r"[Tt]ranslation missing:\s*[a-z]{2,3}(?:[-_][A-Za-z]{2,4})?"
+                r"(?:\.[A-Za-z0-9_-]+){1,8}")),
+    ("missing translation",
+     re.compile(r"\[missing \"[a-z]{2,3}(?:[-_][A-Za-z]{2,4})?(?:\.[A-Za-z0-9_-]+){1,8}\" "
+                r"translation\]")),
 )
 
 def _the_pages_own_copy(page):
@@ -1204,9 +1218,11 @@ def _check_template_artefacts(result, pages, artefacts):
 
     if not affected:
         result.skip("unrendered-template-artefact",
-                    "no page prints a template expression, a merge field between sentinels "
-                    "or a shortcode as visible text where its content should be. {} that "
-                    "answered 200 {} read, matched on {} punctuation shapes rather "
+                    "no page prints a template expression, a merge field between sentinels, "
+                    "a shortcode or a missing-translation key as visible text where its "
+                    "content should be. {} that "
+                    "answered 200 {} read, matched on {} shapes - punctuation, and the one "
+                    "fixed phrase translation libraries print for a missing key - rather "
                     "than on any word list, and a string this site prints inside its own "
                     "code samples was not counted anywhere.{}".format(
                         plural(len(pages), "page", "pages"),
@@ -1291,6 +1307,13 @@ def _check_template_artefacts(result, pages, artefacts):
             "it before the page was shown. Either make that script load, or remove the "
             "snippet: as it stands the placeholder is being published as the brand's own "
             "words.")
+    if "missing translation" in kinds:
+        steps.append(
+            "A translation key printed as text means the theme asks for a string its "
+            "language file does not hold. Add the key quoted above to the language file "
+            "for the locale it names (the part before the first dot), or remove the "
+            "element that asks for it - a share button whose label is a key is a label "
+            "nobody can read.")
     steps.append(
         "Check the fix with `curl -s <url> | grep -F '<the string>'`, which should return "
         "nothing. Then look for the same string on the rest of the site: a placeholder in "
@@ -1318,9 +1341,10 @@ def _check_template_artefacts(result, pages, artefacts):
         # report which cannot conjugate its own sentence reads as one that did
         # not check its numbers either.
         evidence="{} of the {} pages that answered 200 {} an unsubstituted template "
-                 "artefact - a template expression, a merge field between sentinels, or a "
-                 "shortcode - as visible text: {}.{}{}{} These are punctuation shapes, not "
-                 "words, so this reading does not depend on the language the site is "
+                 "artefact - a template expression, a merge field between sentinels, a "
+                 "shortcode, or a missing-translation key - as visible text: {}.{}{}{} These "
+                 "are punctuation shapes and one fixed library phrase, not words of the "
+                 "site's own, so this reading does not depend on the language the site is "
                  "written in; a string this site prints inside its own code samples was "
                  "not counted anywhere.{}".format(
                      len(affected), len(pages),
@@ -1329,7 +1353,9 @@ def _check_template_artefacts(result, pages, artefacts):
                      " The same string appears on {} or more pages ({}), so it is in a "
                      "shared template rather than on one page.".format(
                          ARTEFACT_TEMPLATE_PAGES,
-                         ", ".join("`{}`".format(truncate(k, 40))
+                         # Long enough that two keys sharing a prefix
+                         # print as two strings rather than one twice.
+                         ", ".join("`{}`".format(truncate(k, 70))
                                    for k in template_wide[:3]))
                      if template_wide else "",
                      " On {} the placeholder is the whole of the page's content, so there "
@@ -1821,8 +1847,24 @@ def _unassessed_note(snapshot, content_pages):
                 len(others), len(others) + len(judged)))
 
 
+def _copy_in_a_hydration_payload(page):
+    """The hydration payloads a short page carries, where they outweigh what it shows.
+
+    `[name]`, or `[]`. Read off the delivered document, like `shell_verdict`.
+    A payload bigger than the page's whole visible text is holding more than
+    the page shows, and on a short page that surplus is the copy.
+    """
+    spa = static_view(page).get("spa_shell") or {}
+    blobs = list(spa.get("state_blobs") or [])
+    if not blobs:
+        return []
+    shown = max(_delivered_text_len(page), page.get("body_text_len") or 0)
+    return blobs if (spa.get("state_blob_bytes") or 0) > shown else []
+
+
 def _set_aside_note(extraction_failed, could_not_tell, assembled_elsewhere=(), shells=(),
-                    artefact_pages=(), gateways=(), listings=(), redirects=(), frames=()):
+                    artefact_pages=(), gateways=(), listings=(), redirects=(), frames=(),
+                    payloads=()):
     """The short pages this check declined to judge, and why, or "".
 
     A short page dropped without being named is a page the reader believes was
@@ -1887,6 +1929,17 @@ def _set_aside_note(extraction_failed, could_not_tell, assembled_elsewhere=(), s
                              if children else
                              "{}, which links no page beneath it at all".format(url)
                              for url, children in sorted(listings)[:3])))
+    # `payloads` is `[(url, [payload name])]`.
+    if payloads:
+        names = sorted({name for _, found in payloads for name in found})
+        parts.append("{} short in the HTML and {} the hydration payload {}, which holds more "
+                     "than the whole page shows ({}): the copy arrives in that payload and is "
+                     "drawn by the script, so the fix is rendering it into the HTML on the "
+                     "server, and not writing more copy".format(
+                         plural(len(payloads), "page is", "pages are"),
+                         "carries" if len(payloads) == 1 else "carry",
+                         ", ".join("`{}`".format(n) for n in names[:3]),
+                         ", ".join(example_urls([url for url, _ in payloads], 3))))
     if artefact_pages:
         parts.append("{} an unsubstituted template placeholder as its whole content "
                      "({}), reported above: the copy exists in a template that did not "
@@ -2003,8 +2056,10 @@ def _shell_signals_counted(pages):
     blobs = sorted({name for v in views
                     for name in (v.get("spa_shell") or {}).get("state_blobs") or []})
     if blobs:
+        # The word alone, not `plural`: "the state 1 blob `x` is present" is
+        # what `plural` made of it.
         blob = "the state {} {} {} present".format(
-            plural(len(blobs), "blob", "blobs"),
+            "blob" if len(blobs) == 1 else "blobs",
             ", ".join("`{}`".format(b) for b in blobs), "is" if len(blobs) == 1 else "are")
     else:
         blob = ("none holds a state blob under any of the {} hydration payload names "
@@ -2236,7 +2291,7 @@ def _check_thin_pages(result, content_pages, shells, snapshot=None, unsettled=()
 
     thin, could_not_tell, extraction_failed = [], [], []
     set_aside_shells, assembled_elsewhere, publishing_a_placeholder = [], [], []
-    redirecting, gateway_pages, listings, framed = [], [], [], []
+    redirecting, gateway_pages, listings, framed, hydrated = [], [], [], [], []
     for page in judged:
         if page["url"] in shell_urls:
             set_aside_shells.append(page)
@@ -2267,6 +2322,16 @@ def _check_thin_pages(result, content_pages, shells, snapshot=None, unsettled=()
         if children is not None:
             listings.append((page["url"], children))
             continue
+        # A short page whose delivered document carries a hydration payload
+        # bigger than everything it shows. Its copy is in that payload and the
+        # browser draws it: a help centre's sections, fetched from a help-desk
+        # service, sat inside `self.__next_f` on two storefront editions, and
+        # the report told the owner to write two or three sentences of body
+        # copy. The fix is rendering on the server, never more copy.
+        payload = _copy_in_a_hydration_payload(page)
+        if payload:
+            hydrated.append((page["url"], payload))
+            continue
         if page["url"] in unsettled_urls:
             assembled_elsewhere.append(page)
             continue
@@ -2281,7 +2346,11 @@ def _check_thin_pages(result, content_pages, shells, snapshot=None, unsettled=()
     set_aside = _set_aside_note(extraction_failed, could_not_tell,
                                 assembled_elsewhere, set_aside_shells,
                                 publishing_a_placeholder, gateways=gateway_pages,
-                                listings=listings, redirects=redirecting, frames=framed)
+                                listings=listings, redirects=redirecting, frames=framed,
+                                payloads=hydrated)
+    if hydrated:
+        result.signal("short_pages_whose_copy_is_in_a_hydration_payload",
+                      sorted(url for url, _ in hydrated)[:10])
     if framed:
         result.signal("short_pages_that_are_a_frame", sorted(url for url, _ in framed)[:10])
     if redirecting:
@@ -2320,7 +2389,7 @@ def _check_thin_pages(result, content_pages, shells, snapshot=None, unsettled=()
         assessed = (len(judged) - len(set_aside_shells) - len(assembled_elsewhere)
                     - len(extraction_failed) - len(could_not_tell)
                     - len(publishing_a_placeholder) - len(redirecting)
-                    - len(gateway_pages) - len(listings))
+                    - len(gateway_pages) - len(listings) - len(hydrated))
         if assessed:
             result.skip("thin-html",
                         "each of the {} pages this check could assess carries at least {} "

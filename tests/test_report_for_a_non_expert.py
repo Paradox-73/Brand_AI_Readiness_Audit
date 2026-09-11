@@ -79,7 +79,7 @@ def test_that_verdict_names_the_pattern_rather_than_counting():
     findings = [{"root_cause": "no-entity-definition", "severity": "medium"},
                 {"root_cause": "weak-corroboration", "severity": "medium"}]
     verdict = compose._verdict(COUNTS, findings, {}, {"profile_breadth": 1}, "A Brand")
-    assert "no fact about this brand it can safely repeat" in verdict
+    assert "nothing it can safely repeat about who the brand is" in verdict
     # Specific to this site, not a template: it names the brand and the gap.
     assert "A Brand" in verdict
     assert "no page states in one sentence what it is" in verdict

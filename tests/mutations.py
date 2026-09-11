@@ -318,10 +318,16 @@ mutation(
     # brand is" while a snippet three findings below quotes that very sentence
     # is the contradiction this mutation used to lock in. Removing the prose
     # alone no longer makes the site silent, so this mutation removes both.
+    #
+    # And the brand as the subject of a verb saying what it does. "Brightpath
+    # produces a replenishment quantity for every SKU" is a definition in the
+    # shape a maker writes, and the shared rule reads `produces` beside
+    # `provides` and `builds` - so it goes too.
     apply=lambda site: (
         edit_all(
             site,
-            swap(r"<p>\s*(?:Brightpath(?: Analytics)?) (?:is|are|was|were) [^<]*</p>",
+            swap(r"<p>\s*(?:Brightpath(?: Analytics)?) (?:is|are|was|were|produces|provides|"
+                 r"offers|makes|builds|helps|delivers|creates) [^<]*</p>",
                  "<p>We believe the future belongs to those who move first. They "
                  "know it. It is why they choose us, and why they stay.</p>")),
         edit_all(site, swap(r'"description"\s*:\s*"[^"]*"',

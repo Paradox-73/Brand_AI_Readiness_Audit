@@ -396,10 +396,12 @@ def main(argv=None):
     # slow enough to use its budget.
     #
     # At the default ceiling: 285 - 12 for compose leaves 273 for crawl and
-    # probes together; the probe phase is owed 3 x 33 + 3 x 3 + one 40 s wedge
-    # = 148; so the crawl is killed at 125 and told 115 rather than 240.
+    # probes together; the probe phase is owed `PROBE_PHASE_RESERVE_SECONDS`,
+    # 118 s as the step floors stand; so the crawl is killed at 155 and told
+    # 142 rather than 240. The run prints both numbers on its first lines, and
+    # README and the orchestrator's SKILL.md state the same two.
     #
-    # 115 buys fewer pages than 171 did, and that is the trade being made
+    # A smaller budget buys fewer pages than 171 did, and that is the trade being made
     # deliberately. `crawl.py` plans its page count from the budget and the
     # measured cost of a page, so the cost falls only where a page is slow: a
     # site answering in under a second still reaches the sixty-page ceiling and

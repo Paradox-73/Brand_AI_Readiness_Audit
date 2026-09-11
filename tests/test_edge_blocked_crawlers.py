@@ -460,5 +460,9 @@ def test_this_marketplace_writes_no_control_characters():
 def test_the_audit_user_agent_is_still_what_the_control_request_sends():
     """The control request is the one that separates a name rule from a client
     rule, so it has to carry this audit's own name and nothing borrowed."""
-    assert CA._ua_string("Applebot").startswith("Applebot (")
+    # The operator's published string first, because an edge that refuses the
+    # real crawler matches on that string and not on the bare token; then this
+    # audit's own name, so the request still says who sent it.
+    assert CA._ua_string("Applebot").startswith(
+        CA.AGENT_BY_TOKEN["applebot"].published_ua + " (")
     assert USER_AGENT in CA._ua_string("Applebot")

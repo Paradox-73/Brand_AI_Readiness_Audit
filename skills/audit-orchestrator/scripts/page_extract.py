@@ -1461,7 +1461,8 @@ def extract_page(url, final_url, status, headers, html, redirect_chain, elapsed_
         # first screens are in, and walking sixty full page texts a second time
         # buys nothing.
         "dates": _dates(ours, own_page_text, jsonld, lang=lang,
-                        script=dominant_script(own_page_text[:4000]) or ""),
+                        script=dominant_script(own_page_text[:4000]) or "",
+                        chrome_text=_site_chrome_text(ours)),
         "contact_facts": _contact_facts(own_page_text, ours, page_type),
         "prices": find_prices(body_text),
         # The prices written inside the page's `<select>` menus, and only
@@ -4260,14 +4261,63 @@ def _cta(soup, body_text, origin, base):
     }
 
 
-def _dates(soup, text, jsonld, lang="", script=""):
+# How far after a copyright mark a date still belongs to the copyright line.
+# A footer reading "(c) 1448 AH / 2026 CE <site name>, network last updated on:
+# 30/3/1448 AH" puts both dates within sixty characters of the mark.
+COPYRIGHT_LINE_CHARS = 120
+_COPYRIGHT_MARK_RE = re.compile(u"©|\\(c\\)|\\bcopyright\\b|all rights reserved", re.I)
+
+
+def _site_chrome_text(soup):
+    """The text of the site-wide header and footer, each region once.
+
+    `CHROME_SELECTOR`, less two things that are not site chrome: an `address`
+    block, which is contact detail wherever it sits, and a header or footer
+    inside the article or the main region, which is the article's own - its
+    byline and its date live exactly there.
+    """
+    picked = []
+    for node in soup.select(CHROME_SELECTOR):
+        if node.name == "address" or _within_hidden(node):
+            continue
+        if node.find_parent(["article", "main"]) or node.find_parent(
+                attrs={"role": "main"}):
+            continue
+        if any(parent in picked for parent in node.parents):
+            continue
+        picked.append(node)
+    return " ".join(_text_or_empty(node) for node in picked)
+
+
+def _only_in_the_chrome(printed, text, chrome_text):
+    """Is every appearance of this date in the site's header, footer or
+    copyright line?"""
+    positions = [m.start() for m in re.finditer(re.escape(printed), text or "")]
+    if not positions:
+        return False
+    if chrome_text and text.count(printed) <= chrome_text.count(printed):
+        return True
+    return all(_COPYRIGHT_MARK_RE.search(text[max(0, at - COPYRIGHT_LINE_CHARS):at])
+               for at in positions)
+
+
+def _dates(soup, text, jsonld, lang="", script="", chrome_text=""):
     """Every freshness signal a machine could read off this page.
 
     `lang` is what the document declares and `script` is what its letters are
     in. Both are read for one question only - whether a four-digit number in
     the 2400-2600 range is a Buddhist-era year - and the answer is no wherever
     neither says Thai. A wrongly converted date is worse than an unread one.
+
+    `chrome_text` is the site-wide header and footer (`_site_chrome_text`). A
+    date printed only there, or only in the copyright line, is the template's
+    and not the page's: a site's footer reads "copyright 1448 AH, network last
+    updated on 30/3/1448 AH" on every page - its guestbook included - and the
+    date moves on every load, so every page was recorded as carrying a date
+    and none of them was dated by it. Those go to `chrome`, and neither
+    `visible`, `non_gregorian` nor `has_any` counts them.
     """
+    chrome = []
     machine = []
     for tag in soup.find_all("time"):
         value = tag.get("datetime") or _text_or_empty(tag)
@@ -4288,6 +4338,10 @@ def _dates(soup, text, jsonld, lang="", script=""):
         if (BUDDHIST_ERA_DATE_RE.fullmatch(printed.strip())
                 and not reads_in_a_buddhist_era_calendar(script, lang)):
             continue
+        if _only_in_the_chrome(printed, text, chrome_text):
+            if printed not in chrome:
+                chrome.append(printed)
+            continue
         visible.append(printed)
         if len(visible) == 10:
             break
@@ -4296,7 +4350,13 @@ def _dates(soup, text, jsonld, lang="", script=""):
     # and nothing called them, so 14 pages of one site and 16 of another
     # printing `พ.ศ. 2569` were recorded `has_any: false` and the report said
     # "48 of 48 pages where one is expected show no date on the page".
-    non_gregorian = non_gregorian_dates(text, script, lang)
+    non_gregorian = []
+    for printed, year in non_gregorian_dates(text, script, lang):
+        if _only_in_the_chrome(printed, text, chrome_text):
+            if printed not in chrome:
+                chrome.append(printed)
+            continue
+        non_gregorian.append((printed, year))
     copyright_years = []
     for match in COPYRIGHT_YEAR_RE.finditer(text):
         copyright_years.append(int(match.group(1)))
@@ -4321,6 +4381,10 @@ def _dates(soup, text, jsonld, lang="", script=""):
         # before - it just no longer says they carry no date.
         "non_gregorian": [{"printed": printed, "gregorian_year": year}
                           for printed, year in non_gregorian],
+        # Dates printed only in the site's header, footer or copyright line.
+        # Kept, so a reader can see what was set aside; never a date of this
+        # page. See the docstring.
+        "chrome": chrome[:10],
         "copyright_years": sorted(set(copyright_years)),
         "as_of_years": sorted(set(as_of_years)),
         # A date signal has to be a date. `<time datetime="PT0S">` is a video

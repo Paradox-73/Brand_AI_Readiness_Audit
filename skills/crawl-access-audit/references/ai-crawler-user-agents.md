@@ -173,6 +173,18 @@ when they are all disallowed. It is the only place in this marketplace that send
 user-agent other than its own, and it is documented as such in the orchestrator's safety
 section.
 
+### The string a probe sends is the crawler's own
+
+Each probe sends the full user-agent string the operator publishes for that crawler — the
+`published_ua` field of `AI_CRAWLER_AGENTS` in `check.py`, copied word for word from the page
+each row above cites — followed by this audit's own name in brackets. It used to send the bare token, and an
+edge can tell the two apart: one shop's CDN answered `OAI-SearchBot` with the page and refused
+the crawler's published `Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible;
+OAI-SearchBot/1.3; +https://openai.com/searchbot` with 403, so the report said a crawler was
+served that, sending its real string, was not. Anthropic, You.com and Mistral publish only
+the token, so for those the token is what is sent; guessing the rest would measure a string
+nobody published.
+
 ### What that comparison can and cannot conclude
 
 Both arms of it go through the same HTTP client. The name is the only variable that moves,

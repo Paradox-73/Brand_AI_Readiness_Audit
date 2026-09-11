@@ -39,7 +39,7 @@ Run `python3 run_audit.py <url>` to do all of this at once, or follow the steps 
 1. **Normalise the target.** Reduce the input to an origin (`https://example.com`).
    Keep any supplied path as an extra seed page.
 
-2. **Crawl once.** Run `scripts/crawl.py <origin> --out snapshot.json --budget 115` — not the
+2. **Crawl once.** Run `scripts/crawl.py <origin> --out snapshot.json --budget 142` — not the
    240 default, because step 3's six skills are owed a share of the same five minutes.
 
    It fetches robots.txt, the sitemaps, `/llms.txt`, the homepage, up to 8 sitemap URLs

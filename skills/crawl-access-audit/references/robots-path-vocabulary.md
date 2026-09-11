@@ -73,6 +73,18 @@ above** — the file then describes a software project, and on one these are its
 each is reported like any other section. `benign_disallow(rule, siblings)` takes the rest of
 the group's `Disallow` list for exactly this.
 
+One more class came from a fashion shop.
+
+**A random token.** Four of the five "paths that look like real content" on one shop were
+shaped like `/QX47RT2MZP9K` and `/kd8vn3w1pq5z`: twelve characters, capitals or lower case
+shuffled together with digits, no word in them. Nobody links a reader to a string like that.
+It is a trap: an address only a crawler ignoring robots.txt would ever request, so the site
+can recognise and refuse it. Matched by shape, never by the strings: one segment, letters and
+digits only, eight or more characters, at least two of each, and the two kinds switching back
+and forth at least four times. A name with a number in it switches once or twice —
+`/phone15pro`, `/2024collection`, `/mp3players` — and any separator (`/covid19-update`) means
+somebody chose words, so none of those is excused.
+
 Two shapes are deliberately **not** in the vocabulary:
 
 - **A path that happens to 404.** One report listed `/latest`, which answers 404. Nothing in

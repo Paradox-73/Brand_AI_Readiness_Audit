@@ -1247,7 +1247,12 @@ def fetch_page(fetcher, url, depth, source, origin):
         }
 
     chain = [r.url for r in response.history]
-    content_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+    # The status of each hop as well as its address. A chain of addresses says
+    # a redirect happened and not which kind: a 307 tells a crawler the old
+    # address is still the real one and a 301 tells it the address has moved,
+    # and the transport check has to be able to say which an owner has.
+    hops = [r.status_code for r in response.history]
+    content_type =(response.headers.get("content-type") or "").split(";")[0].strip().lower()
     headers = {k.lower(): v for k, v in response.headers.items()}
 
     # A redirect that leaves the origin leaves the audit. A standards body's
@@ -1265,6 +1270,7 @@ def fetch_page(fetcher, url, depth, source, origin):
         return {
             "url": url, "final_url": response.url, "status": response.status_code,
             "depth": depth, "source": source, "redirect_chain": chain,
+            "redirect_statuses": hops,
             "skipped": "redirects off this origin",
             "offsite_redirect": True,
             "page_type": "other", "links": {"internal": [], "external": []},
@@ -1282,6 +1288,7 @@ def fetch_page(fetcher, url, depth, source, origin):
         return {
             "url": url, "final_url": response.url, "status": response.status_code,
             "depth": depth, "source": source, "redirect_chain": chain,
+            "redirect_statuses": hops,
             "content_type": content_type, "skipped": NOT_A_PAGE_REASON,
             # Not "a page we could not read" - a thing that was never a page.
             # The difference decides a denominator: a release archive that
@@ -1314,6 +1321,7 @@ def fetch_page(fetcher, url, depth, source, origin):
         return {
             "url": url, "final_url": response.url, "status": response.status_code,
             "depth": depth, "source": source, "redirect_chain": chain,
+            "redirect_statuses": hops,
             "content_type": content_type,
             "skipped": "the response arrived {} and this audit could not "
                        "decompress it".format(
@@ -1343,6 +1351,7 @@ def fetch_page(fetcher, url, depth, source, origin):
     if headers.get("date"):
         record.setdefault("headers", {})["date"] = headers["date"]
     record["fetched_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    record["redirect_statuses"] = hops
     # A page we stopped reading at the size cap is a limit of ours. Recorded
     # here so the crawl notes can say so, rather than letting a half-read
     # document look like a site that omitted the second half.
@@ -1444,6 +1453,97 @@ def _strip_title_boilerplate(title):
     if len(value) < 4 or value.lower() in _NOT_A_BRAND:
         return title.strip()
     return value
+
+
+# A title that describes the thing before it names it: "The Programming
+# Language Frostvane", "The Official Site of Acme". A language's documentation
+# site titles its homepage exactly like that, with no separator and no
+# boilerplate tail, and the whole 28-character sentence became the brand - in
+# the report, in the paste-ready Organization `name` and in the definition
+# the report asked the project to publish - for a project that signs every
+# page of its own site with its one-word name.
+#
+# The name is only ever the end of such a title, and only once two things
+# agree: the site's own address or its own copyright line spells that end, and
+# what comes before it is description rather than part of the name. "Friends
+# of Example" on `example.test` keeps its whole name, because "Friends of" is
+# how the organisation is called and not a description of it; "The Official
+# Site of Example" loses the words that describe the page.
+_LEAD_PREPOSITIONS = frozenset({"of", "to", "for", "by", "at", "from"})
+_LEAD_BOILERPLATE_WORDS = frozenset({
+    "official", "site", "website", "home", "homepage", "page", "welcome"})
+
+# Where a site signs its own pages: "Copyright © 1994–2026 Example.org,
+# Example University." The holder is what follows the mark and the years, up to
+# the end of that sentence.
+_COPYRIGHT_MARK_RE = re.compile(
+    r"(?:©|\(c\)|\bcopyright\b)(?:\s*(?:©|\(c\)))?\s*"
+    r"(?:\d{4}(?:\s*[-–—]\s*\d{4})?[\s,]*)*", re.I)
+_COPYRIGHT_HOLDER_END_RE = re.compile(r"\.\s|[;|©]|\ball rights\b", re.I)
+
+
+def _is_a_descriptive_lead(lead):
+    """True for "The Programming Language" and "The Official Site of"."""
+    words = [w.lower() for w in re.findall(r"[^\W\d_]+", lead or "", re.UNICODE)]
+    if not words:
+        return False
+    # "Friends of", "Town of", "University of" are how a name begins. Only a
+    # lead that describes the page itself is dropped in front of a preposition.
+    if words[-1] in _LEAD_PREPOSITIONS:
+        return bool(_LEAD_BOILERPLATE_WORDS & set(words))
+    # An article and at least two words of description. "The Home Depot" and
+    # "The Guardian" are names whose article is part of them, and a lead of
+    # one or two words is how those read.
+    return words[0] == "the" and len(words) >= 3
+
+
+def _names_the_site_signs_with(pages, home_url, domain_token):
+    """Comparison keys of the names a site signs itself with.
+
+    Its own address, and the holder named in its own copyright line. A line on
+    one deep page is a reprint's credit as often as the site's own, so a
+    holder counts once it appears on two pages or on the homepage.
+    """
+    keys = set()
+    token = comparison_key(domain_token or "")
+    if token:
+        keys.add(token)
+    seen = {}
+    for page in pages or []:
+        texts = {str(page.get("body_text") or ""), str(page.get("text") or "")}
+        found = set()
+        for text in texts:
+            for match in _COPYRIGHT_MARK_RE.finditer(text):
+                holder = _COPYRIGHT_HOLDER_END_RE.split(
+                    text[match.end():match.end() + 80], maxsplit=1)[0]
+                for piece in holder.split(","):
+                    # "Example.org" is signed with its address; the name is
+                    # the part before the suffix.
+                    piece = re.sub(r"\.[a-z]{2,6}$", "", piece.strip(), flags=re.I)
+                    key = comparison_key(piece)
+                    if key:
+                        found.add(key)
+        for key in found:
+            seen.setdefault(key, set()).add(page.get("url"))
+    for key, urls in seen.items():
+        if len(urls) >= 2 or (home_url and home_url in urls):
+            keys.add(key)
+    return keys
+
+
+def _name_after_a_descriptive_lead(title, own_names):
+    """"The Programming Language Frostvane" -> "Frostvane", or "".
+
+    The shortest ending of the title that the site signs itself with, where
+    everything before it is description. See the block above.
+    """
+    words = (title or "").split()
+    for cut in range(len(words) - 1, 0, -1):
+        tail = " ".join(words[cut:]).strip(" ,:;-–—")
+        if (tail and comparison_key(tail) in own_names
+                and _is_a_descriptive_lead(" ".join(words[:cut]))):
+            return tail
+    return ""
 
 
 def _site_spelling(token, home):
@@ -1779,6 +1879,13 @@ def detect_brand(pages, origin):
                                   "published": published})
             declared_on.setdefault(published, set()).add(page.get("url"))
 
+    host = urlparse(origin).netloc.lower()
+    domain_token = re.sub(r"^www\.", "", host).split(".")[0]
+    # Read before the title is, because the title is where it is needed: which
+    # piece of "Brand | Tagline", and which ending of a title with no
+    # separator, is the name the site signs itself with.
+    own_names = _names_the_site_signs_with(pages, home_url, domain_token)
+
     if home:
         title = home.get("title") or ""
         parts = [clean(p) for p in TITLE_SEPARATOR.split(title)]
@@ -1791,7 +1898,12 @@ def detect_brand(pages, origin):
             # to length when that leaves nothing to choose between.
             ends = [parts[0], parts[-1]]
             named = [p for p in ends if not _is_title_boilerplate(p)]
-            ordered = sorted(named or ends, key=len)
+            # A piece the site also signs itself with - its address, its
+            # copyright line - is the name whatever its length. Shortest-wins
+            # is the tiebreak between pieces with no such evidence, and it
+            # hands the name to a short tagline on "Eat Well | Example's".
+            ordered = sorted(named or ends,
+                             key=lambda p: (comparison_key(p) not in own_names, len(p)))
             for index, value in enumerate(ordered):
                 fallback.append({"name": value, "source": "title-part-{}".format(index)})
         elif parts:
@@ -1803,6 +1915,9 @@ def detect_brand(pages, origin):
             # looking for a sentence starting "SQLite Home Page is". One bad
             # name produced a false "no page states what the brand is" on a
             # site whose first sentence states exactly that.
+            after_lead = _name_after_a_descriptive_lead(parts[0], own_names)
+            if after_lead:
+                fallback.append({"name": after_lead, "source": "title-part-0"})
             stripped = _strip_title_boilerplate(parts[0])
             if stripped and stripped != parts[0]:
                 fallback.append({"name": stripped, "source": "title-part-0"})
@@ -1817,8 +1932,6 @@ def detect_brand(pages, origin):
             else:
                 fallback.append({"name": parts[0], "source": "title-long"})
 
-    host = urlparse(origin).netloc.lower()
-    domain_token = re.sub(r"^www\.", "", host).split(".")[0]
     # "The Postfix Home Page" loses its boilerplate and keeps its article, so a
     # mail server was addressed throughout its report as "The Postfix": in the
     # paste-ready Organization `name`, in the definition the report told it to
@@ -2722,22 +2835,30 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
                 budget_exhausted = True
                 stopped_by = "wall clock"
                 truncated_at = queue.peek()
+                # Pages spend from the ceiling; every other record does not.
+                # Counting records printed "ran out after 95 pages, before the
+                # crawl reached the 60-page count it was allowed" about a museum
+                # whose 95 records held 52 pages - a sentence that contradicts
+                # itself, and a `--max-pages 95` that would change nothing.
+                fetched_note = ("" if len(pages) == page_slots_used else
+                                " ({} addresses fetched in all, counting files and "
+                                "redirects)".format(len(pages)))
                 not_reproducible.append(
                     "the wall clock, not the page ceiling, stopped this crawl: it read {} of "
-                    "the {} page(s) it was allowed{}".format(
-                        len(pages), page_cap,
+                    "the {} page(s) it was allowed{}{}".format(
+                        page_slots_used, page_cap, fetched_note,
                         ", stopping before {}".format(truncated_at) if truncated_at else ""))
                 notes.append(
-                    "the wall-clock budget of {:.0f}s ran out after {} page(s), before the "
-                    "crawl reached the {}-page count it was allowed. Where the clock falls "
+                    "the wall-clock budget of {:.0f}s ran out after {} of the {} pages it was "
+                    "allowed{}. Where the clock falls "
                     "depends on how fast the network was, so another audit of this site may "
                     "read a different number of pages and report a slightly different set of "
                     "findings{}. Run it again with a larger --budget, or with --max-pages {}, "
                     "for a page set that repeats.".format(
-                        budget_s, len(pages), page_cap,
+                        budget_s, page_slots_used, page_cap, fetched_note,
                         "; the next address in the crawl's fixed order was {}".format(
                             truncated_at) if truncated_at else "",
-                        max(1, len(pages))))
+                        max(1, page_slots_used)))
                 break
             # A rate limiter asking for longer than this run has left. Waiting
             # it out returns nothing; carrying on at the old rate is what

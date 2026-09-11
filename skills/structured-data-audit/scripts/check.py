@@ -15,7 +15,7 @@ import argparse
 import json
 import os
 import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 import sys
 from collections import Counter, defaultdict
 
@@ -699,10 +699,52 @@ def _image_url(value):
     # A path or an address, never a caption. A relative `logo.png` is a value
     # the site published and has to survive; the word "Logo" is not an image
     # and must not be pasted into a field a knowledge panel fetches.
-    if re.match(r"^(?:https?:)?//|^/", value) or "/" in value \
-            or re.search(r"\.(?:png|jpe?g|gif|svg|webp|avif|ico)$", value, re.I):
-        return value
-    return ""
+    if not (re.match(r"^(?:https?:)?//|^/", value) or "/" in value
+            or _IMAGE_EXTENSION_RE.search(value)):
+        return ""
+    # And an image, not a page. A fashion retailer's Corporation block sets
+    # `logo` to its own `/intl` storefront address, and two paste-ready blocks
+    # copied that page address into the field a knowledge panel renders as the
+    # brand's mark. See `_is_a_page_address`.
+    return "" if _is_a_page_address(value) else value
+
+
+# The file types an image address ends in, before any query string.
+_IMAGE_EXTENSION_RE = re.compile(
+    r"\.(?:png|jpe?g|gif|svg|webp|avif|ico|bmp|tiff?|heic)(?:$|[?#])", re.I)
+
+# Path words that name where images are kept, for an image served without an
+# extension from a media host or a transform endpoint.
+_IMAGE_PATH_WORDS = frozenset({
+    "image", "images", "img", "imgs", "media", "asset", "assets", "cdn", "upload", "uploads",
+    "files", "static", "logo", "logos", "icon", "icons", "brand", "branding", "photo",
+    "photos", "picture", "pictures",
+})
+
+
+def _is_a_page_address(value):
+    """Is this URL a web page rather than an image?
+
+    An image address ends in an image type, or sits under a path that names
+    where images are kept. Anything else - `https://<shop>/intl`, `/about` -
+    is a page, and a page is not a logo whatever field it was put in.
+    """
+    path = urlparse(str(value or "")).path
+    if _IMAGE_EXTENSION_RE.search(path) or _IMAGE_EXTENSION_RE.search(str(value or "")):
+        return False
+    words = set(re.split(r"[^a-z0-9]+", path.lower()))
+    return not (words & _IMAGE_PATH_WORDS) and not str(value).startswith("data:image/")
+
+
+def _logo_is_a_page(node):
+    """The page address a node declares as its `logo`, or ""."""
+    raw = node.get("logo") if isinstance(node, dict) else None
+    if isinstance(raw, list):
+        raw = raw[0] if raw else None
+    if isinstance(raw, dict):
+        raw = raw.get("url") or raw.get("contentUrl") or ""
+    raw = str(raw or "").strip()
+    return raw if raw and "/" in raw and _is_a_page_address(raw) else ""
 
 
 def _is_the_homepage(page, snapshot):
@@ -748,6 +790,11 @@ def _brand_url(declared, snapshot):
             return home
         return declared
     return home or declared
+
+
+# The shared name reducer, so an alt text and a brand name compare the same way
+# they do everywhere else in the marketplace.
+from audit_common import brand_key  # noqa: E402
 
 
 def _site_logo(snapshot, pages, brand=None):
@@ -823,11 +870,25 @@ def _site_logo(snapshot, pages, brand=None):
     # It could never match, which is why the og:image branch above was the only
     # one that ever answered. The URL lists inside that summary are the only
     # image addresses the snapshot carries.
+    brand_key_ = brand_key(str((brand or {}).get("name") or ""))
     seen = defaultdict(set)
+    named_by_alt = set()
     for page in everywhere:
         images = page.get("images")
         if not isinstance(images, dict):
             continue
+        for candidate in images.get("logo_candidates") or []:
+            if not isinstance(candidate, dict):
+                continue
+            url = str(candidate.get("src") or "")
+            alt = brand_key(str(candidate.get("alt") or ""))
+            # A candidate whose alt text names the brand is the site calling
+            # the file its own mark, whatever the file is named.
+            if url and brand_key_ and alt and (brand_key_ in alt or alt in brand_key_):
+                seen[url].add(page.get("url") or "")
+                named_by_alt.add(url)
+            elif url and _LOGO_IN_URL_RE.search(url):
+                seen[url].add(page.get("url") or "")
         for url in ((images.get("undescribed_sample") or [])
                     + (images.get("missing_alt_sample") or [])):
             if url and _LOGO_IN_URL_RE.search(str(url)):
@@ -836,10 +897,58 @@ def _site_logo(snapshot, pages, brand=None):
     # an inline diagram both sit on a single page; a header mark is on every
     # page the template renders, and the filename test alone cannot tell those
     # apart.
-    for url in sorted(seen):
-        if len(seen[url]) > 1 or len(everywhere) <= 1:
-            return url
-    return None
+    #
+    # And never an image filed under a section of the site that publishes
+    # somebody else's work. A central bank's Organization block shipped
+    # `.../bot-magazine/Logo%20Phrasiam.JPG` - the masthead of a magazine it
+    # publishes, carried on its Thai pages - because candidates were taken in
+    # alphabetical order and "b" sorts before "l", while the bank's own marks
+    # sat at `.../logo/logo-top-blue.png` on every English page. Among the rest,
+    # the ones the site files as its mark - under a `logo` or `brand` folder, or
+    # named for the header - come first, then the ones on the most pages.
+    eligible = [url for url in seen
+                if (len(seen[url]) > 1 or len(everywhere) <= 1)
+                and not _filed_under_somebody_elses_section(url)]
+    if not eligible:
+        return None
+    return min(eligible, key=lambda url: (0 if url in named_by_alt else 1,
+                                          _logo_placement_rank(url), -len(seen[url]), url))
+
+
+# Path words for sections of a site that carry other people's material - a
+# magazine it publishes, its news, its partners and sponsors - whose images are
+# not the site's own mark however their files are named.
+_SOMEBODY_ELSES_SECTION_WORDS = frozenset({
+    "magazine", "magazines", "news", "blog", "blogs", "press", "event", "events",
+    "article", "articles", "partner", "partners", "sponsor", "sponsors", "campaign",
+    "campaigns", "story", "stories", "publication", "publications", "award", "awards",
+    "client", "clients", "customer", "customers", "member", "members", "brands",
+})
+
+# Path words a site files its own mark under, or names it after.
+_OWN_MARK_WORDS = frozenset({"logo", "logos", "brand", "branding", "header", "top",
+                             "site", "main", "primary", "identity"})
+
+
+def _path_words(url):
+    """The words of an image address's path, split on separators and escapes."""
+    path = urlparse(str(url or "")).path.lower().replace("%20", " ")
+    return re.split(r"[^a-z0-9]+", path)
+
+
+def _filed_under_somebody_elses_section(url):
+    """Is this image in a folder for a magazine, news, partners and the like?"""
+    segments = [s for s in urlparse(str(url or "")).path.lower().split("/") if s][:-1]
+    return any(word in _SOMEBODY_ELSES_SECTION_WORDS
+               for segment in segments
+               for word in re.split(r"[^a-z0-9]+", segment.replace("%20", " ")))
+
+
+def _logo_placement_rank(url):
+    """0 where the address files the image as the site's own mark, else 1."""
+    return 0 if set(_path_words(url)) & _OWN_MARK_WORDS - {"logo", "logos"} or \
+        any(s in ("logo", "logos", "brand", "branding")
+            for s in urlparse(str(url or "")).path.lower().split("/")[:-1]) else 1
 
 
 # Pages that speak for the whole business. A sentence describing the brand can
@@ -1123,7 +1232,18 @@ def _brand_definition(pages, brand):
     name = (brand or {}).get("name") or ""
     if not name:
         return ""
+    # The front door's language first, then any language. A central bank's
+    # front door is in Thai and says nothing that defines it; its English about
+    # page opens "The Bank of Thailand is a public institution with a mandate
+    # ...", which the other skill quoted three sections earlier, while the
+    # Organization block's `description` said "neither the homepage nor the
+    # about page carries a description". The language rule exists to stop an
+    # edition's line being chosen over the front door's own; where the front
+    # door has none, the site's own definition in another of its languages is
+    # still the site defining itself, and a placeholder is not better.
     ordered = _pages_that_speak_for_the_site(pages)
+    ordered += [p for p in _pages_that_speak_for_the_site(pages, any_language=True)
+                if not any(p is q for q in ordered)]
     # A definition that is news is skipped and the search continues.
     # "<Brand> 3.0 is a major new release" is a definition by shape, and the
     # sentence the site means by it sits further down the same page.
@@ -1222,8 +1342,11 @@ def _section_depth(page):
     return len(segments)
 
 
-def _pages_that_speak_for_the_site(pages):
+def _pages_that_speak_for_the_site(pages, any_language=False):
     """The homepage, then the about page, then the contact page.
+
+    `any_language` lifts the language rule below, for a caller that has
+    already tried the front door's language and found nothing.
 
     The page type alone used to decide, so every page the classifier called
     "about" spoke for the whole organisation. A university's brand-assets page
@@ -1244,7 +1367,7 @@ def _pages_that_speak_for_the_site(pages):
     language that door is written in. A page that declares no language is
     kept, because nothing says it is an edition.
     """
-    home_language = _homepage_language(pages)
+    home_language = "" if any_language else _homepage_language(pages)
     ordered = []
     for page_type in _WHOLE_BRAND_PAGE_TYPES:
         typed = [p for p in pages if p.get("page_type") == page_type]
@@ -1520,9 +1643,50 @@ def _all_same_as(pages, brand=None, declared=()):
     # test we could apply to the handle. It goes in whatever it looks like -
     # and through the same deduplication, because a site that lists both
     # `twitter.com/x` and `x.com/x` is where half of these duplicates came from.
-    return _dedupe_profiles(list(urls) + [u for u in (declared or [])
-                                          if isinstance(u, str)
-                                          and _is_an_account_and_not_an_action(u)])
+    #
+    # Except the two things `sameAs` can never be. The site itself: a fashion
+    # retailer's block lists its own `/intl` storefront as "the same entity as"
+    # the organisation, which says nothing. And a jobs board: an applicant
+    # tracking system's page is where the company's vacancies are posted, not
+    # an account that describes it.
+    own = _own_hosts(pages, brand)
+    return _dedupe_profiles([u for u in list(urls) + [u for u in (declared or [])
+                                                      if isinstance(u, str)
+                                                      and _is_an_account_and_not_an_action(u)]
+                             if not _never_same_as(u, own)])
+
+
+# Applicant tracking and careers hosts. A vacancy listing is not a profile.
+# Held as host labels - the words the products choose - rather than as
+# addresses, the way `_PUBLIC_LABELS` and the platform table are held: a label
+# is the product we recognise, and its suffix is a registry's.
+_JOBS_BOARD_LABELS = frozenset({
+    "workable", "greenhouse", "lever", "smartrecruiters", "recruitee", "bamboohr",
+    "ashbyhq", "jobvite", "icims", "myworkdayjobs", "breezy", "teamtailor", "personio",
+})
+
+# The first label of a host a company runs its own vacancies on.
+_JOBS_HOST_PREFIXES = frozenset({"apply", "jobs", "careers", "career", "recruiting", "hire"})
+
+
+def _own_hosts(pages, brand=None):
+    """The audited site's own hosts, `www.` set aside."""
+    hosts = {strip_www(str((brand or {}).get("host") or "").lower())}
+    hosts.update(strip_www(urlparse(str(p.get("url") or "")).netloc.lower()) for p in pages)
+    hosts.discard("")
+    return hosts
+
+
+def _never_same_as(url, own_hosts):
+    """Is this address the site itself, or a jobs board, rather than a profile?"""
+    host = strip_www(urlparse(str(url or "")).netloc.lower())
+    if not host:
+        return False
+    if host in own_hosts:
+        return True
+    labels = host.split(".")
+    return bool(set(labels[:-1]) & _JOBS_BOARD_LABELS) or (
+        len(labels) > 2 and labels[0] in _JOBS_HOST_PREFIXES)
 
 
 def _profiles_in_the_site_chrome(pages):
@@ -2440,6 +2604,15 @@ def _check_organization(result, snapshot, pages, by_type, brand, platform=None):
     # this site's and paste that company's values into the snippet under it.
     org_nodes = [(p, n) for p in pages for n in _nodes_of(p, ORG_IDENTITY_TYPES)
                  if _speaks_for_the_site(n, brand)]
+    # A node nested under another node's `publisher`, `founder`, `author` or
+    # `brand` is a reference that other node makes, not the site declaring its
+    # identity. A furniture retailer declares no identity block anywhere, and
+    # its two blog posts name "<Brand>" as the Article's publisher: that stub
+    # was graded as "Organization markup is present but omits url, description,
+    # sameAs", and the homepage was told it lacks what "the rest of the site"
+    # has. See `_REFERENCE_ROLES`.
+    referenced = [(p, n) for p, n in org_nodes if _only_referenced(n)]
+    org_nodes = [(p, n) for p, n in org_nodes if not _only_referenced(n)]
     # The homepage, first. `pages_of` sorts by URL alone, so the node that got
     # graded was whichever page sorted first - and a charity was graded on a
     # footer `Store` stub from one shop page out of sixty while its complete
@@ -2546,6 +2719,12 @@ def _check_organization(result, snapshot, pages, by_type, brand, platform=None):
         inline_typed = sorted({t for p in pages for t in _inline_types_on(p)})
         site_name = next((str((p.get("og") or {}).get("og:site_name") or "").strip()
                           for p in pages if (p.get("og") or {}).get("og:site_name")), "")
+        # Every homepage, where a site has several. A retailer's root is a
+        # country picker and each of its five regional homepages is a
+        # storefront of its own; saying only that the picker lacks the block
+        # blames the one page nobody shops on.
+        homes = by_type.get("home", [])
+        referencing = sorted({p["url"] for p, _ in referenced})
         result.add(
             id_hint="no-organization-schema",
             title="No Organization or LocalBusiness markup anywhere on the site",
@@ -2557,9 +2736,20 @@ def _check_organization(result, snapshot, pages, by_type, brand, platform=None):
             # evidence supports. See references/cited-vs-uncited-study.md.
             severity="medium", confidence="high",
             evidence="Checked {} content page(s) including {}. None declares an "
-                     "Organization-level JSON-LD type.{}{}".format(
+                     "Organization-level JSON-LD type.{}{}{}{}".format(
                          len(pages),
                          ", ".join(example_urls([p["url"] for p in identity_pages], 3)),
+                         " That includes every one of the {} homepages this site serves ({}), "
+                         "not only the first.".format(
+                             len(homes), ", ".join(p["url"] for p in homes[:6]))
+                         if len(homes) > 1 else "",
+                         " {} {} an organisation only as the publisher, author or brand "
+                         "of something on the page ({}), which says who that thing belongs "
+                         "to rather than declaring the site's identity.".format(
+                             plural(len(referencing), "page"),
+                             "names" if len(referencing) == 1 else "name",
+                             ", ".join(example_urls(referencing, 2)))
+                         if referencing else "",
                          " Inline Microdata and RDFa on those pages declare {} (the "
                          "itemtype and typeof values, lower-cased as the crawl records "
                          "them), none of which is an identity type.".format(
@@ -2626,6 +2816,9 @@ def _check_organization(result, snapshot, pages, by_type, brand, platform=None):
     # a section of the site rather than the site.
     title_name = _name_is_really_a_page_title(_declared(node, "name"), pages)
     section_url = _org_url_is_a_section(node, snapshot)
+    # A third value that can be judged with no brand name and no language: a
+    # `logo` that is a web page. See `_is_a_page_address`.
+    page_logo = _logo_is_a_page(node)
 
     home = _homepage_without_org_markup(by_type)
     # The finding this guards against was published on a real site: "https://<shop>/
@@ -2678,7 +2871,7 @@ def _check_organization(result, snapshot, pages, by_type, brand, platform=None):
                 ("Correct the values first - see the finding about this block - and then keep "
                  "them identical everywhere. The block the other pages publish is the one that "
                  "is wrong here, so copying it as it stands spreads the fault to the homepage."
-                 if (title_name or section_url) else
+                 if (title_name or section_url or page_logo) else
                  "Keep the values byte-identical to the block the other pages already publish. "
                  "A second identity worded differently is worse than one."),
                 where_the_template_is(platform),
@@ -2694,7 +2887,7 @@ def _check_organization(result, snapshot, pages, by_type, brand, platform=None):
             snippet=_org_snippet(snapshot, pages, brand, node=node),
         )
 
-    if title_name or section_url:
+    if title_name or section_url or page_logo:
         wrong = []
         if title_name:
             wrong.append('`name` is "{}" - {}'.format(
@@ -2702,7 +2895,15 @@ def _check_organization(result, snapshot, pages, by_type, brand, platform=None):
         if section_url:
             wrong.append("`url` is {}, which is a section of the site rather than the "
                          "site".format(section_url))
+        if page_logo:
+            wrong.append("`logo` is {}, which is a web page rather than an image".format(
+                page_logo))
         steps = []
+        if page_logo:
+            steps.append(
+                "Set `logo` to the address of the logo image itself - a PNG, SVG or JPEG file "
+                "- rather than a page of the site. The field is what a knowledge panel "
+                "renders as the brand's mark, and a page cannot be rendered as one.")
         if title_name:
             # Two tests fire this branch and they justify different sentences.
             # "with no separator, no location prefix and no tagline" was
@@ -2736,7 +2937,9 @@ def _check_organization(result, snapshot, pages, by_type, brand, platform=None):
             id_hint="organization-identity-values-are-wrong",
             title="The Organization block states the page's title as the organisation's name"
                   if title_name else
-                  "The Organization block points `url` at a section of the site",
+                  "The Organization block points `url` at a section of the site"
+                  if section_url else
+                  "The Organization block's `logo` is a web page, not an image",
             severity="high", confidence="high",
             evidence="{} declares {}, and {}. This is the site's own statement of who it is, "
                      "so it is what an assistant repeats.".format(
@@ -2975,6 +3178,24 @@ def _org_extra_props(node):
     """
     return sorted(str(k) for k in (node or {})
                   if not str(k).startswith(("@", "_")) and k not in _ORG_SNIPPET_PROPS)
+
+
+# The properties through which one node names another organisation: who
+# published it, who founded it, who wrote it, whose brand a product carries.
+# An Organization found under one of these is a reference, and whatever it
+# names, it is not the block in which the site declares who it is.
+_REFERENCE_ROLES = frozenset({
+    "publisher", "author", "creator", "founder", "founders", "brand", "manufacturer",
+    "seller", "provider", "sponsor", "funder", "organizer", "performer", "memberof",
+    "parentorganization", "suborganization", "sourceorganization", "copyrightholder",
+    "contributor", "editor", "producer", "offeredby", "worksfor", "affiliation",
+})
+
+
+def _only_referenced(node):
+    """Is this node nested under a property that names somebody, not the site's own block?"""
+    role = str((node or {}).get("_nested_in") or "").replace("_", "").lower()
+    return role in _REFERENCE_ROLES
 
 
 def _speaks_for_the_site(node, brand):
@@ -6044,6 +6265,31 @@ def _check_faq(result, by_type, all_pages=(), platform=None):
     else:
         first_step = ("Add FAQPage markup listing each question on {} and its answer text "
                       "verbatim.".format(without[0]["url"]))
+    # A block whose every answer is a placeholder is not paste-ready, whatever
+    # the finding calls it. A wallpaper shop's FAQ page produced sixteen
+    # questions each answered `<the answer, verbatim from the page>`: the crawl
+    # kept only the first few hundred characters of each answer, so none could
+    # be quoted word for word. Where that is so, the questions are given as a
+    # list and the step says the answers have to be copied in from the page;
+    # no block is offered.
+    payload = _faq_payload(without[0], furniture)
+    unread = _faq_answers_unread(payload)
+    extra = {}
+    if unread:
+        questions_listed = [str(e.get("name") or "") for e in payload.get("mainEntity") or []
+                            if not str(e.get("name") or "").startswith("<")]
+        first_step = (
+            "Add FAQPage markup to {} by hand: none of its answers could be read off the page "
+            "in full, so no block is given here. Write one Question per question the page "
+            "asks, and copy the answer the page prints beneath it, word for word, into "
+            "`acceptedAnswer.text`.{}".format(
+                without[0]["url"],
+                " The questions are: {}.".format("; ".join(
+                    '"{}"'.format(truncate(q, 90)) for q in questions_listed[:FAQ_SNIPPET_MAX]))
+                if questions_listed else ""))
+        result.signal("faq_answers_not_readable", without[0]["url"])
+    else:
+        extra["snippet"] = _snippet_block(payload)
     result.add(
         id_hint="no-faq-schema",
         title="{} no FAQPage markup".format(
@@ -6096,7 +6342,7 @@ def _check_faq(result, by_type, all_pages=(), platform=None):
                   "shaped like the thing an assistant is trying to produce, which makes them "
                   "unusually easy to quote.",
         affected_pages=[p["url"] for p in without],
-        snippet=_faq_snippet(without[0], furniture),
+        **extra
     )
 
 
@@ -6134,6 +6380,19 @@ def _answer_or_placeholder(paragraph):
 
 
 def _faq_snippet(page, furniture=frozenset()):
+    """The paste-ready FAQPage block for this page. See `_faq_payload`."""
+    return _snippet_block(_faq_payload(page, furniture))
+
+
+def _faq_answers_unread(payload):
+    """Is every answer in this FAQPage payload a placeholder?"""
+    entities = payload.get("mainEntity") or []
+    return bool(entities) and all(
+        str(((e.get("acceptedAnswer") or {}).get("text")) or "").startswith("<")
+        for e in entities)
+
+
+def _faq_payload(page, furniture=frozenset()):
     """Every question on the page, and nothing that is not a question.
 
     The instruction printed above this snippet says "listing each question and
@@ -6201,18 +6460,23 @@ def _faq_snippet(page, furniture=frozenset()):
     if len(entities) < MIN_ANSWERED_QUESTIONS:
         entities = [{"@type": "Question", "name": "<question as a visitor would ask it>",
                      "acceptedAnswer": {"@type": "Answer", "text": "<the answer, verbatim>"}}]
-    payload = {"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": entities}
     # The snippet is one page's Q&A and nothing else. Saying so belongs in the
     # fix text, not inside the block: a snippet is paste-ready JSON-LD, and an
     # HTML comment in front of it makes the whole thing fail to parse, which is
     # worse than the confusion it was added to prevent. `_check_faq` names the
     # page the questions came from in its first step instead.
-    return _snippet_block(payload)
+    return {"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": entities}
 
 
 def _check_breadcrumbs(result, pages, by_type, platform=None):
     result.check("breadcrumb-markup")
-    crawled_deep = [p for p in pages if p["page_type"] in DEEP_TYPES and p.get("depth", 0) >= 1]
+    # Deep means two path segments or more. `depth` is link distance from the
+    # homepage, and a database project's `/docs.html`, `/android/` and `/sqlar/`
+    # sit one click and one segment from the root - there is no trail to mark
+    # up above a page whose parent is the homepage. The engagement skill's
+    # visible-breadcrumb check draws the same line.
+    crawled_deep = [p for p in pages if p["page_type"] in DEEP_TYPES and p.get("depth", 0) >= 1
+                    and len([s for s in urlparse(p.get("url") or "").path.split("/") if s]) >= 2]
     if len(crawled_deep) < 3:
         result.skip("breadcrumb-markup",
                     "fewer than 3 deep pages were crawled, so breadcrumb markup would not "
@@ -6409,6 +6673,25 @@ def _search_evidence(pages, home):
 WEBSITE_TYPES = frozenset({"website", "searchaction"})
 
 
+def _homepages_declaring_a_search_action(homes):
+    """The homepages carrying WebSite markup or a SearchAction on a top-level node."""
+    declaring = []
+    for page in homes:
+        if "website" in _types_on(page):
+            declaring.append(page)
+            continue
+        for node in page.get("jsonld") or []:
+            if not isinstance(node, dict) or node.get("_nested_in"):
+                continue
+            actions = node.get("potentialAction")
+            if any(isinstance(action, dict)
+                   and "searchaction" in jsonld_type_names(action.get("@type"))
+                   for action in (actions if isinstance(actions, list) else [actions])):
+                declaring.append(page)
+                break
+    return declaring
+
+
 def _check_website_searchaction(result, by_type, platform=None):
     result.check("website-searchaction-markup")
     homes = by_type.get("home", [])
@@ -6467,6 +6750,21 @@ def _check_website_searchaction(result, by_type, platform=None):
         return
     if "website" in _types_on(home):
         result.skip("website-searchaction-markup", "the homepage already declares WebSite markup")
+        return
+    # A SearchAction is a SearchAction whichever node carries it, and every
+    # homepage is a homepage. A shop's `OnlineStore` node carries its
+    # potentialAction, and a retailer's root is a country picker whose five
+    # regional homepages each declare WebSite with a SearchAction - both were
+    # told they "declare no WebSite type with a potentialAction", in a finding
+    # whose own evidence line said the site "already declares a SearchAction".
+    declaring = _homepages_declaring_a_search_action(homes)
+    if declaring:
+        result.skip("website-searchaction-markup",
+                    "{} already {} a SearchAction on a node that describes the site itself "
+                    "- WebSite, the organisation, or the store - which is what a consumer "
+                    "reads it from".format(
+                        ", ".join(p["url"] for p in declaring[:5]),
+                        "declares" if len(declaring) == 1 else "declare"))
         return
 
     # What a page's own search form says, rather than a guess at it. The
@@ -6847,7 +7145,14 @@ def _brand_names_in_markup(pages):
     seen = set()
     for page in pages:
         url = page.get("url") or ""
-        names = [str(_prop(node, "brand") or "").strip()
+        # A `brand` written as a reference - `{"@id": "<site>/#brand"}` - names
+        # the node with that `@id` on the same page, and the name is on that
+        # node. Read as it stood, the reference was compared as a spelling of
+        # the brand: "states its brand as '<Name>' on 30 pages;
+        # 'https://<site>/#brand' on 13", about a Brand node named "<Name>".
+        by_id = {str(node.get("@id")): node for node in (page.get("jsonld") or [])
+                 if isinstance(node, dict) and node.get("@id")}
+        names = [_resolved_brand_name(node.get("brand"), by_id)
                  for node in _nodes_of(page, _BRANDED_TYPES)]
         names += [str(_prop(node, "name") or "").strip()
                   for node in _nodes_of(page, {"brand"})]
@@ -6856,6 +7161,27 @@ def _brand_names_in_markup(pages):
                 seen.add((name, url))
                 found.append((name, url))
     return found
+
+
+def _resolved_brand_name(value, by_id):
+    """The name a `brand` value gives, following an `@id` reference on the page.
+
+    "" where the value is a reference to nothing on the page: an address is
+    not a name, and reporting it as one is the fault this exists to stop.
+    """
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, dict):
+        name = value.get("name")
+        if name:
+            return str(name).strip()
+        value = value.get("@id") or ""
+    value = str(value or "").strip()
+    if value in by_id:
+        return str(by_id[value].get("name") or "").strip()
+    if re.match(r"^(?:https?:)?//|^#", value):
+        return ""
+    return value
 
 
 def _spellings_of(pairs):
@@ -7751,6 +8077,79 @@ def _escaped_twice(value):
     return isinstance(value, str) and bool(_CHARACTER_REFERENCE_RE.search(value))
 
 
+def _edition_keys(pages):
+    """{id(page): the page it is an edition of}, for regional and language editions.
+
+    Two readings. The same path under different edition prefixes - `/au/x`,
+    `/sg/x` - is one page in two editions, and so is a page and the addresses
+    its `hreflang` alternates name.
+    """
+    parent = {}
+
+    def root(key):
+        while parent.setdefault(key, key) != key:
+            parent[key] = parent[parent[key]]
+            key = parent[key]
+        return key
+
+    def join(a, b):
+        parent[root(a)] = root(b)
+
+    keys = {}
+    for page in pages:
+        parsed = urlparse(str(page.get("final_url") or page.get("url") or ""))
+        segments = [s for s in parsed.path.split("/") if s]
+        if segments and _EDITION_SEGMENT_RE.match(segments[0]):
+            segments = segments[1:]
+        key = (parsed.netloc.lower(), "/".join(segments), parsed.query)
+        keys[id(page)] = key
+        root(key)
+        for alternate in page.get("hreflang") or []:
+            href = alternate.get("href") if isinstance(alternate, dict) else alternate
+            if href:
+                other = urlparse(str(href))
+                other_segments = [s for s in other.path.split("/") if s]
+                if other_segments and _EDITION_SEGMENT_RE.match(other_segments[0]):
+                    other_segments = other_segments[1:]
+                join((other.netloc.lower(), "/".join(other_segments), other.query), key)
+    return {page_id: root(key) for page_id, key in keys.items()}
+
+
+def _shared_across_pages(pages, field, value, editions):
+    """Do pages that are not editions of one page carry this value?"""
+    return len({editions.get(id(p)) for p in pages if p.get(field) == value}) > 1
+
+
+# The words a page carries in the editor and not in public: a landing-page tag,
+# a draft marker, a copy the editor made. Strong ones make a title a working
+# label beside one word of its own; weak ones only on their own.
+_WORKING_LABEL_STRONG = frozenset({"lp", "draft", "untitled", "wip", "tbd", "placeholder",
+                                   "lorem", "ipsum", "copy"})
+_WORKING_LABEL_WEAK = frozenset({"test", "testing", "temp", "staging", "dummy"})
+_TITLE_FILLER_WORDS = frozenset({"app", "page", "new", "home", "landing", "site", "web",
+                                 "mobile", "the", "a", "of", "and", "final", "version"})
+
+
+def _title_is_a_working_label(title):
+    """Is this <title> the name a page had in the editor, like "App LP - 2023"?
+
+    A coffee roaster's application landing page publishes "App LP - 2023" as
+    both its `<title>` and its og:title, and the title check passed it. A
+    landing-page tag, a year and one generic word is not a name for a reader.
+    Read as words: a strong marker beside at most one word of the page's own,
+    or a weak marker with none - so "Draft Beer Menu" and "Test Kitchen
+    Recipes" are titles.
+    """
+    words = re.findall(r"[^\W\d_]+", str(title or "").lower())
+    if not words:
+        return False
+    strong = [w for w in words if w in _WORKING_LABEL_STRONG]
+    weak = [w for w in words if w in _WORKING_LABEL_WEAK]
+    own = [w for w in words if w not in _WORKING_LABEL_STRONG | _WORKING_LABEL_WEAK
+           | _TITLE_FILLER_WORDS]
+    return bool((strong and len(own) <= 1) or (weak and not own))
+
+
 def _check_titles_and_descriptions(result, pages):
     result.check("title-and-description")
     # A URL and its own declared canonical target are one page, and the site is
@@ -7787,9 +8186,24 @@ def _check_titles_and_descriptions(result, pages):
                and (p.get("og") or {}).get("og:description")]
 
     titles = Counter(p["title"] for p in pages if p.get("title"))
-    duplicate_titles = [t for t, n in titles.items() if n > 1]
     descriptions = Counter(p["meta_description"] for p in pages if p.get("meta_description"))
-    duplicate_descriptions = [d for d, n in descriptions.items() if n > 1]
+    # Editions of one page are one page here. A retailer publishes its story
+    # page at `/au/our-story`, `/ca/our-story`, `/sg/our-story` and
+    # `/uk/our-story` with one description, and was told "17 of 38 pages share a
+    # meta description with another page" - within any one region the
+    # descriptions differ. A value repeated only across the editions of one
+    # page is that page's value. See `_edition_keys`.
+    editions = _edition_keys(pages)
+    duplicate_titles = [t for t, n in titles.items()
+                        if n > 1 and _shared_across_pages(pages, "title", t, editions)]
+    duplicate_descriptions = [d for d, n in descriptions.items()
+                              if n > 1 and _shared_across_pages(pages, "meta_description", d,
+                                                                editions)]
+    result.signal("regional_editions_folded",
+                  len(pages) - len(set(editions.values())) if editions else 0)
+    # A working label published as the page's title: "App LP - 2023". See
+    # `_title_is_a_working_label`.
+    working_titles = [p for p in pages if _title_is_a_working_label(p.get("title"))]
 
     problems = []
     if missing_title:
@@ -7806,7 +8220,13 @@ def _check_titles_and_descriptions(result, pages):
     # the severity and never removes the fact.
     # One page without a description is an oversight, not a template fault.
     undescribed = missing_desc + og_only
-    if len(undescribed) >= max(2, len(pages) * 0.25):
+    # Whether the missing descriptions are reported at all. Below the line they
+    # are neither a sentence in the evidence nor a page in the affected list
+    # nor a reason for `medium`: a coffee roaster with one working-label title
+    # was listed with nine undescribed collection pages the evidence never
+    # mentioned, and the finding took its severity from them.
+    undescribed_reported = len(undescribed) >= max(2, len(pages) * 0.25)
+    if undescribed_reported:
         if missing_desc:
             problems.append("{} of {} page(s) have no meta description and no og:description "
                             "either".format(len(missing_desc), len(pages)))
@@ -7877,10 +8297,51 @@ def _check_titles_and_descriptions(result, pages):
             "name for the page, such as \"{}\" on {}".format(
                 len(url_titles), len(pages), truncate(url_titles[0]["title"], 60),
                 url_titles[0]["url"]))
+    if working_titles:
+        first = working_titles[0]
+        problems.append(
+            "{} of {} page(s) publish a working label as their <title>{}, such as \"{}\" on "
+            "{} - the name a page had in the editor, not a name for a reader".format(
+                len(working_titles), len(pages),
+                " and og:title" if all((p.get("og") or {}).get("og:title") == p.get("title")
+                                       for p in working_titles) else "",
+                truncate(first["title"], 60), first["url"]))
+    address_titles = list(url_titles)
+    url_titles = url_titles + [p for p in working_titles if p not in url_titles]
     off_length = long_titles + short_titles
-    if len(off_length) >= max(4, len(pages) * 0.6):
+    length_reported = len(off_length) >= max(4, len(pages) * 0.6)
+    if length_reported:
         problems.append("{} of {} title(s) fall outside {}-{} characters ({})".format(
             len(off_length), len(pages), TITLE_MIN, TITLE_MAX, _TITLE_RANGE_NOTE))
+
+    # The title names the fault that reaches the most pages, with its count.
+    # "Page titles and meta descriptions need attention" was the same sentence
+    # on eleven of twelve sites audited together, whether 59 of 59 pages had no
+    # description or two pages shared one, and a reader could not tell which
+    # from the heading.
+    headlines = []
+    if missing_title:
+        headlines.append((len(missing_title), "have no <title>"))
+    if undescribed_reported and missing_desc:
+        headlines.append((len(missing_desc), "have no meta description"))
+    elif undescribed_reported:
+        headlines.append((len(og_only), "have a description only in their Open Graph tags"))
+    if duplicate_titles:
+        headlines.append((len([p for p in pages if p.get("title") in duplicate_titles]),
+                          "share a <title> with another page"))
+    if duplicate_descriptions:
+        headlines.append((len([p for p in pages
+                               if p.get("meta_description") in duplicate_descriptions]),
+                          "share a meta description with another page"))
+    if address_titles:
+        headlines.append((len(address_titles), "are titled with their own address"))
+    if working_titles:
+        headlines.append((len(working_titles), "carry an editor's working label as the <title>"))
+    if wordless:
+        headlines.append((len(wordless), "carry a title or description with no word in it"))
+    if length_reported:
+        headlines.append((len(off_length), "have a <title> outside {}-{} characters".format(
+            TITLE_MIN, TITLE_MAX)))
 
     if not problems:
         # "every crawled page has a unique title and meta description" was
@@ -7899,7 +8360,11 @@ def _check_titles_and_descriptions(result, pages):
                             TITLE_MIN, TITLE_MAX))
         return
 
-    affected = {p["url"] for p in missing_title + undescribed + url_titles + wordless}
+    affected = {p["url"] for p in missing_title + url_titles + wordless}
+    if undescribed_reported:
+        affected.update(p["url"] for p in undescribed)
+    if length_reported:
+        affected.update(p["url"] for p in off_length)
     for page in pages:
         if page.get("title") in duplicate_titles or page.get("meta_description") in duplicate_descriptions:
             affected.add(page["url"])
@@ -7909,11 +8374,25 @@ def _check_titles_and_descriptions(result, pages):
     #
     # A title that is the page's own address weighs the same as no title at
     # all, because it answers the question the title exists to answer with the
-    # address the asker already had.
-    severe = bool(missing_title or missing_desc or duplicate_titles or url_titles)
+    # address the asker already had. A working label on one page does not: it
+    # is one page's name left over from the editor, and the rest of the site's
+    # titles are fine.
+    severe = bool(missing_title or (undescribed_reported and missing_desc) or duplicate_titles
+                  or address_titles or len(working_titles) > 1)
+    count, fault = max(headlines, key=lambda item: item[0]) if headlines else (
+        len(affected), "need a title or description fix")
+    if count == 1:
+        verb, _, rest = fault.partition(" ")
+        fault = {"have": "has", "share": "shares", "are": "is", "publish": "publishes",
+                 "carry": "carries", "need": "needs"}.get(verb, verb) + " " + rest
+    title = "{} of the {} {}".format(count, plural(len(pages), "crawled page"), fault)
+    if len(headlines) > 1:
+        more = len(headlines) - 1
+        title += ", and {} more title or description {}".format(
+            more, "fault" if more == 1 else "faults")
     result.add(
         id_hint="title-and-description-hygiene",
-        title="Page titles and meta descriptions need attention",
+        title=title,
         severity="medium" if severe else "low", confidence="high",
         evidence="{}. Affected pages include: {}.".format(
             "; ".join(problems), ", ".join(example_urls(sorted(affected) or [p["url"] for p in pages]))),
@@ -8147,12 +8626,35 @@ def _one_page_at_several_addresses(pages):
             key = parent[key]
         return key
 
+    # Addresses on one path that differ in a parameter selecting the page are
+    # different pages, however alike their text. A university's mail form is
+    # the same form for every office it serves, and its `dir` parameter picks
+    # the office. See `_parameters_that_select`.
+    selecting = _selecting_parameters_by_path(ordered)
+
     for index, left in enumerate(ordered):
         for right in ordered[index + 1:]:
             if root(id(left)) == root(id(right)):
                 continue
+            if _selected_apart(left, right, selecting):
+                continue
             if _how_alike(shingles[id(left)], shingles[id(right)]) >= _SAME_BODY_SIMILARITY:
                 parent[root(id(left))] = root(id(right))
+
+    # A directory and its index file, serving the same text. Read apart from the
+    # likeness above, because that test sets aside pages too short to compare
+    # and a front door that is mostly a menu is exactly that: a project's `/`
+    # and `/home.html` deliver the same 129 characters under the same title, no
+    # canonical on either, and the appendix said "no two crawled addresses
+    # delivered the same main text". Same text, word for word, is not a
+    # likeness to measure.
+    for alias, directory in _index_file_aliases(pages):
+        for page in (alias, directory):
+            if id(page) not in parent:
+                parent[id(page)] = id(page)
+                ordered.append(page)
+        if root(id(alias)) != root(id(directory)):
+            parent[root(id(alias))] = root(id(directory))
 
     grouped = defaultdict(list)
     for page in ordered:
@@ -8160,6 +8662,46 @@ def _one_page_at_several_addresses(pages):
     return sorted((sorted(group, key=lambda p: (len(p["url"]), p["url"]))
                    for group in grouped.values() if len(group) > 1),
                   key=lambda g: g[0]["url"])
+
+
+# The file names a web server answers a directory's address with. A directory
+# reachable at both `/docs/` and `/docs/index.html` is one page at two
+# addresses by the server's own construction.
+_INDEX_FILE_RE = re.compile(
+    r"^(?:index|home|default|main|start)\.(?:html?|php|aspx?|jsp|cfm|shtml)$", re.I)
+
+
+def _index_file_aliases(pages):
+    """(index-file page, directory page) pairs that delivered the same text.
+
+    The text has to be identical once whitespace is folded, and not empty, and
+    the two have to sit on one host with the index file directly in the
+    directory. A same-named file one level down is a different page.
+    """
+    by_address = {}
+    for page in pages:
+        address = str(page.get("final_url") or page.get("url") or "")
+        parts = urlparse(address)
+        by_address[(parts.netloc.lower(), parts.path or "/")] = page
+    pairs = []
+    for (host, path), page in sorted(by_address.items()):
+        directory, _, filename = path.rpartition("/")
+        if not _INDEX_FILE_RE.match(filename):
+            continue
+        other = by_address.get((host, directory + "/"))
+        if other is None or other is page:
+            continue
+        text = " ".join(str(page.get("body_text") or "").split())
+        if text and text == " ".join(str(other.get("body_text") or "").split()):
+            pairs.append((page, other))
+    return pairs
+
+
+def _is_an_index_file_group(group):
+    """Does this group of copies hold a directory and its own index file?"""
+    urls = {str(p.get("final_url") or p.get("url") or "") for p in group}
+    return any(page in group and other in group
+               for page, other in _index_file_aliases(group)) and len(urls) > 1
 
 
 def _fold_identical_pages(pages):
@@ -8176,6 +8718,76 @@ def _fold_identical_pages(pages):
     if not duplicates:
         return list(pages)
     return [p for p in pages if id(p) not in duplicates]
+
+
+def _what_the_page_says_it_is(page):
+    """The title and top heading, folded, as the page's own statement of itself."""
+    headings = (page.get("headings") or {}).get("h1") or []
+    return (" ".join(str(page.get("title") or "").split()),
+            " ".join(" ".join(str(h).split()) for h in headings))
+
+
+def _parameters_that_select(entries):
+    """Query parameters whose value changes what the page says it is.
+
+    A university's mail form is one path, `news_mail_j.php`, and its `dir`
+    parameter names the office the message goes to - one address heads its
+    form "<Institute> へのお問い合わせ内容", the others render the office name
+    elsewhere. They were grouped as one page reached through tracking
+    parameters, and the fix pointed every one of them at the bare address: a
+    canonical that tells every crawler all seven offices' forms are the first
+    one. A parameter is a filter when changing it leaves the title and heading
+    alone; where changing it changes either, it selects a different page, and
+    addresses that differ in it are not twins.
+    """
+    parsed = [(parse_qs(query, keep_blank_values=True), _what_the_page_says_it_is(page))
+              for query, page in entries]
+    names = sorted({name for values, _said in parsed for name in values})
+    selecting = []
+    for name in names:
+        said_by_value = defaultdict(set)
+        for values, said in parsed:
+            said_by_value[tuple(values.get(name) or ())].add(said)
+        if len(said_by_value) < 2:
+            continue
+        # Changing this parameter's value changed the page's own statement
+        # for at least one value: its pages do not all say the same thing.
+        if len({said for group in said_by_value.values() for said in group}) > 1 and any(
+                said_by_value[a] != said_by_value[b]
+                for a in said_by_value for b in said_by_value if a != b):
+            selecting.append(name)
+    return selecting
+
+
+def _address_parts(page):
+    """(host, path, query) of the address a page was delivered at."""
+    parsed = urlparse(str(page.get("final_url") or page.get("url") or ""))
+    return parsed.netloc.lower(), parsed.path.rstrip("/") or "/", parsed.query
+
+
+def _selecting_parameters_by_path(pages):
+    """{(host, path): [parameters that select the page]} across these pages."""
+    by_path = defaultdict(list)
+    for page in pages:
+        host, path, query = _address_parts(page)
+        if query:
+            by_path[(host, path)].append((query, page))
+    return {key: _parameters_that_select(entries)
+            for key, entries in by_path.items() if len(entries) > 1}
+
+
+def _selected_apart(left, right, selecting):
+    """Are these two addresses one path with different values of a selecting parameter?"""
+    left_host, left_path, left_query = _address_parts(left)
+    right_host, right_path, right_query = _address_parts(right)
+    if (left_host, left_path) != (right_host, right_path):
+        return False
+    names = selecting.get((left_host, left_path)) or ()
+    if not names:
+        return False
+    left_values = parse_qs(left_query, keep_blank_values=True)
+    right_values = parse_qs(right_query, keep_blank_values=True)
+    return any(left_values.get(name) != right_values.get(name) for name in names)
 
 
 def _parameter_twins(pages):
@@ -8220,12 +8832,18 @@ def _parameter_twins(pages):
         if len({query for query, _page in entries}) < 2:
             continue
         twinned.update(page["url"] for _query, page in entries)
+        # A parameter whose value changes what the page says about itself
+        # selects a page; it does not filter one. See `_parameters_that_select`.
+        selecting = _parameters_that_select(entries)
         by_title = defaultdict(list)
         for query, page in entries:
             title = " ".join((page.get("title") or "").split())
             if title:
-                by_title[title].append((query, page))
-        for title, members in sorted(by_title.items()):
+                values = parse_qs(query, keep_blank_values=True)
+                key = (title,) + tuple(tuple(values.get(name) or ()) for name in selecting)
+                by_title[key].append((query, page))
+        for key, members in sorted(by_title.items()):
+            title = key[0]
             if len({query for query, _page in members}) < 2:
                 continue
             if any(_declares_which_page_it_is(page) for _query, page in members):
@@ -8277,7 +8895,10 @@ def _check_canonical_declaration(result, pages, platform=None):
     differing_titles = len([group for group in copies
                             if len({" ".join((p.get("title") or "").split())
                                     for p in group}) > 1])
-    reported_copies = len(copied) >= PARAMETER_TWIN_MINIMUM
+    # A directory answering at its index file as well is a server shape, not a
+    # stray link, so one such pair is enough. See `_index_file_aliases`.
+    index_groups = [group for group in copies if _is_an_index_file_group(group)]
+    reported_copies = len(copied) >= PARAMETER_TWIN_MINIMUM or bool(index_groups)
     if reported_copies:
         widest = max(copies, key=len)
         result.add(
@@ -8361,6 +8982,17 @@ def _check_canonical_declaration(result, pages, platform=None):
                         "while declaring no canonical - so the parameters select different "
                         "pages rather than filtering one".format(
                             plural(len(twinned), "page"), plural(len(pages), "crawled page")))
+        elif copied:
+            # Said as it is. The sentence below used to be printed here too,
+            # claiming no two addresses delivered the same text on a crawl where
+            # two had.
+            result.skip("canonical-declaration",
+                        "{} delivered the same main text as another crawled address with no "
+                        "canonical declared ({}), which is below the {} that would make this a "
+                        "template serving one page at several addresses rather than a stray "
+                        "link".format(plural(len(copied), "crawled address",
+                                             "crawled addresses"),
+                                      ", ".join(copied[:3]), PARAMETER_TWIN_MINIMUM))
         else:
             result.skip("canonical-declaration",
                         "no crawled page was reached at a second address differing only in its "

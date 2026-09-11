@@ -479,7 +479,7 @@ def run(snapshot, allow_network=True, time_budget=None, snapshot_path=None):
         # read as one: judged as a way in, as a stub gateway is, and named.
         gateway_home, home = home, None
     _check_homepage_orientation(result, home, english, stub_home=stub_home,
-                                gateway_home=gateway_home, cover=cover)
+                                gateway_home=gateway_home, cover=cover, kind=kind)
     _check_navigation(result, home, pages, stub_home=stub_home, gateway_home=gateway_home,
                       cover=cover)
     _check_dead_ends(result, pages, render_mode, kind)
@@ -669,8 +669,26 @@ def _report_cover_page(result, home, destinations):
     )
 
 
+def _onward_links_of_a_document(home, kind):
+    """How many links a personal or single-document homepage offers onward, or 0.
+
+    0 unless the site is established to be a person's, a lab's, or one
+    document and its translations. Such a site sells nothing and books
+    nothing, so its next step is not a call to action but a link: to its
+    source, its author, its other language editions. A one-page essay in
+    twenty languages was told "no call-to-action link, button or form was
+    found anywhere in the page" at high severity, a business's shape applied
+    to a document.
+    """
+    if kind is None or not kind.is_certainly(PERSONAL_OR_ACADEMIC):
+        return 0
+    links = (home or {}).get("links") or {}
+    return (len(links.get("internal") or []) + len(links.get("external") or [])
+            or (links.get("internal_count") or 0) + (links.get("external_count") or 0))
+
+
 def _check_homepage_orientation(result, home, english=True, stub_home=None,
-                                gateway_home=None, cover=None):
+                                gateway_home=None, cover=None, kind=None):
     """Does the homepage say where you are and what to do next?
 
     Two of the three signals here are English: the list of headings that say
@@ -734,6 +752,9 @@ def _check_homepage_orientation(result, home, english=True, stub_home=None,
     # statement about the delivered HTML only. See
     # `_next_step_supplied_from_elsewhere`.
     supplier = "" if _read_by_a_browser(home) else _next_step_supplied_from_elsewhere(home)
+    # A fifth: on a site that is one person's, or one document, a link onward
+    # is the whole of what a next step is. See `_onward_links_of_a_document`.
+    onward = _onward_links_of_a_document(home, kind)
     problems = []
 
     if not h1s:
@@ -749,7 +770,7 @@ def _check_homepage_orientation(result, home, english=True, stub_home=None,
                         "are English-only and this site is not in English")
             return
     elif not cta.get("found") and not cta.get("button_count") and not next_step_forms \
-            and not supplier:
+            and not supplier and not onward:
         problems.append("no call-to-action link, button or form was found anywhere in the page")
     # `cta.get("found")` guards both arms below because `within_first_1500` is
     # False when nothing was found at all, and the else arm then formatted
@@ -804,6 +825,14 @@ def _check_homepage_orientation(result, home, english=True, stub_home=None,
             offer = ("hands its next step to a third party it both loads a script from and "
                      "links to ({}), which no browser ran to expand during this audit, so "
                      "whether the expanded page offers one was not judged".format(supplier))
+        elif onward and not next_step_forms:
+            # The document branch: no call to action was looked for, because
+            # none is expected, and the sentence says why and what stands in
+            # for one.
+            offer = ("offers {} onward - to its source, its author or its other editions - "
+                     "which is the next step a site read as {} ({}) is expected to offer; a "
+                     "call to action to buy, book or contact sales was not looked for".format(
+                         plural(onward, "link", "links"), kind.kind, kind.why()))
         else:
             # The forms branch. Same rule: name what was actually found rather
             # than printing "carries 0 button(s)" about a page whose next step
@@ -854,7 +883,7 @@ def _check_homepage_orientation(result, home, english=True, stub_home=None,
     # buttons on it. `button_count` was already being measured and read by
     # nothing.
     no_cta = (english and not cta.get("found") and not cta.get("button_count")
-              and not next_step_forms and not supplier)
+              and not next_step_forms and not supplier and not onward)
     if orients_in_prose and not no_cta:
         severity = "low"
         problems.append("the opening text does explain what this is, so this is a headings "
@@ -886,6 +915,11 @@ def _check_homepage_orientation(result, home, english=True, stub_home=None,
             # to a free command-line tool with no purchase funnel and to a
             # charity. Naming the shape rather than the sector makes the advice
             # usable by whoever is reading it.
+            # A person's or a single document's site gets the document's
+            # shape of next step, not a business's.
+            "Put one link onward within the first screen - the document's source, its author, "
+            "or its other language editions - worded as what the reader gets there."
+            if kind is not None and kind.is_certainly(PERSONAL_OR_ACADEMIC) else
             "Put one primary call to action within the first screen of content, worded as the "
             "specific thing the visitor came to do - whatever that is on this site, whether it "
             "is downloading, booking, donating, reading the documentation or seeing the prices "
@@ -2534,12 +2568,17 @@ def _check_broken_links(result, snapshot, pages, fetcher, why_no_fetcher="",
         set_aside.setdefault(url, why)
     unreadable_keys = {_orphan_key(url) for url in set_aside}
 
-    linked = set()
+    # Which pages carry each link, as well as which targets are linked. A dead
+    # target is fixed on the page that links to it, and a report that named
+    # only the target - `https://<host>/fil/<code-host>/<user>` - never said
+    # that the link to fix sits on `/fil/`.
+    linked, carried_by = set(), {}
     for page in pages:
         for link in ((page.get("links") or {}).get("internal") or []):
             key = _orphan_key(link.get("url") or "")
             if key and key not in unreadable_keys:
                 linked.add(key)
+                carried_by.setdefault(key, set()).add(page["url"])
 
     # robots.txt governs this probe too. The crawl filters its own queue, so a
     # disallowed path is never fetched and therefore never lands in `known` -
@@ -2686,30 +2725,111 @@ def _check_broken_links(result, snapshot, pages, fetcher, why_no_fetcher="",
         return
 
     rate = len(broken) / float(checked)
+    # Source and target, for every dead link. The page to edit is the source;
+    # the target is what it points at. A target no crawled page links to is
+    # impossible here - `linked` above and the probe candidates are both read
+    # off pages' own links - so the fallback is only ever the target itself.
+    sources = {url: sorted(carried_by.get(_orphan_key(url)) or []) for url, _ in broken}
+    result.signal("broken_link_targets", {url: srcs for url, srcs in sorted(sources.items())})
+    scheme_less = {url: _written_without_a_scheme(url) for url, _ in broken}
+    scheme_less = {url: rest for url, rest in scheme_less.items() if rest}
+
+    def carried(url):
+        srcs = sources.get(url) or []
+        if not srcs:
+            return "{} (no crawled page's link to it was recorded)".format(url)
+        return "{} links to {}".format(" and ".join(example_urls(srcs, 2)), url)
+
+    examples = "; ".join("{} -> {}".format(carried(u), s) for u, s in sorted(broken)[:5])
+    missing_scheme = ""
+    if scheme_less:
+        missing_scheme = (
+            " {} written without `https://`: {}. A browser reads an address with no scheme "
+            "as a path on the site it is on, so the link lands under the page carrying it and "
+            "gets an error instead of reaching the other site.".format(
+                "That link is" if len(scheme_less) == 1 else
+                "{} of those links are".format(len(scheme_less)),
+                "; ".join("{} links `{}`, meaning `https://{}`".format(
+                              " and ".join(example_urls(sources.get(url) or [], 2))
+                              or "the page carrying it", rest, rest)
+                          for url, rest in sorted(scheme_less.items())[:3])))
+    steps = []
+    if scheme_less:
+        steps.append(
+            "Add `https://` to the start of each link written without it - {} - on the page "
+            "named beside it. That is the whole fix for those: the site they name exists, and "
+            "the link is being read as a path on this one.".format(
+                "; ".join("on {}, `{}` becomes `https://{}`".format(
+                              " and ".join(example_urls(sources.get(url) or [], 2))
+                              or "the page carrying it", rest, rest)
+                          for url, rest in sorted(scheme_less.items())[:3])))
+    steps += [
+        "On each page named above, correct the link to its current URL, or remove it if the "
+        "destination is gone.",
+        "Add a 301 from the old URL where the page moved, so existing links keep working.",
+        "Run a link check as part of publishing so this does not accumulate again.",
+    ]
+    pages_to_edit = sorted({src for srcs in sources.values() for src in srcs}
+                           | {url for url, srcs in sources.items() if not srcs})
     result.add(
         id_hint="broken-internal-links",
         title="{} an error".format(
             plural(len(broken), "internal link target returns", "internal link targets return")),
         severity="high" if rate > BROKEN_LINK_HIGH else "medium", confidence="high",
-        evidence="{} of {} tested internal link targets ({}%) are gone. Examples: {}.{}".format(
-                     len(broken), checked, pct(len(broken), checked),
-                     "; ".join("{} -> {}".format(u, s) for u, s in sorted(broken)[:5]),
+        evidence="{} of {} tested internal link targets ({}%) are gone: {}.{}{}".format(
+                     len(broken), checked, pct(len(broken), checked), examples,
+                     missing_scheme,
                      " A further {} could not be verified and are excluded from "
                      "the rate.".format(unchecked + len(set_aside))
                      if (unchecked or set_aside) else ""),
         mechanism="G", root_cause="broken-links",
-        summary="Fix or remove the internal links that lead nowhere.",
-        how_to_fix=[
-            "Correct each link to its current URL, or remove it if the destination is gone.",
-            "Add a 301 from the old URL where the page moved, so existing links keep working.",
-            "Run a link check as part of publishing so this does not accumulate again.",
-        ],
+        summary="Fix or remove the internal links that lead nowhere, on the pages that carry "
+                "them.",
+        how_to_fix=steps,
         effort="medium", owner="developer",
         rationale="A broken link is a visitor stopped mid-journey with nothing to "
                   "do but leave. At this rate it is happening often enough to be a pattern "
                   "rather than an accident.",
-        affected_pages=[u for u, _ in sorted(broken)],
+        # The pages carrying the dead links, because those are the pages an
+        # owner opens to fix them. The targets are in the evidence above and in
+        # the `broken_link_targets` signal.
+        affected_pages=pages_to_edit,
     )
+
+
+# A path segment that is a host name: labels joined by dots, ending in a label
+# of letters. `code-host.test` in `/fil/code-host.test/<user>` is one; `news.html` is
+# not, because a host name is followed by more of the address or starts with
+# `www.`, and a file name ends it.
+_HOST_SEGMENT_RE = re.compile(
+    r"^(?:www\.[a-z0-9-]+(?:\.[a-z0-9-]+)*|[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,24})$", re.I)
+
+
+def _written_without_a_scheme(url):
+    """The part of `url` that is another site's address, or "".
+
+    A link written `code-host.test/<user>` rather than `https://code-host.test/<user>`
+    is read by every browser as a relative path, so on `/fil/` it resolves to
+    `/fil/code-host.test/<user>` on this site and answers 404. Read off the
+    resolved address, because the crawl records that and not the raw `href`:
+    a segment shaped like a host name, which either starts with `www.` or has
+    more of the address after it, is where the other site's address begins.
+    """
+    path = urlparse(url or "").path
+    segments = [s for s in path.split("/") if s]
+    for index, segment in enumerate(segments):
+        if not _HOST_SEGMENT_RE.match(segment):
+            continue
+        if segment.lower().startswith("www.") or index < len(segments) - 1:
+            rest = "/".join(segments[index:])
+            query = urlparse(url).query
+            return rest + ("?" + query if query else "")
+    return ""
+
+
+def _path_segments(url):
+    """How many path segments sit below the root: `/docs.html` is 1, `/a/b/` is 2."""
+    return len([s for s in urlparse(url or "").path.split("/") if s])
 
 
 def _check_breadcrumbs(result, pages):
@@ -2719,7 +2839,17 @@ def _check_breadcrumbs(result, pages):
     a human can see where they are.
     """
     result.check("breadcrumb-navigation")
-    deep = [p for p in pages if p["page_type"] in DEEP_TYPES and p.get("depth", 0) >= 1]
+    # Deep by its address as well as by its type and its crawl depth. A page one
+    # segment below the root - `/docs.html`, `/news/` - sits at the top level,
+    # where the menu is the trail and a breadcrumb would read "Home > This
+    # page". Two documentation hubs one click from a homepage were counted as
+    # deep pages missing a trail. The one exception is the site's own word: a
+    # top-level page whose markup declares a BreadcrumbList has been given a
+    # trail by its template, and one a visitor cannot see is the gap this
+    # check exists for.
+    deep = [p for p in pages if p["page_type"] in DEEP_TYPES and p.get("depth", 0) >= 1
+            and (_path_segments(p.get("url")) >= 2
+                 or (p.get("breadcrumb") or {}).get("markup"))]
     if len(deep) < 3:
         result.skip("breadcrumb-navigation",
                     "fewer than 3 deep pages were crawled, so breadcrumbs would not change "

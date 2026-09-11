@@ -9,14 +9,16 @@ snapshot and — apart from a small, declared request budget each — fetch noth
 
 ---
 
-## The budget, and why it is 115 seconds rather than 240
+## The budget, and why it is 142 seconds rather than 240
 
-`scripts/crawl.py <origin> --out snapshot.json --budget 115`.
+`scripts/crawl.py <origin> --out snapshot.json --budget 142`.
 
 240 is the script's own default and is wrong for a composed run: step 3's six skills are owed a
 share of the same five minutes. The six sub-skills' wall clock is reserved **before** the crawl
-starts, not after — the crawl is told 115 s and killed at 125, the boundary of a 148 s reserve
-it cannot reach.
+starts, not after — at the default 285 s ceiling the crawl is told 142 s and killed at 155, the
+boundary of a 118 s reserve it cannot reach, with 12 s more kept for composing the report. The
+numbers are computed in `run_audit.py` from the step floors, printed on the run's first lines,
+and held to this page by `tests/test_the_budget_the_docs_state.py`.
 
 A skill given a network budget is killed a whole wedged response (40 s) after the second it was
 told to stop, not two, so spending its allowance can no longer end it. `crawl.py` checkpoints a

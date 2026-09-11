@@ -59,13 +59,17 @@ NO_MARKUP_AT_ALL = "all JSON-LD is removed"
 # What the one folded finding must still name. Each entry is a fragment of the
 # text a reader sees, and between them they carry every type and every count
 # the six separate findings used to carry: a reader can still see that two
-# article pages, one product page, one page of questions and four deep pages
+# article pages, one product page, one page of questions and three deep pages
 # are involved.
 FOLD_MUST_STILL_NAME = (
     "Organization",            # the site-wide identity block
     "Article", "2 of 2 article pages",
     "FAQPage", "Product", "WebSite", "BreadcrumbList",
-    "4 pages",                 # the deep pages the breadcrumb finding counted
+    # The deep pages the breadcrumb finding counted: two blog posts and the
+    # product page. `/about.html`, `/faq.html` and the other pages one segment
+    # below the root have no trail above them but the homepage, so they are
+    # not deep.
+    "3 pages",
     "1 page of questions and answers",
 )
 

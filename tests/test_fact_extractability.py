@@ -480,3 +480,39 @@ def test_an_h1_hidden_with_css_is_still_an_h1():
     FACTS._check_heading_hierarchy(result, [hidden, bare])
     finding = next(f for f in result.findings if f["root_cause"] == "heading-structure")
     assert "1 of 2" in finding["evidence"]
+
+
+def test_a_missing_translation_key_is_not_quoted_as_the_sites_words():
+    """A handicraft shop's pricing was printed with two i18n keys in it:
+    "Translation missing: en.general.social.share_on_facebook"."""
+    quoted = FACTS._without_missing_translations(
+        "Share it Translation missing: en.general.social.share_on_facebook "
+        "[missing \"en.cart.title\" translation] Regular price Rs 2,299.00")
+    assert quoted == "Share it Regular price Rs 2,299.00"
+    assert FACTS._without_missing_translations("Translation is our trade.") == (
+        "Translation is our trade.")
+
+
+def test_the_heading_finding_says_how_many_and_scales_with_it():
+    """One sentence, "Heading structure does not describe the page
+    reliably", was printed on nine of twelve sites whether 2 of 60 pages
+    lacked an H1 or 50 of 59 did. Its fix told readers to demote extra H1s,
+    which this check does not measure."""
+    headed = [_page(HOST + "/p{}".format(i), headings={"h1": ["Page {}".format(i)]})
+              for i in range(18)]
+    archive = [_page(HOST + "/archive/{}".format(i), headings={"h1": []},
+                     headings_in_markup={"h1": []}) for i in range(2)]
+    result = SkillResult("fact-extractability-audit")
+    FACTS._check_heading_hierarchy(result, headed + archive)
+    finding = next(f for f in result.findings if f["root_cause"] == "heading-structure")
+    assert finding["title"] == "2 of the 20 crawled pages have no top-level heading"
+    assert finding["severity"] == "low"
+    assert not any("Demote" in step for step in finding["suggested_action"]["how_to_fix"])
+
+    home = _page(HOST + "/", page_type="home", headings={"h1": []},
+                 headings_in_markup={"h1": []})
+    result = SkillResult("fact-extractability-audit")
+    FACTS._check_heading_hierarchy(result, headed + [home])
+    finding = next(f for f in result.findings if f["root_cause"] == "heading-structure")
+    assert finding["title"].endswith("the homepage among them")
+    assert finding["severity"] == "medium"
