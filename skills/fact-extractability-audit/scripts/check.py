@@ -68,6 +68,7 @@ from page_extract import (  # noqa: E402
     LONG_SENTENCE_WORDS, prose_sentences, word_count as extractor_word_count)
 
 from audit_common import (  # noqa: E402
+    addresses_the_reader, pages_the_crawl_read, site_homepage,
     brand_forms, brand_pattern, CODE_LABEL_WINDOW, comparison_key, CONTENTLESS_NOUNS,
     defining_sentence, dominant_script, EVIDENCE_SENTENCE_MAX,
     EVIDENCE_SENTENCE_MIN, example_urls, find_prices, is_listing_page, is_search_result_page,
@@ -411,6 +412,11 @@ _TEAM_SHAPES_RESTING_ON_CAPITALS = {"subject": "does", "owner": "owned"}
 SERVICE_AREA_RE = re.compile(
     r"\b(?:serving|we serve|available (?:in|across|throughout)|operating (?:in|across)|"
     r"customers (?:in|across)|based in|located in|headquartered in"
+    # Where its premises are: "Our showrooms in Sydney and Brisbane are open 7
+    # days". Once an eligibility line stopped counting, a furniture shop that
+    # says exactly that on its homepage was told it never says where it is.
+    r"|(?:our|the)\s+(?:showrooms?|stores?|shops?|branches|offices?|studios?|flagship)"
+    r"\s+(?:in|at)"
     r"|(?:operat|serv|deliver|ship|trad)\w*\s+(?:nationwide|worldwide|internationally"
     r"|globally))\b", re.I)
 
@@ -451,6 +457,19 @@ _WHOLE_MARKET_RE = re.compile(
     r"|across the (?:country|world|globe|uk|us)|in every (?:state|county|region))\b", re.I)
 
 
+# Where a thing is kept rather than where a site operates: a folder, a source
+# tree, a package, a menu, a format. And a path written as one, `ext/misc/`.
+_NOT_A_PLACE_RE = re.compile(
+    r"\b(?:sub)?folders?\b|\bdirector(?:y|ies)\b|\bsource(?: code)? trees?\b|\btrees?\b"
+    r"|\brepositor(?:y|ies)\b|\brepos?\b|\bpackages?\b|\bbranch(?:es)?\b|\bfiles?\b"
+    r"|\bmodules?\b|\bdistributions?\b|\breleases?\b|\bversions?\b|\bbuilds?\b"
+    r"|\bmenus?\b|\bsettings\b|\btabs?\b|\bformats?\b|\bsizes?\b|\bcolou?rs?\b"
+    r"|\beditions?\b|\bapp stores?\b|[\w.-]/[\w.-]", re.I)
+# How much of what follows the trigger is read for that. The place a sentence
+# names comes straight after "available in".
+_NOT_A_PLACE_WINDOW = 80
+
+
 def _states_a_service_area(sentence, match):
     """Does this sentence say where the site operates?
 
@@ -474,6 +493,12 @@ def _states_a_service_area(sentence, match):
     if _DECLINES_RE.search(sentence[:match.end()]):
         return False
     tail = sentence[match.end():]
+    # Somewhere a file lives is not somewhere a site serves. "These extensions
+    # are all available in the SQLite source tree in the ext/misc/ subfolder"
+    # matched "available in", named a proper noun after it, and was printed as
+    # a database engine's service area.
+    if _NOT_A_PLACE_RE.search(tail[:_NOT_A_PLACE_WINDOW]):
+        return False
     if _WHOLE_MARKET_RE.search(match.group(0) + " " + tail):
         return True
     # A proper noun after the trigger. Only the tail is read, so "Serving" at
@@ -607,6 +632,88 @@ def _prose_not_a_label_run(text):
     return lower >= _A_SENTENCE_MIN_LOWER_SHARE * len(rest)
 
 
+# The language and packaging tags a program's name is written with, as in
+# `name-js`, `py-name`, `name-cli`.
+# Kept to tags that are not English words or common word-parts, so "to-go",
+# "API-first" and "front-end" are not read as programs.
+_SOFTWARE_NAME_PARTS = frozenset({
+    "js", "ts", "py", "rs", "rb", "php", "cli", "sdk", "wasm", "jl", "kt",
+})
+
+# The word after a possessive, whole: "sql.js" rather than the "sql" the team
+# pattern captures.
+_OWNED_TOKEN_RE = re.compile(r"['’]s\s+([^\s,;:()\"“”]+)")
+
+
+def _owns_another_project(sentence, match, brand_name=""):
+    """Is this "<Person>'s <thing>" a person named with somebody else's project?
+
+    A database engine's WebAssembly page lists related work: "Alon Zakai's
+    sql.js is the first known direct usage of sqlite3 in a web browser". The
+    possessive shape read that as a named person behind the site, and the
+    report printed another project's author as this project's team.
+
+    What the person owns decides it. "<Person>'s mail server" owns an
+    ordinary noun, and that is how a project names its own author. A token
+    written the way software names are - a dot between letters, digits among
+    letters, a capital inside the word - is the name of a thing, and unless
+    it is this site's own name, the person is that thing's author.
+    """
+    owned = _OWNED_TOKEN_RE.match(sentence[match.end("owner"):])
+    if not owned:
+        return False
+    token = owned.group(1).rstrip(".")
+    own = comparison_key(brand_name or "")
+    token_key = comparison_key(token)
+    # The site's own name, or its own name with a version number: "sqlite3" is
+    # the program itself.
+    if own and (token_key == own or re.fullmatch(re.escape(own) + r"[0-9]+", token_key)):
+        return False
+    if _another_programs_name(token, own):
+        return True
+    return bool(re.search(r"[^\W\d_]\.[^\W\d_]", token)
+                or (re.search(r"\d", token) and re.search(r"[^\W\d_]", token))
+                or re.search(r"[a-z][A-Z]", token))
+
+
+def _another_programs_name(token, own=""):
+    """Is this token written the way a program other than this site's is named?
+
+    Two shapes, and neither is an English word. A compound with a language or
+    packaging tag at one end - "absurd-js", "name.js", "py-name". Or a hyphenated
+    compound built out of this site's own name - "wa-sqlite" - which is
+    somebody else's thing built on it. A domain name is not a program: its
+    last label is not one of the tags.
+    """
+    token = (token or "").strip(".,;:!?()\"'“”‘’")
+    if not token or "@" in token or "/" in token:
+        return False
+    dotted = [part.lower() for part in token.split(".") if part]
+    if len(dotted) > 1 and dotted[-1] in _SOFTWARE_NAME_PARTS and len(dotted[0]) >= 2:
+        return True
+    hyphened = [part.lower() for part in re.split(r"[-_]", token) if part]
+    if len(hyphened) > 1:
+        if hyphened[-1] in _SOFTWARE_NAME_PARTS or hyphened[0] in _SOFTWARE_NAME_PARTS:
+            return True
+        if own and len(own) >= 3 and any(comparison_key(part) == own for part in hyphened):
+            return True
+    return False
+
+
+def _sentence_is_about_another_program(sentence, brand_name=""):
+    """Does this sentence name a program that is not this site's?
+
+    A project's related-work list is a run of other people's programs, each
+    with its author: "absurder-js is Nicholas G.", "James Long's absurd-js
+    demonstrates ...". Whatever shape the name takes, the person in a sentence
+    about another program is that program's, and printing them as this site's
+    team is the error the whole team rule exists to stop.
+    """
+    own = comparison_key(brand_name or "")
+    return any(_another_programs_name(token, own)
+               for token in re.findall(r"[^\s,;:()\"“”]+", sentence or ""))
+
+
 def _states_a_named_person(sentence, match, brand_name="", labels=()):
     """Does this match name a person, rather than the site or a common noun?
 
@@ -640,6 +747,16 @@ def _states_a_named_person(sentence, match, brand_name="", labels=()):
     who = _named_person(match)
     if not who:
         return False
+    # An acronym is not part of a person's name. A heading glued to the next
+    # sentence - "2.1.1 Registering New VFS Objects Standard builds of <Brand>
+    # come with ..." - put "VFS Objects Standard" in front of the word
+    # "builds", and a database engine's upgrade notes were printed as naming
+    # who runs the project. Initials carry a full stop and are not read here.
+    if any(len(word) >= 2 and word.isupper() for word in re.findall(r"[^\W\d_]+", who)):
+        return False
+    # A legal entity is not a person: "Pte Ltd's" systems in a terms clause.
+    if _LEGAL_ENTITY_WORD_RE.search(who):
+        return False
     words = [w.lower() for w in letter_runs(who, 1)]
     if not words or any(w in STOPWORDS or w in CONTENTLESS_NOUNS for w in words):
         return False
@@ -653,6 +770,10 @@ def _states_a_named_person(sentence, match, brand_name="", labels=()):
     if _is_a_label_on_this_site(who, labels):
         return False
     groups = match.groupdict()
+    if groups.get("owner") and _owns_another_project(sentence, match, brand_name):
+        return False
+    if _sentence_is_about_another_program(sentence, brand_name):
+        return False
     for shape, governor in _TEAM_SHAPES_RESTING_ON_CAPITALS.items():
         if not groups.get(shape):
             continue
@@ -660,6 +781,39 @@ def _states_a_named_person(sentence, match, brand_name="", labels=()):
             return False
         return _prose_not_a_label_run(sentence)
     return True
+
+
+# A reduction rather than a price: "$600 off", "save 20%", "up to 40% off",
+# "20% discount". The word "sale" alone is not here - "Sale price Rs. 3,000"
+# is the price itself.
+_PROMOTION_RE = re.compile(
+    r"\d[\d,.]*\s*%?\s*off\b|\boff\s+(?:up\s+to\s+)?\S*\d|\bsave\s+(?:up\s+to\s+)?\S*\d"
+    r"|\d[\d,.]*\s*%\s*(?:discount|cashback)\b|\b(?:discount|cashback)\s+of\s+\S*\d", re.I)
+
+
+def _a_promotion_not_a_price(quote):
+    """Does this sentence state a reduction rather than what something costs?"""
+    return bool(_PROMOTION_RE.search(quote or ""))
+
+
+# Pages that set terms or invite applications, by the words of their address.
+# A terms-of-use clause names the company's legal entity and a sign-up page
+# lists who may apply; neither says who runs the site or where it operates.
+_TERMS_OR_PROGRAMME_PATH_RE = re.compile(
+    r"(?:^|/)(?:terms|terms-of-use|terms-of-service|terms-and-conditions|tos|legal|privacy"
+    r"|privacy-policy|cookies?|cookie-policy|disclaimer|ambassadors?|ambassador-program(?:me)?"
+    r"|affiliates?|affiliate-program(?:me)?|referral|refer-a-friend|influencers?|partner-program"
+    r"(?:me)?)(?:[/.?-]|$)", re.I)
+
+
+def _a_terms_or_programme_page(page):
+    return bool(_TERMS_OR_PROGRAMME_PATH_RE.search(urlsplit((page or {}).get("url") or "").path))
+
+
+# The words a legal entity carries and a person does not.
+_LEGAL_ENTITY_WORD_RE = re.compile(
+    r"\b(?:inc|llc|ltd|limited|plc|gmbh|pte|pty|corp|corporation|llp|bv|nv|srl|spa|sarl)\b",
+    re.I)
 
 
 def _quote_shows_a_price(quote):
@@ -686,6 +840,43 @@ _BUILT_ON_THE_BRAND_NOUNS = (
     # a template somebody sells for it.
     r"|admin dashboards?|admin panels?|admin templates?|dashboard templates?")
 _FIRST_PERSON_RE = re.compile(r"\b(?:we|we're|we've|our|ours|us)\b", re.I)
+
+
+# What follows "free to use" when it grants a permission rather than stating a
+# price: something to use. "The app is free to use." ends there; "application
+# code is free to use these routines" goes on to name what may be used, and
+# the one doing the using is the reader, not a customer.
+_PERMISSION_OBJECT_RE = re.compile(
+    r"^\s*(?:these|those|this|that|it|them|the|a|an|any|all|our|your|their|its|his|her"
+    r"|such|other|some|each|every)\b", re.I)
+
+
+def _free_is_a_permission(sentence, match):
+    """Is this "free to use" a licence grant rather than a price?
+
+    A database engine's upgrade notes read "Though these routines exist for
+    the use of the SQLite core, application code is free to use these routines
+    as well, if desired." The report filed that as the project's pricing,
+    "(states that it costs nothing)". It says what a program may call, not
+    what anything costs. Only the verb form can say this - "free of charge"
+    and "free entry" never can - so only that alternative is read.
+    """
+    if _FREE_OF_RIGHTS_RE.search(sentence[match.start():match.end() + _FREE_OF_RIGHTS_WINDOW]):
+        return True
+    text = match.group(0).lower()
+    if not re.match(r"free to (?:use|download|install)$", text):
+        return False
+    return bool(_PERMISSION_OBJECT_RE.match(sentence[match.end():]))
+
+
+# Free as in rights, not as in price: "completely free and unencumbered by
+# copyright", "free of any patent claim". The same project's copyright page
+# supplied that sentence as its pricing once the licence grant above was set
+# aside. A price is what someone pays; a copyright is who may copy.
+_FREE_OF_RIGHTS_RE = re.compile(
+    r"\b(?:unencumbered|copyright|copyrighted|public domain|patents?|licen[cs]e restrictions?)\b",
+    re.I)
+_FREE_OF_RIGHTS_WINDOW = 50
 
 
 def _inside_quotation_marks(sentence, match):
@@ -1274,8 +1465,14 @@ def _quotable_blocks(page):
     """
     blocks = [str(block or "").strip()
               for block in (page.get("prose_blocks") or [])]
+    # Never the page's own `<title>`. Every page carries one, so it passes for
+    # a line the site repeats, and "<Brand> | <what it does>" has the shape of
+    # a tagline definition - which let a site that states what it is nowhere
+    # be reported as stating it on its homepage.
+    title = " ".join(str(page.get("title") or "").split())
     return [block for block in blocks[:_BLOCKS_READ_PER_PAGE]
-            if block and not reads_as_source_not_prose(block)]
+            if block and not reads_as_source_not_prose(block)
+            and " ".join(block.split()) != title]
 
 
 def _definition_in_a_repeated_line(page, brand_name, brand):
@@ -1607,6 +1804,11 @@ def _definition_under_the_heading(page, brand_name, brand, labels=(), pages=()):
     line = next(iter(sentences(after)), "").strip()
     if not line or line.endswith("?"):
         return None
+    # Campaign copy speaks to the reader; a definition speaks about the brand.
+    # "Your home should feel like an extension of you." sat under a furniture
+    # shop's H1 and was quoted as what the shop is.
+    if addresses_the_reader(line):
+        return None
     words = letter_runs(line, 1)
     if not (_HEADING_DEFINITION_MIN_WORDS <= len(words) <= _HEADING_DEFINITION_MAX_WORDS):
         return None
@@ -1753,6 +1955,17 @@ def _definition_is_in_the_wrong_place(result, snapshot, pages, brand_name, brand
     )
 
 
+def _front_door_first(snapshot, identity):
+    """These home and about pages, the site's front door first, then homes, then abouts."""
+    try:
+        front = (site_homepage(snapshot) or {}).get("page")
+    except (AttributeError, TypeError, ValueError):
+        front = None
+    front_url = (front or {}).get("url")
+    return sorted(identity, key=lambda p: (0 if front_url and p.get("url") == front_url
+                                           else 1 if p.get("page_type") == "home" else 2))
+
+
 def _check_entity_definition(result, snapshot, pages, brand_name, brand=None):
     """The single most quotable fact on any site: what this brand actually is.
 
@@ -1786,12 +1999,24 @@ def _check_entity_definition(result, snapshot, pages, brand_name, brand=None):
         result.skip("entity-definition", reason)
         return
 
+    # The front door first, as `site_homepage` decides it, then the other home
+    # pages, then the about pages. And the whole of a homepage before the
+    # opening of any about page: a shop's homepage says "Who We Are? <Brand> is
+    # a lifestyle brand ..." below its banners, the about page's opening was
+    # taken instead, and the report said the definition is not on the
+    # homepage - about a homepage that carries it.
+    identity = _front_door_first(snapshot, identity)
     found = None
     for page in identity:
         definition = _find_definition(_top_words(page), brand_name, brand)
         if definition:
             found = (page, definition, "at the top of")
             break
+        if page.get("page_type") == "home":
+            definition = _find_definition(_readable_text(page), brand_name, brand)
+            if definition:
+                found = (page, definition, "further down")
+                break
 
     # A definition does not have to be a sentence. Where the H1 names the brand
     # it supplies the subject, and the line under it supplies the rest: "<Name>"
@@ -1976,6 +2201,15 @@ def _check_entity_definition(result, snapshot, pages, brand_name, brand=None):
             result.skip("entity-definition",
                         'a quotable definition is present on {}: "{}"'.format(
                             page["url"], definition))
+            return
+        # On the homepage, below its opening, is on the homepage. The finding
+        # below is titled "The homepage never says what the brand is", and it
+        # was raised over a home-decor shop whose homepage says "Who We Are?
+        # <Brand> is a lifestyle brand in home decor solutions ...".
+        if page is home:
+            result.skip("entity-definition",
+                        'a quotable definition is present on the homepage, {}, below its '
+                        'opening: "{}"'.format(page["url"], definition))
             return
         if home is None:
             # Nothing may be claimed about a homepage this crawl never read.
@@ -2766,6 +3000,32 @@ def _address_line(text, street, postcode):
     return " ".join(text[start:postcode_at + len(postcode)].split())
 
 
+# An identifier's scheme, written in capitals and joined to its number by a
+# hyphen: `CVE-2026-50813`, `RFC-9110`, `GHSA-...`.
+_IDENTIFIER_SCHEME_BEFORE_RE = re.compile(r"\b[A-Z]{2,}[-_]$")
+
+
+def _the_tail_of_an_identifier(text, run):
+    """Does this run appear only as the number part of a scheme-labelled identifier?
+
+    A project's forum lists a thread titled "Fix for CVE-2026-50813 not merged
+    into 3.53 branch?", and `2026-50813` - a vulnerability identifier - was
+    printed as the project's contact telephone. A hyphen is not a letter or a
+    digit, so `_only_inside_a_longer_token` reads the run as a token of its
+    own; the capitals joined to it say it is the second half of a code.
+    """
+    if not (text and run):
+        return False
+    found = False
+    at = text.find(run)
+    while at >= 0:
+        found = True
+        if not _IDENTIFIER_SCHEME_BEFORE_RE.search(text[max(0, at - 12):at]):
+            return False
+        at = text.find(run, at + 1)
+    return found
+
+
 def _only_inside_a_longer_token(text, run):
     """Does this run of digits appear on the page only inside a longer word?
 
@@ -2818,6 +3078,10 @@ def _usable_phones(facts, page=None, key="phones"):
         context = text[max(0, index - CODE_LABEL_WINDOW):index] if index > 0 else ""
         if not_a_telephone_number(phone, context):
             continue
+        if _a_number_in_an_example(phone, page):
+            continue
+        if _the_tail_of_an_identifier(text or (page or {}).get("text") or "", phone):
+            continue
         if _only_inside_a_longer_token(text, phone):
             continue
         if _beside_another_sites_address(text, phone, page):
@@ -2830,6 +3094,48 @@ def _usable_phones(facts, page=None, key="phones"):
             continue
         kept.append(phone)
     return kept
+
+
+# The words that introduce a value as a specimen rather than as the thing
+# itself. Read in the stretch of text just before the number.
+_INTRODUCES_AN_EXAMPLE_RE = re.compile(
+    r"\b(?:for example|for instance|e\.\s?g\.|example|examples|sample|specimen|dummy"
+    r"|fictitious|fictional|made-up|fake|placeholder)\b", re.I)
+
+# How far back the introduction may sit. A command in a manual puts its
+# arguments between the "for example" and the value.
+_EXAMPLE_WINDOW = 120
+
+
+def _a_number_in_an_example(phone, page):
+    """Is this number a value in a code sample or a documentation example?
+
+    A database engine's command-line manual shows how to quote a value:
+    "For example, ... .parameter set @phoneNumber "'202-456-1111'"". The
+    extractor read a telephone number out of that command, and the report
+    printed it as the project's contact route. A number in a code sample is
+    an argument somebody types, and a number introduced as an example is a
+    specimen; neither is a way to reach the site.
+
+    Two readings. The number sits in the page's code text - the `<pre>` and
+    `<code>` blocks the extractor keeps apart from the prose - or the words
+    just before it, in whichever copy of the page contains it, introduce it
+    as an example.
+    """
+    page = page or {}
+    if phone in (page.get("code_text") or ""):
+        return True
+    for field in ("body_text", "text"):
+        text = page.get(field) or ""
+        index = text.find(phone)
+        if index < 0:
+            continue
+        before = text[max(0, index - _EXAMPLE_WINDOW):index]
+        # Only the sentence the number is in. A full stop followed by a space
+        # ends one; the dot inside ".parameter" does not.
+        before = re.split(r"[.!?]\s+(?=[A-Z])", before)[-1]
+        return bool(_INTRODUCES_AN_EXAMPLE_RE.search(before))
+    return False
 
 
 def _a_slice_of_a_figure(text, phone):
@@ -3288,6 +3594,11 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
             # kept as evidence the site shows prices, and the search goes on
             # for a page that says one in a sentence. See
             # `_reads_as_interface_labels`.
+            # A sale banner is not a price. "Spring Sale Up to $600 off." was
+            # printed as a furniture shop's stated pricing: it says how much
+            # less something costs, and not what anything costs.
+            if quote and _a_promotion_not_a_price(quote):
+                continue
             if quote and _reads_as_interface_labels(quote):
                 if label_price is None:
                     label_price = (page, prices[0],
@@ -3320,15 +3631,20 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
     # order to be argued with, and a page filed under the year it was written.
     # See `_inside_quotation_marks` and `_a_dated_document`.
     undated = [p for p in pages if not _a_dated_document(p)]
+    # And a permission is not a price either: "is free to use these routines"
+    # is a licence grant. See `_free_is_a_permission`.
     free_page, free_quote = stated(
         COSTS_NOTHING_RE, minimum=PRICE_STATEMENT_MIN,
         among=[p for p in undated if p.get("page_type") in PRICE_BEARING_TYPES],
-        states_the_fact=lambda sentence, match: not _inside_quotation_marks(sentence, match))
+        states_the_fact=lambda sentence, match: not (
+            _inside_quotation_marks(sentence, match)
+            or _free_is_a_permission(sentence, match)))
     if free_page is None:
         free_page, free_quote = stated(
             COSTS_NOTHING_RE, minimum=PRICE_STATEMENT_MIN, among=undated,
             states_the_fact=lambda sentence, match: not (
                 _inside_quotation_marks(sentence, match)
+                or _free_is_a_permission(sentence, match)
                 or _free_is_said_of_something_built_on_the_brand(sentence, brand_name)))
     # A figure seen only among interface labels still says the site shows
     # prices; it is the last reading, after every sentence has been tried.
@@ -3460,7 +3776,11 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
             break
     # Also an English pattern ("serving", "based in", "available across"), so
     # it only speaks where it can read the language.
-    area_page, area_quote = (stated(SERVICE_AREA_RE, states_the_fact=_states_a_service_area)
+    # Not off a terms page or a programme sign-up page: "Based in Australia
+    # Have a keen eye for aesthetics ..." is who may join an ambassador
+    # programme, and it was printed as a furniture shop's service area.
+    area_page, area_quote = (stated(SERVICE_AREA_RE, states_the_fact=_states_a_service_area,
+                                    among=[p for p in pages if not _a_terms_or_programme_page(p)])
                              if english else (None, None))
     local_signals = bool(by_type.get("location")) or any(
         "localbusiness" in {t.lower() for t in p.get("jsonld_types") or []} for p in pages)
@@ -3715,8 +4035,12 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
         # furniture wherever it meets it, including on the one page whose own
         # markup happens to render it differently.
         labels = site_labels(pages)
+        # Not off a terms page either: a terms-of-use clause about virus
+        # protection, naming "<Brand> Pte Ltd's" systems, was printed as the
+        # shop's team.
         team_page, team_quote = stated(
             TEAM_FACT_RE,
+            among=[p for p in pages if not _a_terms_or_programme_page(p)],
             states_the_fact=lambda sentence, match: _states_a_named_person(
                 sentence, match, brand_name, labels))
     # `foundingDate`, `founder`, `employee` and `member` in JSON-LD say the
@@ -3868,7 +4192,7 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
             mechanism="B", root_cause="missing-core-fact",
             summary="State the {} explicitly, in a sentence, on the page where a visitor would "
                     "look for it.".format(name),
-            how_to_fix=_core_fact_steps(name, brand_name, any_currency_figure, kind),
+            how_to_fix=_core_fact_steps(name, brand_name, any_currency_figure, kind, sells),
             effort="low", owner="content owner",
             rationale="An assistant answers with facts it can quote. A fact that "
                       "is implied, shown only in an image, or held only in a form nobody fills "
@@ -3889,7 +4213,7 @@ _CORE_FACT_SLOTS = {
 }
 
 
-def _core_fact_steps(name, brand_name, any_currency_figure=True, kind=None):
+def _core_fact_steps(name, brand_name, any_currency_figure=True, kind=None, sells=False):
     """The paste-ready steps for one missing fact, worded for what the site is.
 
     This is where the damage lands. A finding a reader disagrees with costs one
@@ -3917,7 +4241,10 @@ def _core_fact_steps(name, brand_name, any_currency_figure=True, kind=None):
         # reader who charges nothing cannot act on any of it. Without a
         # currency figure anywhere on the site, the honest instruction is to
         # write down whichever is true.
-        if not any_currency_figure:
+        # Never to a site that sells. A clothing shop whose prices the crawl
+        # could not read was handed "<Shop> is free to use." as the sentence to
+        # publish - a false statement about a shop, offered as copy to paste.
+        if not any_currency_figure and not sells:
             return [
                 'If nothing here costs anything, write that sentence: "{} is free to use." '
                 "That is the answer to the question, and it is quotable.".format(brand),
@@ -4069,8 +4396,14 @@ def _check_naming_consistency(result, snapshot, pages, brand):
     # to pick one written form and use it character for character. Following
     # that would delete its English name from its English pages.
     found = None
+    sub_brands = {}
     for code in sorted(editions):
         names = editions[code]
+        # A named part of the organisation is not a second spelling of it.
+        # See `_sub_brands`.
+        parts = _sub_brands(names)
+        sub_brands.update(parts)
+        names = [n for n in names if n not in parts]
         if len(names) < 2:
             continue
         spelling_conflicts, undeclared = _conflicting_names(names, brand)
@@ -4080,7 +4413,7 @@ def _check_naming_consistency(result, snapshot, pages, brand):
 
     if found is None:
         result.skip("brand-naming-consistency", _naming_agreement_reason(
-            variants, compared, editions, sections))
+            variants, compared, editions, sections, sub_brands))
         return
 
     language, compared, spelling_conflicts, undeclared = found
@@ -4110,7 +4443,10 @@ def _check_naming_consistency(result, snapshot, pages, brand):
     # "no pages listed" is meant to mean robots.txt, not "we did not look".
     pages_declaring = sorted({url for name in compared
                               for url in declared_on.get(name, []) if url})
-    pages_seen = brand.get("pages_seen") or 0
+    # Pages the crawl read, not records it wrote. A museum's crawl fetched 105
+    # URLs of which 45 were documents and images, and this line said "Names were
+    # declared on 2 of the 105 pages crawled".
+    pages_seen = pages_the_crawl_read(snapshot) or brand.get("pages_seen") or 0
     scope = _naming_scope(pages_declaring, pages_seen)
 
     result.add(
@@ -4303,7 +4639,90 @@ def _set_aside_note(sections):
                 "/, /".join(sorted({section for section in sections.values()})[:3])))
 
 
-def _naming_agreement_reason(variants, compared, editions, sections):
+# The words that turn an organisation's name into the name of one of its
+# parts: a children's section, a shop, a foundation, a branch. Written in the
+# scripts this audit has met, and compared through `comparison_key`, so case,
+# spacing and punctuation do not decide anything.
+_SUB_UNIT_QUALIFIERS = frozenset(comparison_key(word) for word in (
+    "children's", "childrens", "children", "kids", "kid", "junior", "youth", "family",
+    "shop", "store", "boutique", "cafe", "café", "restaurant", "foundation", "trust",
+    "friends of", "society", "branch", "annex", "annexe", "library", "archive", "archives",
+    "press", "publishing", "learning", "education", "online", "digital", "studio", "lab",
+    "enfants", "kinder", "niños", "infantil", "jeunesse",
+    "어린이", "키즈", "아동", "청소년", "뮤지엄샵", "재단", "분관", "도서관",
+    "こども", "子ども", "子供", "キッズ", "ジュニア", "ショップ", "財団", "分館", "図書館",
+    "儿童", "兒童", "少儿", "青少年", "商店", "基金会", "基金會", "分馆",
+) if comparison_key(word))
+
+
+def _sub_brands(names):
+    """{sub-brand: the name it is part of}, for names that extend another name.
+
+    A national museum declares its own name on its homepage and "어린이박물관" -
+    the Children's Museum, a section with its own name - on that section's
+    pages. The check reported "the brand name is written more than one way"
+    and advised picking one, which would rename the children's museum after
+    its parent. A name built from another asserted name plus a qualifier is a
+    part of the organisation with a name of its own, not a second spelling.
+
+    Two shapes. One name contains the other whole - "Acme Kids" holds "Acme";
+    in a script written without spaces, containment is read on the letters.
+    Or one name is a qualifier from `_SUB_UNIT_QUALIFIERS` joined to the last
+    or first part of the other: "어린이" + "박물관", where "박물관" (museum) is
+    what "국립중앙박물관" ends in, and "Kids Museum" beside "National Museum".
+    """
+    keyed = [(name, comparison_key(name)) for name in names]
+    keyed = [(name, key) for name, key in keyed if key]
+    found = {}
+    for name, key in keyed:
+        for other, other_key in keyed:
+            if name == other or key == other_key or name in found:
+                continue
+            # Never both ways round: two names that are each a part of the
+            # other would leave nothing to compare, and hide a real conflict.
+            if found.get(other) == name:
+                continue
+            if _extends(key, other_key, name, other):
+                found[name] = other
+    return found
+
+
+def _extends(key, other_key, name, other):
+    """Is `name` (key `key`) the name `other` with a qualifier added?
+
+    Containment needs the longer name to be the part. The qualifier shape does
+    not: "어린이박물관" is six letters and "국립중앙박물관" seven, and the shorter
+    one is the children's museum inside the longer one's organisation.
+    """
+    if len(key) > len(other_key):
+        spaced = bool(re.search(r"\s", name)) or bool(re.search(r"\s", other))
+        if spaced:
+            words, other_words = _label_words(name), _label_words(other)
+            width = len(other_words)
+            if width and any(words[i:i + width] == other_words
+                             for i in range(len(words) - width + 1)):
+                return True
+        elif other_key in key:
+            return True
+    # A qualifier and a piece of the other name. The piece is at least two
+    # letters, so a single shared character is not a shared name, and the
+    # other name must not carry the same qualifier - two children's sections
+    # are two names, not one name and its part.
+    for qualifier in _SUB_UNIT_QUALIFIERS:
+        if qualifier in other_key:
+            continue
+        if key.startswith(qualifier):
+            rest = key[len(qualifier):]
+            if len(rest) >= 2 and other_key.endswith(rest):
+                return True
+        if key.endswith(qualifier):
+            rest = key[:-len(qualifier)]
+            if len(rest) >= 2 and other_key.startswith(rest):
+                return True
+    return False
+
+
+def _naming_agreement_reason(variants, compared, editions, sections, sub_brands=None):
     """Why the declared names were taken to agree, including what was set aside.
 
     Every filter says so out loud. This check used to print "the N declared
@@ -4328,6 +4747,14 @@ def _naming_agreement_reason(variants, compared, editions, sections):
                       "only under /{}/ and never on the homepage".format(
                           ", ".join('"{}"'.format(name) for name in sorted(sections)[:3]),
                           "/, /".join(sorted({s for s in sections.values()})[:3])))
+    if sub_brands:
+        reason.append("{} {} read as the name of a part of the organisation rather than a "
+                      "second spelling, because each adds a qualifier to a name the site "
+                      "also declares: {}".format(
+                          plural(len(sub_brands), "declared name"),
+                          "was" if len(sub_brands) == 1 else "were",
+                          "; ".join('"{}" beside "{}"'.format(sub, parent)
+                                    for sub, parent in sorted(sub_brands.items())[:3])))
     return ". ".join(reason)
 
 
@@ -4369,6 +4796,31 @@ def _naming_scope(pages_declaring, pages_seen):
             .format(len(pages_declaring), pages_seen))
 
 
+# How many pages under its own address a page has to link to before it is the
+# index of that section. The same five `freshness-corroboration-audit` uses.
+_SECTION_INDEX_MIN_CHILDREN = 5
+
+
+def _lists_its_own_section(page):
+    """Does this page link to five or more pages filed under its own address?
+
+    A shop's blog front page, `/blogs/<name>`, links to its twelve posts and
+    was typed an article; its run of post teasers, glued end to end, was
+    reported as a page "written in sentences too long to quote" (75% long,
+    average 37.9 words). `is_listing_page` reads headings and the page type;
+    a blog's front page says what it is in its links.
+    """
+    path = (urlsplit(page.get("url") or "").path or "/").rstrip("/")
+    if not path:
+        return False
+    children = set()
+    for link in ((page.get("links") or {}).get("internal") or []):
+        target = urlsplit((link or {}).get("url") or "").path or ""
+        if target.startswith(path + "/") and target.rstrip("/") != path:
+            children.add(target.rstrip("/"))
+    return len(children) >= _SECTION_INDEX_MIN_CHILDREN
+
+
 def _holds_prose(page):
     """Does this page contain sentences, before anything is measured about them?
 
@@ -4402,7 +4854,7 @@ def _holds_prose(page):
     the check, so this line falls where the text has stopped having sentence
     boundaries at all rather than where its sentences got long.
     """
-    if is_listing_page(page):
+    if is_listing_page(page) or _lists_its_own_section(page):
         return False
     readability = page.get("readability") or {}
     if readability.get("list_text_share", 0.0) > PROSE_MAX_LIST_TEXT_SHARE:

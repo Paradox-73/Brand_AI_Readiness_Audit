@@ -128,9 +128,11 @@ differing status — three requests at most.
 that disallows automated requests is reported as unchecked rather than probed. LinkedIn and X both
 disallow every client at `/`, and probing them anyway was a hole in the promise above.
 
-**Wikidata.** Two calls to the public JSON API that Wikimedia documents for programmatic clients
-and asks bots to use in place of crawling wiki pages. It fetches no wiki page, and the auditor
-identifies itself by name as their user-agent policy requires.
+**Wikidata.** Its robots.txt is read first, like every other host's. The search the name check
+needs lives under `/w/api.php`, and Wikidata's robots.txt disallows `/w/` to every user agent,
+so no lookup is made and the name-collision check is reported as unanswered rather than as a
+pass. A lookup is made only on a run where that file allows it, and then the auditor identifies
+itself by name as Wikimedia's user-agent policy requires.
 
 ---
 

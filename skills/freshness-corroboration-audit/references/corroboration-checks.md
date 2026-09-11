@@ -11,8 +11,10 @@ separable, which markers matter most, and how to create a Wikidata item that hol
 
 These are the exact strings that appear in `checks_run[]` and `not_applicable[]` in every
 report. Every finding here carries `mechanism="D"`. Sixteen extra network requests at most
-across the whole skill: three to Wikidata, the rest robots.txt and profile probes. Five of
-the ten make none at all.
+across the whole skill: Wikidata's robots.txt, then up to three lookups to Wikidata only where
+that file allows them, and the rest robots.txt and profile probes. Every third-party host is
+asked only where its own robots.txt permits it - there is no exception. Five of the ten make
+none at all.
 
 | Check id | The question | What it reads | Threshold, and where it came from | Ceiling |
 |---|---|---|---|---|
@@ -24,7 +26,7 @@ the ten make none at all.
 | `sitemap-lastmod-recency` | Has anything been touched in the last year? | the newest and the median parsable `<lastmod>` | five parsable entries minimum, and twelve months. The median is taken **median-low** rather than averaged, because averaging two dates is not defined | **low**, `stale-content` |
 | `off-site-profile-breadth` | How many independent sources could corroborate a claim? | `social_profiles` and `declared_profiles` per page, plus the off-site addresses named in an `/llms.txt` this run actually read | `PROFILE_BREADTH_GOOD = 6` and `PROFILE_BREADTH_THIN = 3`, from `PROFILE_BREADTH_NAMED_MEAN = 7.2` against `PROFILE_BREADTH_UNNAMED_MEAN = 4.6` — **measured**, in a within-category study of 29 crawlable sites across six categories, and the only measure that moved the same way in all six. See `skills/audit-orchestrator/references/cited-vs-uncited-study.md`. `CITATION_MIN_PAGES = 5` — below five crawled pages there is no such thing as "linked from only one page" | **high**, and only at **zero** profiles; **medium** at one or two, **low** at three to five |
 | `profile-links-resolve` | Do the sources the brand names still exist? | one HEAD per profile on the six platforms that answer honestly, every dead verdict re-asked with a GET | no numeric threshold; only 404 and 410 count as gone | **medium** for more than one, **low** for one, `dead-profile-link` |
-| `entity-ambiguity` | How many things share this name, and does the site tell itself apart? | Wikidata's search API for the brand name and one derived shorter form, then one batched lookup of `P856` on the matches | `WIKIDATA_AMBIGUITY_THRESHOLD = 2` — a shared label could be a coincidence of spelling, which is why two are wanted; a `P856` naming a different host is not a coincidence and is reported at a count of **one**. Four or more matches raises it to high; that 4 is chosen, not measured | **high**, `entity-ambiguity` |
+| `entity-ambiguity` | How many things share this name, and does the site tell itself apart? | Wikidata's robots.txt first - where it disallows `/w/`, no lookup is made and the check is declined as unchecked - then Wikidata's search API for the brand name and one derived shorter form, then one batched lookup of `P856` on the matches | `WIKIDATA_AMBIGUITY_THRESHOLD = 2` — a shared label could be a coincidence of spelling, which is why two are wanted; a `P856` naming a different host is not a coincidence and is reported at a count of **one**. Four or more matches raises it to high; that 4 is chosen, not measured | **high**, `entity-ambiguity` |
 | `fact-consistency-across-pages` | Does the site disagree with itself? | `Organization` telephone, postal code and description, against the same page's visible text and against every other page declaring them | telephone matched on its **last seven digits**, the same rule the core-facts check uses. Branch nodes are dropped on a multi-location site, so legitimate per-branch variation is not reported as self-contradiction | **high** at medium confidence, `nap-inconsistency` — the only fixed-high finding here |
 
 ### What the date reader can and cannot read, stated plainly

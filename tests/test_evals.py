@@ -44,7 +44,11 @@ def test_blocked_site_leads_with_the_bot_manager(audit):
     assert findings, "blocked-site should report something"
     assert findings[0]["root_cause"] == "bot-manager-block", (
         "the WAF block must come first; got {}".format(findings[0]["root_cause"]))
-    assert findings[0]["severity"] == "critical"
+    # High, not critical: the probe sends a crawler's name from the auditor's
+    # own address, and a CDN that verifies crawlers by IP refuses that request
+    # while serving the real crawler, so a name probe cannot prove the rule is
+    # on the name. It still leads the report.
+    assert findings[0]["severity"] == "high"
 
 
 def test_blocked_site_names_the_two_blocked_answer_crawlers(audit):

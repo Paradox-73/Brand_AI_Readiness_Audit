@@ -1232,14 +1232,48 @@ def _pages_that_speak_for_the_site(pages):
     `description` in the paste-ready block. An about page three sections down
     is about one of the organisation's things, not about the organisation.
     Within each type the shallowest page comes first.
+
+    And only pages in the homepage's own language. A one-page site published
+    in nineteen languages has nineteen pages typed home, each at the depth of
+    the root once its language segment is set aside, and sorting them by
+    address put `/cs` straight after `/`. The English description was skipped
+    as one shared by two addresses, and the Organization block went out with
+    `"description": "prosím nezdravte jenom lidi v chatu"` - while the top of
+    the same report quoted the English one. A language edition speaks for its
+    readers; the organisation speaks through its own front door, in the
+    language that door is written in. A page that declares no language is
+    kept, because nothing says it is an edition.
     """
+    home_language = _homepage_language(pages)
     ordered = []
     for page_type in _WHOLE_BRAND_PAGE_TYPES:
         typed = [p for p in pages if p.get("page_type") == page_type]
         if page_type != "home":
             typed = [p for p in typed if _section_depth(p) <= _WHOLE_SITE_PAGE_DEPTH]
+        if home_language:
+            typed = [p for p in typed
+                     if primary_subtag(p.get("lang")) in ("", home_language)]
         ordered += sorted(typed, key=lambda p: (_section_depth(p), str(p.get("url") or "")))
     return ordered
+
+
+def _homepage_language(pages):
+    """The language the site's front door declares, or '' where it declares none.
+
+    The front door is the home page with the fewest path segments, counting a
+    language segment as a segment - `/` before `/en`, and `/en` before
+    `/en/start`. Where that page declares no language the answer is '', and
+    nothing is set aside: an edition cannot be told from the original without
+    knowing what the original is written in.
+    """
+    homes = [p for p in pages if p.get("page_type") == "home"]
+    if not homes:
+        return ""
+    depth = lambda p: len([s for s in urlparse(str(p.get("url") or "")).path.split("/")  # noqa: E731
+                           if s])
+    front = min(homes, key=lambda p: (depth(p), len(str(p.get("url") or "")),
+                                      str(p.get("url") or "")))
+    return primary_subtag(front.get("lang")) or ""
 
 
 def _description_placeholder(pages):
@@ -1365,8 +1399,39 @@ def _dedupe_profiles(urls):
 _NOT_A_PROFILE_PATH_RE = re.compile(
     r"/(?:sign[_-]?in|sign[_-]?up|signin|signup|login|log[_-]?in|logout|log[_-]?out|"
     r"register|registration|account|settings|password|share|sharer|intent|"
-    r"dialog|oauth|auth|sso|subscribe|unsubscribe|cart|checkout|search)"
+    r"dialog|oauth|auth|sso|subscribe|unsubscribe|cart|checkout|search|"
+    # A sign-up page for somebody's programme: an influencer platform's
+    # `<brand>.<platform>/join/<campaign>` reached a furniture shop's
+    # `sameAs`. Joining is something a visitor does.
+    r"join|apply|invite|refer|referral|affiliates?|ambassadors?)"
     r"(?:[/?.]|$)", re.I)
+
+# The first path segment of an address that is one piece of writing on a
+# publication rather than an account on a platform.
+_ARTICLE_SECTION_SEGMENTS = frozenset({
+    "news", "article", "articles", "story", "stories", "review", "reviews", "blog", "blogs",
+    "post", "posts",
+})
+
+
+def _is_one_article(path):
+    """Is this path one article - a headline slug - rather than an account?
+
+    A furniture shop's `sameAs` carried a magazine's review of one of its
+    coffee tables, `/<brand>-nesting-coffee-table-review-37439576`. A review of
+    a product is somebody else's writing about the brand, and `sameAs` says
+    "this account is me". A slug of four words or more with a long number in
+    it, or of six words or more, is a headline; so is anything filed under a
+    news or blog section.
+    """
+    segments = [s for s in (path or "").split("/") if s]
+    if not segments:
+        return False
+    if segments[0].lower() in _ARTICLE_SECTION_SEGMENTS and len(segments) > 1:
+        return True
+    last = segments[-1]
+    words = [w for w in re.split(r"[-_]+", last) if w]
+    return len(words) >= 6 or (len(words) >= 4 and bool(re.search(r"[0-9]{5,}", last)))
 
 # Query parameters that mark an address as one campaign's copy of a page. A
 # profile URL does not carry them; a link to one issue of a newsletter, sent in
@@ -1400,6 +1465,8 @@ def _is_an_account_and_not_an_action(url):
     if _NOT_A_PROFILE_PATH_RE.search(parsed.path or ""):
         return False
     if parsed.query and _CAMPAIGN_PARAMETER_RE.search(parsed.query):
+        return False
+    if _is_one_article(parsed.path or ""):
         return False
     return True
 
@@ -1734,7 +1801,38 @@ _JSON_FILTER_BY_PLATFORM = {
 }
 
 
-def _json_serialisation_steps(platform):
+# The properties a template fills from the page's rendered HTML body. An
+# escaped entity in one of these was already in that HTML - the post's
+# content, stored as markup - before any filter touched it.
+_BODY_TEXT_PROPERTIES = frozenset({"articlebody", "text", "reviewbody", "commenttext"})
+
+
+# A tag written as a tag: `<p>`, `</strong>`, `<br/>`. An HTML-escape filter
+# turns every one of these into `&lt;p&gt;`, so a value carrying a raw tag
+# beside a character reference was not produced by that filter.
+_RAW_TAG_RE = re.compile(r"</?[a-z][a-z0-9]*(?:\s[^<>]*)?/?>", re.I)
+
+
+def _escaped_only_in_body_text(escaped):
+    """Were these references already in the content before any filter ran?
+
+    Two readings, either of which settles it. Every escaped value sits in a
+    body-text property like `articleBody`, which a template fills from stored
+    HTML. Or a value carries a raw tag beside its references: a cookware
+    shop's `text` values read `<p>1. Preserves &gt;90% of nutrition</p>`, and
+    an escape filter would have written that `<p>` as `&lt;p&gt;` - so the
+    `&gt;` came from the product's stored HTML, and swapping one filter for
+    another would change nothing.
+    """
+    pairs = [(str(key).lower(), str(value)) for _page, found in escaped for key, value in found]
+    if not pairs:
+        return False
+    if all(key in _BODY_TEXT_PROPERTIES for key, _ in pairs):
+        return True
+    return any(_RAW_TAG_RE.search(value) for _, value in pairs)
+
+
+def _json_serialisation_steps(platform, body_text=False):
     """The fix steps for a block whose values were escaped as HTML.
 
     The mechanism first, in words that hold whatever writes the block, and the
@@ -1743,8 +1841,33 @@ def _json_serialisation_steps(platform):
     here: this fix is not "put a block in the shared template", it is "change
     how one existing template prints a value", so what the reader needs from
     the platform is the filter name and who can change it.
+
+    `body_text` is the case where swapping filters is the wrong fix. A shop's
+    blog template already printed `articleBody` through the JSON filter - the
+    block carried `\\u0026amp;`, which is that filter writing an `&` - and
+    the report's third "Start here" item told it to replace the HTML-escape
+    filter with the JSON one. The `&amp;` was in the post's stored HTML; the
+    JSON filter faithfully serialised it. What fixes that is serialising the
+    post's text rather than its markup.
     """
     platform = _as_platform_or_none(platform)
+    if body_text:
+        liquid = platform.named and platform.name in ("Shopify", "Jekyll")
+        return [
+            "The escaped characters come from the content itself - a post body, a product "
+            "description, an answer - which the template fills from stored HTML. The `&amp;` "
+            "is already in that HTML before any filter runs, so replacing one filter with "
+            "another changes nothing.",
+            "Serialise the plain text instead: strip the HTML tags and decode the character "
+            "references, then print it as JSON{}. Or leave the long body fields out - "
+            "`headline`, a one-sentence `description` and the dates are what a consumer "
+            "reads.".format(
+                " - in Liquid, `{{ article.content | strip_html | json }}`, and the same "
+                "`strip_html` before `json` on a product's description" if liquid else ""),
+            "Re-check one of the named pages in View Source: the value should carry `&`, not "
+            "`&amp;` or `\\u0026amp;`.",
+            who_edits_the_template(platform),
+        ]
     steps = [
         "In whatever writes this block, print each value as JSON rather than passing it "
         "through the filter that escapes text for HTML.",
@@ -2013,19 +2136,62 @@ def _check_jsonld_validity(result, pages, platform=None):
                      'stand for.'.format(page["url"], "`{}`".format(pairs[0][0]),
                                          _centred_on(pairs[0][1], 90)),
             mechanism="C", root_cause="invalid-jsonld",
-            summary="Serialise JSON-LD values as JSON rather than running them through the "
-                    "template's HTML-escape filter.",
-            how_to_fix=_json_serialisation_steps(platform),
+            summary=("Serialise the plain text of the content, not its stored HTML, into the "
+                     "JSON-LD." if _escaped_only_in_body_text(escaped) else
+                     "Serialise JSON-LD values as JSON rather than running them through the "
+                     "template's HTML-escape filter."),
+            how_to_fix=_json_serialisation_steps(
+                platform, body_text=_escaped_only_in_body_text(escaped)),
             effort="low", owner="developer",
             rationale=reach["rationale"],
             affected_pages=sorted(p["url"] for p, _ in escaped),
+        )
+
+    # A block that parses can still hold a value no consumer can read. A
+    # national library's template wrote `"datePublished":
+    # "2025-08-11T02:26:36.174Z+09:00"` into the Article block of 47 of its 60
+    # pages - UTC and nine hours ahead of it, in one value - and this check
+    # passed every one of them, because it only asked whether the JSON parsed.
+    bad_dates = _malformed_dates(pages)
+    if bad_dates:
+        page, key, value, why = bad_dates[0]
+        dated_pages = sorted({p["url"] for p, _, _, _ in bad_dates})
+        keys = sorted({k for _, k, _, _ in bad_dates})
+        result.add(
+            id_hint="jsonld-date-is-not-a-date",
+            title="{} a JSON-LD date that is not a date".format(
+                plural(len(dated_pages), "page declares", "pages declare")),
+            severity="medium", confidence="high",
+            # The value in backticks: it is the site's own string, and the
+            # owner will search their template for it exactly as written.
+            evidence="Example: {} declares `{}` as `{}` - {}. Seen in {} on {} of the {} "
+                     "crawled.".format(page["url"], key, value, why,
+                                       ", ".join("`{}`".format(k) for k in keys),
+                                       len(dated_pages), plural(len(pages), "content page")),
+            mechanism="C", root_cause="invalid-jsonld",
+            summary="Write every JSON-LD date as an ISO 8601 date, with at most one time zone.",
+            how_to_fix=[
+                "Find where the template prints `{}` and format the value as ISO 8601: "
+                "`YYYY-MM-DD`, or `YYYY-MM-DDThh:mm:ss` followed by either `Z` or an offset "
+                "such as `+09:00` - never both.".format(key),
+                "If the template appends an offset to a timestamp the CMS already wrote in "
+                "UTC, drop one of the two: `2025-08-11T02:26:36Z` and "
+                "`2025-08-11T11:26:36+09:00` are the same moment, written correctly.",
+                "Re-test one of the named pages with the schema.org validator.",
+                who_edits_the_template(platform),
+            ],
+            effort="low", owner="developer",
+            rationale="A date a consumer cannot parse is a date the page does not have: the "
+                      "article reads as undated to every system that reads the markup for "
+                      "when it was written.",
+            affected_pages=dated_pages,
         )
 
     broken = [p for p in pages if p.get("jsonld_errors")]
     if not broken:
         # Never listed as clean on a run where this check has already reported
         # something.
-        if not escaped:
+        if not escaped and not bad_dates:
             result.skip("jsonld-validity",
                         "every JSON-LD block on the crawled pages parsed as valid JSON, and "
                         "no value in one is written with HTML character references")
@@ -2224,7 +2390,11 @@ def _same_as_fix_step(pages, brand, snapshot):
                 "resolve.".format(
                     ", ".join(found[:4]), "those" if len(found) > 1 else "that"))
     kind = site_kind(snapshot)
-    where = "the directories and platforms your industry already uses"
+    # Not "the directories your industry uses": an industry is a thing a
+    # business has, and this is the line every site the classifier could not
+    # place receives - an essay, a scholarship network, a central bank.
+    where = ("the registers and directories where organisations like this one are listed, "
+             "and the platforms you already publish on")
     if kind.is_certainly(LOCAL_BUSINESS):
         where = ("the mapping service people search you in, the review sites your customers "
                  "use, and your trade association's directory")
@@ -2426,6 +2596,7 @@ def _check_organization(result, snapshot, pages, by_type, brand, platform=None):
                 # platform CDN address this audit had already parsed, quoted in
                 # its evidence, and never drawn a conclusion from.
                 *template_change_steps(platform, "the snippet below"),
+                *_software_entity_step(snapshot),
                 "Replace the placeholder values with the real logo URL and the profile URLs "
                 "you actually control.",
                 "Keep the `description` identical to the boilerplate you use on LinkedIn and "
@@ -3184,7 +3355,51 @@ def _org_snippet(snapshot, pages, brand, node=None):
         payload["telephone"] = telephone
     if same_as:
         payload["sameAs"] = same_as
-    return _snippet_block(payload)
+    software = _software_entity(snapshot, declared, payload)
+    return _snippet_block(software or payload)
+
+
+def _software_entity(snapshot, declared, payload):
+    """The block for a site that is a program rather than an organisation, or None.
+
+    A database engine's documentation site - a repository, a licence, nothing
+    for sale, no team page - was classified by this same audit as a software
+    project, and handed an `Organization` block naming the program as the
+    organisation, with a logo placeholder and no word about what it is.
+    schema.org has a type for the thing the site is about, and an assistant
+    asked what the program is reads it there.
+
+    Only where the site declared no type of its own, and only on a confident
+    determination: a company that ships software is still an Organization.
+    Every value is one the Organization block had already read off the site;
+    the ones that belong to an organisation - an address, a telephone - stay
+    out, and a logo becomes `image` only when the site shows one.
+    """
+    if _prop(declared or {}, "@type") or not site_kind(snapshot).is_certainly(PROJECT):
+        return None
+    software = {"@context": payload["@context"], "@type": "SoftwareApplication",
+                "name": payload.get("name"), "url": payload.get("url")}
+    description = str(payload.get("description") or "")
+    software["description"] = (description if not description.startswith("<") else
+                               "<one sentence saying what this program does and who it is "
+                               "for - fill this in>")
+    logo = str(payload.get("logo") or "")
+    if logo and not logo.startswith("<"):
+        software["image"] = logo
+    if payload.get("sameAs"):
+        software["sameAs"] = payload["sameAs"]
+    return software
+
+
+def _software_entity_step(snapshot, declared=None):
+    """The fix step that says why the block below is not an Organization, or []."""
+    if _prop(declared or {}, "@type") or not site_kind(snapshot).is_certainly(PROJECT):
+        return []
+    return ["This site reads as a software project ({}), so the block below declares the "
+            "program itself as a `SoftwareApplication` rather than an Organization. If a "
+            "company or a foundation stands behind it, add an Organization node for that "
+            "body beside it and point the program's `publisher` at it.".format(
+                site_kind(snapshot).why())]
 
 
 # A telephone number as a telephone number is written: an optional leading
@@ -4234,6 +4449,34 @@ def _block_without_its_offer(node):
     return _snippet_block(payload)
 
 
+def _the_products_own_page(page, node=None):
+    """Is this page the one product's own page, so its values speak for it?"""
+    if isinstance(node, dict) and node:
+        return _is_the_page_subject(node, page)
+    return page.get("page_type") == "product" and not is_listing_page(page)
+
+
+def _the_pages_product_name(page):
+    """The page's heading or title, where it names this page's product, or ''.
+
+    A clothing shop's product block went out named "Online Shopping for Men &
+    Women Clothing, Accessories at <Shop>" - the title the site prints on every
+    page - for a page whose address names a pair of sneakers. A heading that
+    shares no word with the product's own address slug is the site's, not the
+    product's.
+    """
+    slug = [w for w in re.split(r"[^a-z0-9]+", urlparse(str(page.get("url") or ""))
+                                .path.rsplit("/", 1)[-1].lower()) if len(w) >= 3]
+    for label in list((page.get("headings") or {}).get("h1") or []) + [page.get("title") or ""]:
+        label = " ".join(str(label or "").split())
+        if not label:
+            continue
+        words = set(re.split(r"[^a-z0-9]+", label.lower()))
+        if not slug or len([w for w in slug if w in words]) >= min(2, len(slug)):
+            return label
+    return ""
+
+
 def _product_snippet(page, brand_name="", node=None):
     """One product's markup, filled in from that product's own page.
 
@@ -4255,7 +4498,16 @@ def _product_snippet(page, brand_name="", node=None):
     # emitted `"priceCurrency": "USD"` beside an admitted `<price>` placeholder
     # - an invented fact sitting next to an honest blank, in the same object.
     # A `$` figure on a .ca or .au site was called USD for the same reason.
-    prices = find_prices(page.get("body_text") or "")
+    #
+    # The page's own values - its first price, its meta description, its
+    # og:image, its heading - speak for the product only on that product's own
+    # page. A rug's block was filled from the accessories listing it appeared
+    # on: that page's "Shop our modern home decor ..." as the rug's description
+    # and the listing's thumbnail as its image. Where the page is not the
+    # product's own, the block takes what the product's markup declares and
+    # leaves out what it does not.
+    own_page = _the_products_own_page(page, node)
+    prices = find_prices(page.get("body_text") or "") if own_page else []
     number = ""
     currency = ""
     if prices:
@@ -4314,18 +4566,27 @@ def _product_snippet(page, brand_name="", node=None):
         "@context": "https://schema.org",
         "@type": (_prop(node, "@type") if isinstance(node, dict) else "") or "Product",
         "name": (str(_prop(node, "name") or "") if isinstance(node, dict) else "")
-                or ((page.get("headings") or {}).get("h1")
-                    or [page.get("title") or ""])[0] or "<product name>",
+                or _the_pages_product_name(page) or "<product name>",
         "offers": offers,
     }
     # Optional keys only when the site actually supplies them. A key we cannot
     # fill and do not grade does not belong in code labelled paste-ready.
-    description = _paste_ready_description(page.get("meta_description") or "",
-                                           _link_labels([page]), brand_name)
+    declared_description = str(_prop(node, "description") or "") if isinstance(node, dict) else ""
+    description = _paste_ready_description(
+        declared_description or (page.get("meta_description") or "" if own_page else ""),
+        _link_labels([page]), brand_name)
     if description:
         payload["description"] = description
-    image = (page.get("og") or {}).get("og:image")
-    if image:
+    declared_image = _image_url(_declared(node, "image")) if isinstance(node, dict) else ""
+    image = declared_image or ((page.get("og") or {}).get("og:image") if own_page else "")
+    # A logo is the site's mark, not a picture of the product. A clothing
+    # shop's product block went out with the site's sticky-header logo as its
+    # `image`, because that is what its og:image held - a file called
+    # `newlogosticky.png`, which the whole-word test `_site_logo` uses lets
+    # through. For a product any "logo" in the file name settles it: a
+    # product photograph is never named that.
+    file_name = urlparse(str(image or "")).path.rsplit("/", 1)[-1]
+    if image and not re.search(r"logo", file_name, re.I):
         payload["image"] = image
     # `brand` only where schema.org allows it. It is a property of Product and
     # its subtypes, of Service and of Organization, and not of the
@@ -5048,6 +5309,108 @@ def _record_author_signal(result, articles):
     ]))
 
 
+# A date as ISO 8601 writes it, which is what schema.org asks every date
+# property to hold: a year, then optionally the month, the day and a time, and
+# at most one statement of the time zone. The space some systems print between
+# the date and the time is accepted - it is RFC 3339's allowance, and every
+# consumer reads it - so what is reported below is a value no reader can parse
+# with confidence, not a style.
+_ISO_8601_DATE_RE = re.compile(
+    r"^(?P<y>[0-9]{4})(?:-(?P<m>[0-9]{2})(?:-(?P<d>[0-9]{2})"
+    r"(?:[T ](?P<h>[0-9]{2}):(?P<min>[0-9]{2})(?::(?P<s>[0-9]{2})(?:[.,][0-9]+)?)?"
+    r"(?:Z|[+-][0-9]{2}(?::?[0-9]{2})?)?)?)?)?$|^[0-9]{8}$")
+
+# Both zone statements at once: `Z` says the time is UTC and `+09:00` says it is
+# nine hours ahead of it. One template wrote exactly that into the Article
+# block of 47 of 60 pages.
+_TWO_ZONES_RE = re.compile(r"Z\s*([+-][0-9]{2}(?::?[0-9]{2})?)$")
+
+# The schema.org properties whose value is a Date or a DateTime.
+_DATE_PROPERTIES = frozenset({
+    "datePublished", "dateModified", "dateCreated", "uploadDate", "startDate", "endDate",
+    "validFrom", "validThrough", "priceValidUntil", "availabilityStarts", "availabilityEnds",
+    "birthDate", "deathDate", "foundingDate", "dissolutionDate", "expires", "datePosted",
+    "releaseDate", "previousStartDate", "lastReviewed",
+})
+
+
+def _why_not_a_date(value):
+    """Why this string is not an ISO 8601 date, or '' if it is one.
+
+    Only strings are judged. A number or an object in a date property is a
+    different fault, and a check that names one fault should not guess at
+    another.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text:
+        return ""
+    match = _ISO_8601_DATE_RE.match(text)
+    if match:
+        parts = match.groupdict()
+        month, day, hour, minute = (int(parts[k]) if parts.get(k) else None
+                                    for k in ("m", "d", "h", "min"))
+        if month is not None and not 1 <= month <= 12:
+            return "its month is {:02d}".format(month)
+        if day is not None and not 1 <= day <= 31:
+            return "its day is {:02d}".format(day)
+        if hour is not None and (hour > 24 or (minute or 0) > 59):
+            return "its time is not a time of day"
+        return ""
+    zones = _TWO_ZONES_RE.search(text)
+    if zones:
+        return ("it gives the time zone twice - `Z` (UTC) and `{}` - and a time can be in "
+                "only one".format(zones.group(1)))
+    return "it is not written as YYYY-MM-DD, optionally followed by a time"
+
+
+def _malformed_dates(pages):
+    """[(page, property, value, why)] for every date property that is not a date.
+
+    Every node on every page, nested ones included: an `Offer` inside a
+    `Product` carries `priceValidUntil`, and an `Event` inside a page's
+    `@graph` carries `startDate`.
+    """
+    found = []
+    for page in pages:
+        stack = list(page.get("jsonld") or [])
+        seen_on_page = set()
+        while stack:
+            node = stack.pop()
+            if isinstance(node, list):
+                stack.extend(node)
+                continue
+            if not isinstance(node, dict):
+                continue
+            for key, value in node.items():
+                if key in _DATE_PROPERTIES:
+                    why = _why_not_a_date(value)
+                    if why and (key, value) not in seen_on_page:
+                        seen_on_page.add((key, value))
+                        found.append((page, key, value, why))
+                elif isinstance(value, (dict, list)):
+                    stack.append(value)
+    return found
+
+
+def _declared_date(node, key, placeholder):
+    """The site's own date for `key`, or a placeholder that says why it is not used.
+
+    A paste-ready block must not carry a value that is not a date. A national
+    library's Article snippet copied `"datePublished":
+    "2025-08-11T02:26:36.174Z+09:00"` back to the owner, a value carrying two
+    time zones that no consumer can read - the fix repeated the fault. The
+    placeholder quotes the value, so the owner can find it in the template.
+    """
+    value = _declared(node, key)
+    why = _why_not_a_date(value)
+    if not why:
+        return value or placeholder
+    return "<YYYY-MM-DD - the published value, '{}', is not a date: {}>".format(
+        re.sub(r"[<>]", "", str(value)).replace('"', "'"), why)
+
+
 def _article_snippet(page):
     """This page's Article markup, placeholders only where the page has nothing.
 
@@ -5083,9 +5446,11 @@ def _article_snippet(page):
         "description": _paste_ready_description(
             _declared(node, "description") or page.get("meta_description") or "",
             _link_labels([page])) or "<one sentence summary>",
-        "datePublished": _declared(node, "datePublished") or "<YYYY-MM-DD>",
-        "dateModified": _declared(node, "dateModified")
-                        or "<YYYY-MM-DD, updated on every edit>",
+        # Through `_declared_date`, so a published value that is not a date is
+        # named in a placeholder rather than copied into the fix.
+        "datePublished": _declared_date(node, "datePublished", "<YYYY-MM-DD>"),
+        "dateModified": _declared_date(node, "dateModified",
+                                       "<YYYY-MM-DD, updated on every edit>"),
         "author": _declared(node, "author")
                   or {"@type": "Person", "name": "<author name>",
                       "url": "<author page URL>"},
@@ -5525,6 +5890,62 @@ def _has_an_answer_worth_marking_up(page, furniture=frozenset()):
     return any(_answer_or_placeholder(a) != _ANSWER_PLACEHOLDER for a in recorded)
 
 
+def _faq_blocks_with_empty_answers(pages):
+    """[(page, empty, total)] for FAQPage blocks whose answers hold no text."""
+    found, seen = [], set()
+    for page in pages:
+        if page.get("url") in seen:
+            continue
+        for node in _nodes_of(page, FAQ_TYPES):
+            questions = node.get("mainEntity")
+            questions = [questions] if isinstance(questions, dict) else questions or []
+            questions = [q for q in questions if isinstance(q, dict)]
+            if not questions:
+                continue
+            empty = 0
+            for question in questions:
+                answer = question.get("acceptedAnswer")
+                answer = answer[0] if isinstance(answer, list) and answer else answer
+                text = str((answer or {}).get("text") or "") if isinstance(answer, dict) else ""
+                if not re.sub(r"<[^>]+>|&nbsp;|\s", "", text):
+                    empty += 1
+            if empty:
+                seen.add(page.get("url"))
+                found.append((page, empty, len(questions)))
+                break
+    return found
+
+
+def _report_empty_faq_answers(result, hollow, platform=None):
+    result.check("faq-markup")
+    page, empty, total = hollow[0]
+    result.add(
+        id_hint="faq-markup-answers-are-empty",
+        title="{} FAQPage markup whose answers are empty".format(
+            plural(len(hollow), "page carries", "pages carry")),
+        severity="medium", confidence="high",
+        evidence="Example: {} declares {} {} whose `acceptedAnswer.text` is empty. Seen on "
+                 "{}.".format(page["url"], empty, "question" if empty == 1 else "questions",
+                              plural(len(hollow), "page")),
+        checked=("the `acceptedAnswer.text` of every Question in every FAQPage block on every "
+                 "crawled page, read after removing tags and non-breaking spaces",),
+        mechanism="C", root_cause="missing-schema-props",
+        summary="Fill each acceptedAnswer with the answer text the page shows, or remove the "
+                "block.",
+        how_to_fix=[
+            "Bind `acceptedAnswer.text` to the same field that renders the visible answer, so "
+            "each question carries the words the page prints beneath it.",
+            "Where the page shows no answers, stop emitting the FAQPage block on it: a question "
+            "with no answer is not a question and answer.",
+            who_edits_the_template(platform),
+        ],
+        effort="low", owner="developer",
+        rationale="An answer is the one part of FAQPage markup a consumer quotes. Empty, the "
+                  "block hands over questions with nothing to say about them.",
+        affected_pages=[p["url"] for p, _, _ in hollow],
+    )
+
+
 def _check_faq(result, by_type, all_pages=(), platform=None):
     result.check("faq-markup")
     # Measured over every page the crawl fetched, not only the content pages
@@ -5569,7 +5990,17 @@ def _check_faq(result, by_type, all_pages=(), platform=None):
     if unreadable:
         result.signal("faq_pages_whose_markup_does_not_parse",
                       sorted("{} ({})".format(p["url"], why) for p, why in unreadable)[:10])
+    # Markup that is present and says nothing. A furniture shop's five regional
+    # homepages each carry an FAQPage block of four or five questions whose
+    # `acceptedAnswer.text` is the empty string, and this check - which only
+    # asked whether a page of questions had the type at all - passed them.
+    hollow = _faq_blocks_with_empty_answers(list(all_pages) or [
+        p for group in (by_type or {}).values() for p in group])
+    if hollow:
+        _report_empty_faq_answers(result, hollow, platform)
     if not faqs and not unmarked:
+        if hollow:
+            return
         result.skip("faq-markup",
                     "no page that prints an answer under a question heading was detected "
                     "on this site{}.{}".format(
@@ -5583,6 +6014,8 @@ def _check_faq(result, by_type, all_pages=(), platform=None):
                         unclassified_note(by_type)))
         return
     if not without:
+        if hollow:
+            return
         # The set-aside was computed above and then not said. "All detected FAQ
         # pages carry FAQPage markup" is false about a page whose FAQPage block
         # is in the crawl and does not parse - it is the same sentence the
@@ -6206,6 +6639,51 @@ def _item_name_forms(name, brand_forms=()):
     return forms
 
 
+def _offer_prices(offers):
+    """The numeric prices of an `offers` value, however it is written."""
+    if isinstance(offers, dict):
+        offers = [offers]
+    found = set()
+    for offer in offers if isinstance(offers, list) else []:
+        if not isinstance(offer, dict):
+            continue
+        for key in ("price", "lowPrice", "highPrice"):
+            value = _price_value(str(_prop_anywhere(offer, key) or ""))
+            if value is not None:
+                found.add(value)
+    return found
+
+
+def _the_products_offer_prices(node, priced_nodes=()):
+    """Every price this one product offers: its own offers and each variant's.
+
+    Read three ways, because the extractor keeps a `ProductGroup`'s variants
+    both inside it and lifted out beside it: the node's own `offers`, the
+    `offers` of each entry in its `hasVariant`, and the lifted variants that
+    name it as their parent. A variant node gets its siblings the same way.
+    """
+    prices = _offer_prices(node.get("offers"))
+    variants = node.get("hasVariant")
+    for variant in ([variants] if isinstance(variants, dict) else variants or []):
+        if isinstance(variant, dict):
+            prices |= _offer_prices(variant.get("offers"))
+    name = str(_prop(node, "name") or "")
+    parent = str(node.get("_parent_name") or "") if node.get("_nested_in") == "hasVariant" else ""
+    for other in priced_nodes:
+        if other is node or other.get("_nested_in") != "hasVariant":
+            continue
+        family = str(other.get("_parent_name") or "")
+        if family and family in (name, parent):
+            prices |= _offer_prices(other.get("offers"))
+    return prices
+
+
+def _states_out_of_stock(offer):
+    """Does this Offer say it cannot be bought?"""
+    availability = str(_prop(offer, "availability") or "").lower() if isinstance(offer, dict) else ""
+    return availability.endswith(("outofstock", "soldout", "discontinued"))
+
+
 def _is_the_page_subject(node, page):
     """Is this node the thing the page is about, or one entry in a list on it?
 
@@ -6393,6 +6871,137 @@ def _spellings_of(pairs):
     return groups
 
 
+# Words that name a kind of goods and never a maker. A value from this list in
+# a `brand` field is a template filling the maker's field from the product
+# type or the collection, not a company.
+_CATEGORY_WORDS = frozenset({
+    "accessories", "accessory", "apparel", "clothing", "clothes", "equipment", "equipments",
+    "gear", "tools", "beans", "merchandise", "merch", "products", "product", "goods", "items",
+    "default", "vendor", "brand", "unbranded", "generic", "general", "misc", "miscellaneous",
+    "other", "others", "gifts", "gift", "decor", "furniture", "bags", "shoes", "footwear",
+    "jewellery", "jewelry", "electronics", "books", "toys", "beauty", "skincare", "supplies",
+    "parts", "spares", "sale", "new", "featured", "collection", "bundle", "bundles", "combo",
+    "combos", "kit", "kits", "samples", "none", "na", "n/a", "test",
+})
+
+
+def _category_names_on_the_site(pages):
+    """{comparison key: label} for the site's own collections and menu entries.
+
+    Read from the labels the site puts in its menu and footer, and from the
+    words of every `/collections/<slug>` or `/category/<slug>` address it links
+    to. A shop's collections and product types are what a mis-mapped `brand`
+    field is filled from, so this is the list such a value is found in.
+    """
+    names = {}
+    for page in pages:
+        links = page.get("links") or {}
+        for where in ("nav", "footer", "internal"):
+            for link in links.get(where) or []:
+                if not isinstance(link, dict):
+                    continue
+                label = " ".join(str(link.get("text") or "").split())
+                if where != "internal" and label and len(label) <= 40:
+                    names.setdefault(comparison_key(label), label)
+                match = re.search(r"/(?:collections|category|categories|product-category|shop)/"
+                                  r"([^/?#]+)", str(link.get("url") or ""))
+                if match:
+                    words = " ".join(w for w in re.split(r"[-_]+", match.group(1)) if w)
+                    names.setdefault(comparison_key(words), words)
+                    for word in words.split():
+                        if len(word) >= 4:
+                            names.setdefault(comparison_key(word), word)
+    names.pop("", None)
+    return names
+
+
+def _singular_forms(key):
+    return {key, key[:-1] if key.endswith("s") else key + "s",
+            key[:-2] if key.endswith("es") else key}
+
+
+def _brands_that_are_categories(declared, others, own_brand_declared, pages):
+    """{brand value: why} for `brand` values that are a category, not a maker.
+
+    A coffee roaster's own products carried `"brand": "RTB"` on four pages,
+    `"Beans"` on three and `"Equipments"` on two - its own product types, the
+    first the initials of its "Ready to Brew" menu entry - and the check passed
+    them as "brand names [that] name other companies". They name no company.
+
+    Three readings. A word from `_CATEGORY_WORDS`. The name of one of the
+    site's own collections or menu entries, on a shop whose markup names its
+    own brand on other products - a multi-brand retailer's `/collections/<a
+    maker>` page is a maker's name, and such a shop does not mark its own name
+    as a brand. And a short capitalised code that is the initials of one of
+    those entries.
+    """
+    labels = _category_names_on_the_site(pages)
+    initials = {}
+    for label in labels.values():
+        words = [w for w in re.split(r"\s+", label) if w]
+        if len(words) >= 2:
+            initials.setdefault("".join(w[0] for w in words).upper(), label)
+    found = {}
+    for name in others:
+        key = comparison_key(name)
+        if not key:
+            continue
+        if _singular_forms(key) & _CATEGORY_WORDS:
+            found[name] = "a word for a kind of goods rather than a maker"
+            continue
+        if not own_brand_declared:
+            continue
+        hit = next((labels[k] for k in _singular_forms(key) if k in labels), None)
+        if hit:
+            found[name] = 'the name of this site\'s own "{}" collection or menu entry'.format(hit)
+            continue
+        if re.fullmatch(r"[A-Z]{2,5}", name.strip()) and name.strip() in initials:
+            found[name] = 'the initials of this site\'s own "{}" menu entry'.format(
+                initials[name.strip()])
+    return found
+
+
+def _report_brands_that_are_categories(result, misfilled, declared, platform=None):
+    result.check("brand-name-in-markup")
+    pages_by_name = {}
+    for name, url in declared:
+        if name in misfilled:
+            pages_by_name.setdefault(name, set()).add(url)
+    ordered = sorted(misfilled, key=lambda n: (-len(pages_by_name.get(n, ())), n))
+    result.add(
+        id_hint="product-brand-is-a-category",
+        title="{} a category where the maker's name belongs".format(
+            plural(sum(len(pages_by_name.get(n, ())) for n in ordered),
+                   "product page's markup gives", "product pages' markup gives")),
+        severity="medium", confidence="high",
+        evidence="The `brand` on products this site sells reads {}. None of these is a "
+                 "company: each is {}.".format(
+                     "; ".join('"{}" on {}'.format(n, plural(len(pages_by_name.get(n, ())),
+                                                             "page")) for n in ordered[:4]),
+                     "; ".join('"{}" {}'.format(n, misfilled[n]) for n in ordered[:4])),
+        checked=("the `brand` property of every Product and other sellable JSON-LD node on "
+                 "every crawled page, as a bare string or a Brand object",
+                 "the labels of the site's own menu and footer links, and the words of every "
+                 "collection or category address it links to",
+                 "a closed vocabulary of words that name a kind of goods rather than a maker"),
+        mechanism="C", root_cause="schema-text-mismatch",
+        summary="Fill `brand` with the maker's name, not the product's category or type.",
+        how_to_fix=[
+            "Set `brand` on these products to the company that makes them - on the shop's own "
+            "products, the shop's own brand name.",
+            "The values match the site's own product types and collections, so the template is "
+            "reading the wrong field into `brand`: find where the product block is written and "
+            "point `brand` at the maker (the vendor field, where the platform has one).",
+            who_edits_the_template(platform),
+        ],
+        effort="low", owner="developer",
+        rationale="`brand` is read as who makes the thing. A category there tells a machine the "
+                  "product is made by a company called \"Beans\", and the real maker is named "
+                  "nowhere in the markup.",
+        affected_pages=sorted({url for n in ordered for url in pages_by_name.get(n, ())}),
+    )
+
+
 def _check_declared_brand_names(result, snapshot, pages, brand, platform=None):
     """Does the site's markup give its own brand one name?
 
@@ -6419,6 +7028,14 @@ def _check_declared_brand_names(result, snapshot, pages, brand, platform=None):
     own = [(name, url) for name, url in declared
            if any(names_match(name, asserted) for asserted in site_names)]
     others = sorted({name for name, _ in declared} - {name for name, _ in own})
+    # A category in the maker's field is not another company. See
+    # `_brands_that_are_categories`.
+    misfilled = _brands_that_are_categories(declared, others, bool(own), pages)
+    if misfilled:
+        _report_brands_that_are_categories(result, misfilled, declared, platform)
+        others = [name for name in others if name not in misfilled]
+        if not own or not others:
+            return
     if not own:
         result.skip("brand-name-in-markup",
                     "the {} declared as a brand in this site's product markup - {} - "
@@ -6443,6 +7060,8 @@ def _check_declared_brand_names(result, snapshot, pages, brand, platform=None):
 
     if len(disagreeing) < 2:
         settled = own[0][0]
+        if misfilled:
+            return
         if others:
             result.skip("brand-name-in-markup",
                         'every product this site marks up as its own names the brand "{}" '
@@ -6462,6 +7081,8 @@ def _check_declared_brand_names(result, snapshot, pages, brand, platform=None):
     # A one-spelling difference against the Organization block is only a
     # template fault when the template produced it on more than one page.
     if len(groups) < 2 and len({url for _, url in own}) < _BRAND_SPELLING_MINIMUM:
+        if misfilled:
+            return
         result.skip("brand-name-in-markup",
                     'one crawled page declares the brand as "{}" while the Organization '
                     'block declares "{}". One page is a typo rather than a template that '
@@ -6555,6 +7176,9 @@ def _check_consistency(result, pages, brand, platform=None):
 
     # One reading of each page's printed prices, shared by every node on it.
     printed_per_page = {}
+    # Products whose first listed offer is a variant nobody can buy, while the
+    # page shows another variant's price. Not a contradiction; see below.
+    out_of_stock_first = []
 
     for page in pages:
         text = page.get("body_text") or ""
@@ -6647,6 +7271,21 @@ def _check_consistency(result, pages, brand, platform=None):
                 # about a price printed in full beside the item it belongs to.
                 if _page_prints_the_price(page, declared_number, printed_per_page):
                     continue
+                # One product, several offers: a variant per size. A page shows
+                # the default variant's price and the menu holds the rest, so a
+                # page showing any of them agrees with the markup. A cooking
+                # pot's block listed Small (2720, out of stock), Medium (3000)
+                # and Large (2600); the page showed "Rs. 3,000.00", the first
+                # listed offer was read as the product's price, and the report
+                # said at high severity that the markup contradicts the page.
+                family = _the_products_offer_prices(node, priced_nodes)
+                shown = sorted(v for v in family if any(abs(v - s) < 0.01 for s in visible_numbers)
+                               or _page_prints_the_price(page, v, printed_per_page))
+                if shown:
+                    if _states_out_of_stock(offer):
+                        out_of_stock_first.append((page, str(_prop(node, "name") or ""),
+                                                   declared, shown[0]))
+                    continue
                 conflicts.append((page, 'Offer price {} for "{}" is not among {} ({})'.format(
                     declared, truncate(str(_prop(node, "name") or ""), 60), where,
                     ", ".join(_format_price(v) for v in sorted(visible_numbers)[:4]))))
@@ -6702,7 +7341,42 @@ def _check_consistency(result, pages, brand, platform=None):
                                         'page title, headings or body text, and neither does '
                                         'every word of it'.format(declared)))
 
+    if out_of_stock_first:
+        page, name, declared, shown = out_of_stock_first[0]
+        result.add(
+            id_hint="first-offer-is-out-of-stock",
+            title="{} an out-of-stock variant as the first offer".format(
+                plural(len(out_of_stock_first), "product's markup lists",
+                       "products' markup lists")),
+            # Low: the markup and the page agree - the shown price is one of
+            # the product's offers. What is off is the order, and a reader
+            # that takes the first offer as the price takes one nobody can buy.
+            severity="low", confidence="high",
+            evidence='Example: {} - the first offer in the markup for "{}" is {}, marked '
+                     "OutOfStock, while the page shows {}, which is another of the same "
+                     "product's offers.".format(page["url"], truncate(name, 60), declared,
+                                                _format_price(shown)),
+            checked=("the `availability` of the first offer in the product's block",
+                     "every other offer of the same product - its own `offers` list and each "
+                     "variant's under `hasVariant` - against the prices the page shows"),
+            mechanism="C", root_cause="schema-text-mismatch",
+            summary="List the variant the page shows first, or mark the in-stock offer as the "
+                    "product's price.",
+            how_to_fix=[
+                "Order the variant offers so the one the page selects by default comes first.",
+                "Or give the product a top-level `offers` for the default variant, and keep "
+                "the per-variant offers under `hasVariant`.",
+                who_edits_the_template(platform),
+            ],
+            effort="low", owner="developer",
+            rationale="A consumer reading one price from a block reads the first. When that is "
+                      "an out-of-stock variant, the price it repeats is one nobody can pay.",
+            affected_pages=sorted({p["url"] for p, _, _, _ in out_of_stock_first}),
+        )
+
     if not conflicts:
+        if out_of_stock_first:
+            return
         # A pass over nothing is not a pass. Four sites in one batch carry no
         # JSON-LD at all - a library system, a podcast, a storefront and a
         # research society - and each was told "the names and prices declared
@@ -7787,8 +8461,122 @@ OPEN_GRAPH_FIX_STEPS = {
 }
 
 
+# The words a template puts in `og:title` when nobody filled it in: the name of
+# the menu entry for the front page, in the languages this audit has met.
+# Compared as a whole value, so "Home Insurance Explained" is a title.
+_GENERIC_OG_TITLES = frozenset(" ".join(t.casefold().split()) for t in (
+    "home", "homepage", "home page", "main", "main page", "index", "start", "untitled",
+    "welcome", "default", "page", "new page",
+    "首页", "主页", "首頁", "主頁", "ホーム", "トップ", "トップページ", "홈", "메인", "메인페이지",
+    "accueil", "inicio", "início", "página inicial", "startseite", "home - ", "главная",
+    "головна", "strona główna", "anasayfa", "trang chủ", "beranda", "หน้าหลัก",
+    "الرئيسية", "الصفحة الرئيسية", "ראשי", "דף הבית", "pagina iniziale", "hjem", "etusivu",
+))
+
+# A breadcrumb in `og:site_name`: an arrow between two words, or a slash with
+# space on both sides of it. A slash inside a name, as in "AC/DC", is not one.
+_BREADCRUMB_IN_A_NAME_RE = re.compile(r"\S\s*[>›»]\s*\S|\S\s+/\s+\S")
+
+# How many pages have to share one `og:title` before it is the template's
+# title rather than the page's. Three, and more than half of the pages that
+# carry the tag: a small site whose two landing pages share a title is not a
+# template problem.
+_SHARED_OG_TITLE_MIN_PAGES = 3
+
+
+def _open_graph_values_that_say_nothing(pages):
+    """(generic titles, one title shared by most pages, breadcrumb site names).
+
+    Presence is not the whole of the tag. A museum's template writes
+    `og:title` "Home" on every page that carries one and writes the page's
+    breadcrumb trail - "<Name>>관람 정보>전시해설>…" - into `og:site_name`, and
+    the check passed it with "5 of 60 pages are missing an Open Graph tag":
+    every share card from that site reads "Home", and every system that reads
+    `og:site_name` as the site's name reads a navigation path instead.
+
+    The homepage is left out of the shared-title count, because the site's
+    name is a correct title for the front door and a one-page site published
+    in several languages has one front door per language.
+    """
+    with_title = [(p, " ".join(str((p.get("og") or {}).get("og:title") or "").split()))
+                  for p in pages]
+    with_title = [(p, t) for p, t in with_title if t]
+    generic = [(p, t) for p, t in with_title if t.casefold() in _GENERIC_OG_TITLES]
+    # One front page titled "Home" is one tag to change, not a template writing
+    # the same word everywhere. It counts where it is more than one page, or
+    # every page that carries the tag.
+    if len(generic) < 2 and len(generic) < len(with_title):
+        generic = []
+    shared = []
+    inner = [(p, t) for p, t in with_title if p.get("page_type") != "home"]
+    counts = {}
+    for _, title in inner:
+        counts[title] = counts.get(title, 0) + 1
+    if counts:
+        title, seen = max(counts.items(), key=lambda item: (item[1], item[0]))
+        if seen >= _SHARED_OG_TITLE_MIN_PAGES and seen * 2 > len(inner):
+            shared = [(p, t) for p, t in inner if t == title]
+    breadcrumbs = []
+    for page in pages:
+        name = " ".join(str((page.get("og") or {}).get("og:site_name") or "").split())
+        if name and _BREADCRUMB_IN_A_NAME_RE.search(name):
+            breadcrumbs.append((page, name))
+    return generic, shared, breadcrumbs
+
+
+def _report_open_graph_values(result, pages, platform=None):
+    """The value half of the Open Graph check. True if it reported anything."""
+    # Registered here as well as in the caller, so this helper cannot report
+    # under a check that was never run.
+    result.check("open-graph-tags")
+    generic, shared, breadcrumbs = _open_graph_values_that_say_nothing(pages)
+    title_pages = {p["url"]: t for p, t in generic + shared}
+    if not title_pages and not breadcrumbs:
+        return False
+    parts, steps = [], []
+    if title_pages:
+        common = max(set(title_pages.values()), key=list(title_pages.values()).count)
+        parts.append('`og:title` is "{}" on {} of the {} pages crawled{}'.format(
+            common, list(title_pages.values()).count(common), len(pages),
+            ", a word that names no page" if common.casefold() in _GENERIC_OG_TITLES
+            else ", so it describes none of them"))
+        steps.append("Set `og:title` on each page to that page's own title - its heading, "
+                     "without the site name - not one value for the whole site.")
+    if breadcrumbs:
+        parts.append('`og:site_name` carries a navigation path rather than a name on {} of '
+                     'the {} pages, for example "{}" on {}'.format(
+                         len(breadcrumbs), len(pages), truncate(breadcrumbs[0][1], 80),
+                         breadcrumbs[0][0]["url"]))
+        steps.append("Set `og:site_name` to the site's name alone, the same string on every "
+                     "page; the breadcrumb belongs in the page, or in BreadcrumbList markup.")
+    affected = sorted(set(title_pages) | {p["url"] for p, _ in breadcrumbs})
+    result.add(
+        id_hint="open-graph-values-name-no-page",
+        title="Open Graph tags are present but do not name the page{}".format(
+            " or the site" if breadcrumbs else ""),
+        # Medium where the site's name is the casualty: `og:site_name` is read
+        # as the name a site gives itself, and a path in it is a wrong name.
+        severity="medium" if breadcrumbs else "low", confidence="high",
+        evidence="{}.".format("; ".join(parts)),
+        checked=("the og:title and og:site_name values on every crawled page, compared "
+                 "against each other and against the words a template leaves in a title "
+                 "nobody filled in",),
+        mechanism="B", root_cause="open-graph-incomplete",
+        summary="Give each page its own og:title and give og:site_name the site's name alone.",
+        how_to_fix=steps + [where_the_template_is(platform), who_edits_the_template(platform)],
+        effort="low", owner="developer",
+        rationale="A share card and an answer surface show og:title as the page's name and "
+                  "og:site_name as the site's. A value copied onto every page names neither.",
+        affected_pages=affected,
+    )
+    return True
+
+
 def _check_open_graph(result, pages, platform=None):
     result.check("open-graph-tags")
+    # Values first, so a site whose tags are all present and all say "Home" is
+    # not listed below as one whose tags are fine.
+    reported_values = _report_open_graph_values(result, pages, platform)
     # Which tags are actually missing, not "at least one of three". A
     # restaurant group carrying og:title and og:description on every page and
     # og:image on seventeen of fifty-nine was told "Open Graph tags are missing
@@ -7800,12 +8588,15 @@ def _check_open_graph(result, pages, platform=None):
     incomplete = [p for p in pages
                   if not all((p.get("og") or {}).get(k) for k in OPEN_GRAPH_TAGS)]
     if not incomplete:
-        result.skip("open-graph-tags", "every crawled page carries og:title, og:description and og:image")
+        if not reported_values:
+            result.skip("open-graph-tags",
+                        "every crawled page carries og:title, og:description and og:image")
         return
     if len(incomplete) < len(pages) * 0.4:
-        result.skip("open-graph-tags",
-                    "{} of {} pages are missing an Open Graph tag, below the threshold where "
-                    "this is a template problem".format(len(incomplete), len(pages)))
+        if not reported_values:
+            result.skip("open-graph-tags",
+                        "{} of {} pages are missing an Open Graph tag, below the threshold "
+                        "where this is a template problem".format(len(incomplete), len(pages)))
         return
 
     result.add(

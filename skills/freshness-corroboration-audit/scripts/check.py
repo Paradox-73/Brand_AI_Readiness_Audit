@@ -116,9 +116,11 @@ AUTHORITATIVE = ("LinkedIn", "Wikipedia", "Wikidata", "Crunchbase", "GitHub",
 WIKIDATA_API = ("https://www.wikidata.org/w/api.php?action=wbsearchentities"
                 "&search={}&language=en&uselang=en&format=json&limit=10&type=item")
 
-# Three for Wikidata - a search for the declared name, a second for the shorter
-# form when the site writes one, then one batch lookup of which item claims
-# this host as its official website - six for the profile links we are
+# One robots.txt for Wikidata, read before anything is asked of it, then at
+# most three lookups where that file allows them - a search for the declared
+# name, a second for the shorter form when the site writes one, then one batch
+# lookup of which item claims this host as its official website - six for the
+# profile links we are
 # able to verify, one per platform in VERIFIABLE_PROFILE_PLATFORMS, and one
 # robots.txt per distinct platform host before any of those six is sent.
 # Without the last six the profile probes were skipped part-way through on
@@ -218,8 +220,20 @@ def newest_date(page, now=None):
     is eight months older than it really is and never newer; the alternative,
     guessing a month, would have this audit call a page current on a date
     nobody published.
+
+    A date after `now` is not when the page was published. It is when
+    something the page announces will happen: a national library's event page
+    carries the festival's own date, five weeks after the audit, in both its
+    markup and its text, and the report printed "the newest article is dated
+    2026-10-20 (0 month(s) old)" - an age the arithmetic floored at zero
+    because the page is, by that reading, from the future. A page cannot have
+    been written after the day it was read, so a later date is set aside and
+    the newest date the page could have been published on is what remains.
+    One day of slack, because the reference date is a calendar day in one
+    time zone and a page stamped in another can already be on the next.
     """
     dates = page.get("dates") or {}
+    ceiling = (now + dt.timedelta(days=1)) if now else None
     candidates = []
     for value in (dates.get("machine_readable") or []) + (dates.get("visible") or []):
         parsed = parse_date(value, now)
@@ -229,6 +243,8 @@ def newest_date(page, now=None):
         year = reading.get("gregorian_year") if isinstance(reading, dict) else None
         if isinstance(year, int) and 1000 <= year <= 9999:
             candidates.append(dt.date(year, 1, 1))
+    if ceiling is not None:
+        candidates = [d for d in candidates if d <= ceiling]
     return max(candidates) if candidates else None
 
 
@@ -495,14 +511,17 @@ def _check_article_freshness(result, snapshot, pages, now, fetcher=None):
     # dates itself from the newest post it lists, so counting it inflates the
     # sample with a page that has no publication date of its own and whose age
     # is a copy of a date already counted.
-    articles = [p for p in pages if p["page_type"] == "article" and not is_listing_page(p)]
+    articles = [p for p in pages if p["page_type"] == "article" and not is_listing_page(p)
+                and not _lists_its_own_section(p)]
     if len(articles) < 3:
         result.skip("content-freshness",
                     "fewer than 3 article pages were crawled, so there is no publishing "
                     "cadence to assess")
         return
 
-    dated = [(p, newest_date(p)) for p in articles]
+    # `now` passed through, so an event date later than the audit is not read
+    # as the newest article. See `newest_date`.
+    dated = [(p, newest_date(p, now)) for p in articles]
     dated = [(p, d) for p, d in dated if d]
     if not dated:
         result.skip("content-freshness",
@@ -597,6 +616,34 @@ def _check_article_freshness(result, snapshot, pages, now, fetcher=None):
     )
 
 
+# How many pages under its own address a page has to link to before it is the
+# index of that section. Five: a post links to two or three siblings in a
+# "read next" strip, and a blog's front page links to every post it lists.
+_SECTION_INDEX_MIN_CHILDREN = 5
+
+
+def _lists_its_own_section(page):
+    """Does this page link to the pages filed under its own address?
+
+    A shop's blog front page, `/blogs/<name>`, links to twelve posts at
+    `/blogs/<name>/<post>`, and was typed an article, reported as a page "where
+    a date is expected" and handed a fix to add a published date under its
+    headline. `is_listing_page` reads a page's headings and its type; this
+    reads its links, which is where a blog's front page says what it is. A
+    page whose links reach five or more distinct pages one level or more below
+    its own path is that section's index, and its dates, if any, are its posts'.
+    """
+    path = (urlparse(page.get("url") or "").path or "/").rstrip("/")
+    if not path:
+        return False
+    children = set()
+    for link in ((page.get("links") or {}).get("internal") or []):
+        target = urlparse((link or {}).get("url") or "").path or ""
+        if target.startswith(path + "/") and target.rstrip("/") != path:
+            children.add(target.rstrip("/"))
+    return len(children) >= _SECTION_INDEX_MIN_CHILDREN
+
+
 def _section_of(url):
     """The path a page sits in: `/changelog/x` -> `/changelog`."""
     path = urlparse(url).path or "/"
@@ -632,6 +679,101 @@ def _sitemap_lastmod_by_page(snapshot):
             if value and key:
                 out[key] = value
     return out
+
+
+# What a page is for when it is for doing something rather than reading
+# something: getting there, signing in, signing up, booking. Written as the
+# labels sites put on those pages - a menu entry, the last step of a title's
+# breadcrumb, the page's own heading - in the languages this audit has met,
+# and matched against a whole label, so "Access to Information Act" is not a
+# directions page because it opens with a word on this list.
+_UTILITY_PAGE_LABELS = (
+    # Getting there.
+    "map", "maps", "site map", "directions", "getting here", "how to get here",
+    "how to find us", "find us", "visit us", "location map", "parking", "subway",
+    "metro", "by train", "by bus", "public transport", "access map",
+    "오시는 길", "찾아오시는 길", "지하철", "버스", "주차", "교통", "교통안내",
+    "アクセス", "交通", "交通案内", "地図", "アクセスマップ",
+    "交通指南", "地图", "路线", "交通路线",
+    "plan d'accès", "itinéraire", "venir", "anfahrt", "lageplan", "cómo llegar", "mapa",
+    # Signing in, signing up, booking and paying.
+    "login", "log in", "sign in", "sign up", "register", "registration", "create account",
+    "my account", "my page", "join", "membership", "become a member", "reservation",
+    "reservations", "book", "booking", "book a visit", "book tickets", "checkout", "cart",
+    "basket", "search", "search results",
+    "로그인", "회원가입", "예약", "예약하기", "마이페이지",
+    "ログイン", "会員登録", "新規登録", "予約", "マイページ",
+    "登录", "注册", "预约", "预订",
+    "connexion", "inscription", "réservation", "anmelden", "registrieren", "reservierung",
+    "iniciar sesión", "registro", "reserva",
+)
+_UTILITY_LABEL_KEYS = frozenset(" ".join(label.casefold().split())
+                                for label in _UTILITY_PAGE_LABELS)
+
+# The same pages, as the words an address spells them with.
+# `/contents/membership.do?schM=public_signup` and `/...?menuId=subway-map`
+# name what the page does in the URL even where the page says it in another
+# script. A whole token, so `/sitemap-news/` is not a map.
+_UTILITY_URL_TOKENS = frozenset({
+    "map", "maps", "directions", "signup", "signin", "login", "logon", "register",
+    "registration", "checkout", "cart", "basket", "reservation", "reservations",
+    "booking", "subway", "parking",
+})
+
+# A form is what the page is for when it asks for this many things at once. A
+# search box asks for one and a newsletter box for one or two; a sign-up or a
+# booking form asks for a name, an address, a date and more.
+_A_FORM_PAGE_FIELDS = 4
+
+
+def _label_is_a_utility(label):
+    """Is this label - a heading, a breadcrumb step - the name of a utility page?
+
+    A whole label, or a label that only adds a verb ending to one: Korean and
+    Japanese write "make a reservation" as the noun plus a short ending, and
+    `예약하기` is `예약` with two syllables after it.
+    """
+    key = " ".join(str(label or "").casefold().split())
+    if not key:
+        return False
+    if key in _UTILITY_LABEL_KEYS:
+        return True
+    return any(key.startswith(word) and len(key) - len(word) <= 2
+               for word in _UTILITY_LABEL_KEYS
+               if word and not word.isascii())
+
+
+def _a_page_for_doing_something_else(page):
+    """Is this a form, a map, a directions page or another utility page?
+
+    Such a page is not a dated thing, and no amount of writing makes it one. A
+    museum's sign-up form and its "by subway" page sat under the same path as
+    its dated notices, and both were counted among the pages "where a date is
+    expected" - with a fix to add a published-and-updated line to a
+    membership form. What a page is for is read from three places the page
+    itself fills in: the words of its address, the last step of the
+    breadcrumb its title carries and its own headings, and a form on it that
+    is neither a search box nor a newsletter sign-up.
+    """
+    parts = urlparse(page.get("url") or "")
+    tokens = set(re.split(r"[^a-z0-9]+", "{} {}".format(parts.path, parts.query).lower()))
+    if tokens & _UTILITY_URL_TOKENS:
+        return True
+    for form in page.get("forms") or []:
+        if not isinstance(form, dict):
+            continue
+        if form.get("is_search") or form.get("is_newsletter") or form.get("submits_off_site"):
+            continue
+        if (form.get("field_count") or 0) >= _A_FORM_PAGE_FIELDS:
+            return True
+    title = str(page.get("title") or "")
+    steps = [s for s in re.split(r"\s*(?:>|›|»|\||/| - | – | — )\s*", title) if s.strip()]
+    labels = steps[-2:] if len(steps) > 1 else []
+    # The first `h2` and no other. A recipe's "Directions" is a heading
+    # halfway down a dated post, and it is never the first thing the post says.
+    headings = page.get("headings") or {}
+    labels += list(headings.get("h1") or []) + list(headings.get("h2") or [])[:1]
+    return any(_label_is_a_utility(label) for label in labels)
 
 
 def _check_date_signals(result, pages, snapshot=None):
@@ -672,7 +814,7 @@ def _check_date_signals(result, pages, snapshot=None):
     # nothing that lists posts. Listings are dropped from both sides of the
     # arithmetic: they cannot be judged undated, and their borrowed dates
     # cannot be what makes a section count as dated either.
-    items = [p for p in pages if not is_listing_page(p)]
+    items = [p for p in pages if not is_listing_page(p) and not _lists_its_own_section(p)]
     listing_count = len(pages) - len(items)
     result.signal("listing_pages_not_expected_to_carry_a_date", listing_count)
 
@@ -698,9 +840,20 @@ def _check_date_signals(result, pages, snapshot=None):
         if section_dated.get(section, 0) >= 2
         and section_dated.get(section, 0) >= 0.5 * total
     }
+    # A section being dated says its pages are dated things, and a sign-up
+    # form or a directions page filed under the same path is not one. Only the
+    # section inference is narrowed: a page the crawl typed as an article or a
+    # press release is asked for a date whatever else is on it.
+    utility = [p for p in items
+               if p["page_type"] not in ("article", "press")
+               and _section_of(p["url"]) in dated_sections
+               and _a_page_for_doing_something_else(p)]
+    result.signal("utility_pages_not_expected_to_carry_a_date", len(utility))
+    utility_urls = {p.get("url") for p in utility}
     expect_dates = [p for p in items
                     if p["page_type"] in ("article", "press")
-                    or _section_of(p["url"]) in dated_sections]
+                    or (_section_of(p["url"]) in dated_sections
+                        and p.get("url") not in utility_urls)]
     if not expect_dates:
         result.skip("date-signals-present",
                     "no article or press page was crawled, and no section of the site holds "
@@ -739,6 +892,13 @@ def _check_date_signals(result, pages, snapshot=None):
                     " {} that list other pages are not counted here: an index carries the "
                     "dates of the items on it, or none, and neither is a date of its "
                     "own.".format(plural(listing_count, "crawled page", "crawled pages")))
+    if utility:
+        listing_note += (" {} in dated sections {} a form, a map, directions or a sign-in "
+                         "or booking page rather than something written on a date, so {} "
+                         "not counted: {}.".format(
+                             plural(len(utility), "page"), "is" if len(utility) == 1 else "are",
+                             "it is" if len(utility) == 1 else "they are",
+                             ", ".join(example_urls([p["url"] for p in utility]))))
 
     if not undated:
         result.skip("date-signals-present",
@@ -1584,9 +1744,13 @@ _PLATFORMS_TO_CLAIM = (
     (ONLINE_SELLER,
      "Instagram, TikTok, YouTube, Pinterest, Facebook, the review site your buyers "
      "check before ordering, and every marketplace you already sell on"),
+    # A company or a non-profit: the classifier cannot tell the two apart, so
+    # nothing here assumes a trade. "The trade bodies, standards bodies and
+    # industry directories you already belong to" went to a network of
+    # religious scholarship, which belongs to none of them.
     (ORGANISATION,
-     "LinkedIn, YouTube, X, and the trade bodies, standards bodies and industry "
-     "directories you already belong to"),
+     "LinkedIn, YouTube, X, and the registers and directories where organisations "
+     "like this one are listed"),
     (PROJECT,
      "the repository host your code lives on, the package index people install it "
      "from, Wikidata, and the forum or chat where your users already talk"),
@@ -1604,8 +1768,29 @@ _PLATFORMS_TO_CLAIM = (
 # The line every site got before any of this existed, and the line an
 # unclassified site keeps getting. A wrong guess about what a site is caused
 # the failures above, so a classifier that cannot decide has to change nothing.
-_PLATFORMS_WHATEVER_THE_SITE_IS = ("LinkedIn, Instagram, YouTube, X, Facebook, and your "
-                                   "industry's directories")
+#
+# The platforms are unchanged. The last clause is not: "your industry's
+# directories" assumes an industry, and on a site the classifier could not
+# place it went to a one-page essay and a central bank alike. The registers
+# and directories that list a body like this one exist for every kind of
+# body, so that is what the line names.
+_PLATFORMS_WHATEVER_THE_SITE_IS = ("LinkedIn, Instagram, YouTube, X, Facebook, and the "
+                                   "registers and directories where organisations like "
+                                   "this one are listed")
+
+# The step that follows the platform line, in two wordings. The business one
+# names a company record and an employer profile, which only a business has;
+# it went to a central bank and to a one-page essay, neither of which the
+# classifier had determined to be one. Any other site gets the same step
+# without the assumption.
+_COMPANY_RECORD_STEP = (
+    "Claim the company record too - a business database entry and an employer "
+    "profile - so an assistant asked who is behind the brand finds an answer that "
+    "is not the brand's own site.")
+_REGISTER_ENTRY_STEP = (
+    "Claim the entries that describe the organisation itself too - in the registers "
+    "and directories where organisations like this one are listed - so an assistant "
+    "asked who is behind the site finds an answer that is not the site itself.")
 
 
 def _how_to_widen_the_footprint(kind):
@@ -1625,11 +1810,12 @@ def _how_to_widen_the_footprint(kind):
     # and goes quiet only where the site's own structure says a company profile
     # is not a thing this site can have. A program has no employees to review
     # and no funding round to list.
+    #
+    # Which wording is `is_certainly`: a company record is named only where
+    # the site has been determined to be a business. See `_COMPANY_RECORD_STEP`.
     if kind.might_be(LOCAL_BUSINESS, ONLINE_SELLER, ORGANISATION, PUBLICATION):
-        steps.append(
-            "Claim the company record too - a business database entry and an employer "
-            "profile - so an assistant asked who is behind the brand finds an answer that "
-            "is not the brand's own site.")
+        steps.append(_COMPANY_RECORD_STEP if kind.is_certainly(LOCAL_BUSINESS, ONLINE_SELLER)
+                     else _REGISTER_ENTRY_STEP)
     steps += [
         "Use the identical name and the identical one-sentence description on every profile. "
         "Wording that matches exactly is what makes them corroborate rather than merely "
@@ -2272,6 +2458,21 @@ def _covering_matches(names, matches):
     return sum(1 for m in matches if _item_carries_one_of(m, names))
 
 
+def _wikidata_allows(fetcher, cache):
+    """May this audit send its lookups to Wikidata's API, by Wikidata's robots.txt?
+
+    Read through `third_party_allows`, the same reader the profile probes use,
+    against the address every lookup here is sent to. A robots file that could
+    not be read does not block, which is that reader's rule: an audit may not
+    refuse on the strength of its own failure to check. That covers a reply
+    with no body to read as well as no reply at all.
+    """
+    try:
+        return third_party_allows(fetcher, WIKIDATA_API.format("robots"), cache)
+    except (AttributeError, TypeError, ValueError):
+        return True
+
+
 def _wikidata_search(fetcher, name):
     """The raw search results for one name, or None when the API did not answer."""
     response = fetcher.try_get(WIKIDATA_API.format(quote(name)))
@@ -2433,6 +2634,20 @@ def _check_entity_ambiguity(result, snapshot, pages, brand, profiles, fetcher, a
                                     "counted",
                         exhausted_reason="the number of entities sharing this name was "
                                          "not counted"))
+        return
+
+    # Wikidata's own robots.txt decides whether its API may be asked, exactly
+    # as each platform's decides whether a profile may be probed. Its file
+    # carries `User-agent: *` and `Disallow: /w/`, and `/w/api.php` is the path
+    # every lookup here goes to - so asking anyway, with the exception named in
+    # the documentation, still broke the one rule this marketplace keeps about
+    # other people's servers. Declined, with the reason, and never a finding:
+    # nothing about the site was measured.
+    if not _wikidata_allows(fetcher, {}):
+        result.signal("wikidata_closed_by_robots", True)
+        result.skip("entity-ambiguity",
+                    "Wikidata's robots.txt closes its API to automated clients, so no lookup "
+                    "was made and how many things share this name was not measured")
         return
 
     shorter = _shorter_search_name(brand, brand_name)
@@ -2759,7 +2974,7 @@ def _check_entity_ambiguity(result, snapshot, pages, brand, profiles, fetcher, a
              "the same one-sentence description you use everywhere else, set its official "
              "website to this site, and link it back from Organization `sameAs`."
              if confirmed else
-             "Create a Wikidata item for the company if one does not exist, with the same "
+             "Create a Wikidata item for the organisation if one does not exist, with the same "
              "one-sentence description you use everywhere else, and link it from Organization "
              "`sameAs`."),
             "Add `alternateName` to Organization markup listing the other ways people write "
@@ -2779,8 +2994,10 @@ def _check_entity_ambiguity(result, snapshot, pages, brand, profiles, fetcher, a
             # given only where the site's own prose is English, because an
             # English example is no help to anyone writing in another language.
             _category_noun_step(english),
-            "Fill in the founding year, location and industry in Organization markup; those "
-            "three fields are what separate same-named entities.",
+            # "The field it works in", not "industry": a library, a charity and
+            # a research group have the first and not the second.
+            "Fill in the founding year, the location and the field it works in in "
+            "Organization markup; those three facts are what separate same-named entities.",
         ],
         effort="medium", owner="marketing",
         rationale="When several things share a name, a system either picks one or "
@@ -2869,6 +3086,74 @@ def _postcode_is_printed(postcode, pages):
     return False
 
 
+def _is_a_placeholder_number(value):
+    """Is this telephone value a template's filler rather than a number?
+
+    Every digit the same - `00000000`, `1111111` - or the digits in counting
+    order. No real telephone number is either, and a template that shipped
+    with one has published it on every page.
+    """
+    digits = re.sub(r"\D", "", str(value or ""))
+    if len(digits) < 6:
+        return False
+    return len(set(digits)) == 1 or digits in "01234567890123456789" \
+        or digits in "98765432109876543210"
+
+
+def _placeholder_telephones(pages):
+    """[(page, value)] for every JSON-LD telephone that is a placeholder.
+
+    Every node, nested ones included, because the value that reached a wine
+    shop's every page sat in `Organization.contactPoint.telephone`: "00000000",
+    passed by this check as consistent - which it was, on every page alike.
+    """
+    found, seen = [], set()
+    for page in pages:
+        stack = list(page.get("jsonld") or [])
+        while stack:
+            node = stack.pop()
+            if isinstance(node, list):
+                stack.extend(node)
+                continue
+            if not isinstance(node, dict):
+                continue
+            for key, value in node.items():
+                if key == "telephone" and isinstance(value, (str, int)) \
+                        and _is_a_placeholder_number(value) and page.get("url") not in seen:
+                    seen.add(page.get("url"))
+                    found.append((page, str(value)))
+                elif isinstance(value, (dict, list)):
+                    stack.append(value)
+    return found
+
+
+def _report_placeholder_telephones(result, placeholders):
+    result.check("fact-consistency-across-pages")
+    page, value = placeholders[0]
+    result.add(
+        id_hint="declared-telephone-is-a-placeholder",
+        title="The markup declares a placeholder telephone number on {}".format(
+            plural(len(placeholders), "page")),
+        severity="medium", confidence="high",
+        evidence='Example: {} declares `"telephone": "{}"` in its JSON-LD - not a number '
+                 "anyone can call. Seen on {}.".format(page["url"], value,
+                                                        plural(len(placeholders), "page")),
+        mechanism="D", root_cause="nap-inconsistency",
+        summary="Replace the placeholder with the real number, or remove the property.",
+        how_to_fix=[
+            "Find where the Organization block is written - a theme setting or the template - "
+            "and put the number the site prints for reaching it in `telephone`.",
+            "Where there is no public number, remove `telephone` rather than leaving a "
+            "placeholder: an absent value is read as unknown, a placeholder as the answer.",
+        ],
+        effort="low", owner="developer",
+        rationale="A consumer asked how to reach the company repeats the number the markup "
+                  "declares. A row of zeros published as a telephone is a wrong answer with the "
+                  "confidence structured data carries.",
+        affected_pages=[p["url"] for p, _ in placeholders],
+    )
+
+
 def _check_fact_consistency(result, snapshot, pages):
     """Contact and boilerplate facts that contradict each other across the site.
 
@@ -2890,6 +3175,11 @@ def _check_fact_consistency(result, snapshot, pages):
     result.check("fact-consistency-across-pages")
     conflicts = []
     branches = is_multi_location(snapshot)
+    # A value that is not a number at all, before any two numbers are
+    # compared. See `_placeholder_telephones`.
+    placeholders = _placeholder_telephones(pages)
+    if placeholders:
+        _report_placeholder_telephones(result, placeholders)
 
     descriptions = {}
     for page in pages:
@@ -3002,6 +3292,8 @@ def _check_fact_consistency(result, snapshot, pages):
                   max([len(keys) for keys in by_language.values()] or [0]))
 
     if not conflicts:
+        if placeholders:
+            return
         result.skip("fact-consistency-across-pages",
                     "telephone, postal code and the Organization description are consistent "
                     "wherever they appear, both between pages and against the markup")

@@ -1739,6 +1739,69 @@ def _script_redirect(page):
             (record.get("target") or record.get("url") or ""))
 
 
+def _site_part(host):
+    """The part of a hostname one organisation holds: `streaming.x.go.kr` -> `x.go.kr`.
+
+    The last two labels, or the last three where the second-last is a short
+    registry label under a two-letter country (`go.kr`, `co.uk`, `or.th`).
+    Close enough to tell a frame of the site's own from a tag manager's.
+    """
+    labels = (host or "").lower().rstrip(".").split(".")
+    if len(labels) >= 3 and len(labels[-1]) == 2 and len(labels[-2]) <= 3:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def _frame_is_the_page(page):
+    """The frame a short page consists of, or None.
+
+    A museum's two virtual-tour pages deliver a title, 41 and 26 characters,
+    no link of any kind, and one frame holding the tour from the museum's own
+    streaming host. The extractor marks that frame invisible - it is sized by
+    the tour's script - so the iframe check passed over it, and five findings
+    from three skills then asked those two pages for a paragraph, a
+    breadcrumb, a next step and links of their own. The page is the frame.
+
+    All of: under the quotable floor, no link at all on the page, and a frame
+    that is not a video or a map and is served from the site's own part of the
+    domain - a tag manager's hidden frame is on somebody else's.
+    """
+    if page.get("body_text_len", 0) >= quotable_floor(page):
+        return None
+    links = page.get("links") or {}
+    if links.get("internal_count") or links.get("external_count") \
+            or links.get("internal") or links.get("external"):
+        return None
+    here = _site_part(urlparse(page.get("final_url") or page.get("url") or "").hostname)
+    for frame in page.get("iframes") or []:
+        if frame.get("is_video") or frame.get("is_map") or frame.get("is_audio"):
+            continue
+        if here and _site_part(urlparse(frame.get("src") or "").hostname) == here:
+            return frame
+    return None
+
+
+# A cover page: the homepage delivering at most this many visible characters
+# and one to three links into the site. The engagement skill reports it, once,
+# with everything it costs; the same measurement is restated here because each
+# skill runs on its own, and it is what stops this skill describing the same
+# page a second time as "main content in images".
+COVER_PAGE_TEXT = 200
+COVER_PAGE_MAX_LINKS = 3
+
+
+def _is_a_cover_page(page):
+    if page.get("page_type") != "home" or page.get("script_redirect"):
+        return False
+    if (page.get("text_len") or 0) > COVER_PAGE_TEXT:
+        return False
+    here = {_same_page_key(page.get(field)) for field in ("url", "final_url") if page.get(field)}
+    targets = {_same_page_key(link["url"])
+               for link in (page.get("links") or {}).get("internal") or []
+               if isinstance(link, dict) and link.get("url") and not link.get("fragment")}
+    return 1 <= len(targets - here) <= COVER_PAGE_MAX_LINKS
+
+
 def _unassessed_note(snapshot, content_pages):
     """How many 200 pages this check did not judge, or "" when it judged them all.
 
@@ -1759,7 +1822,7 @@ def _unassessed_note(snapshot, content_pages):
 
 
 def _set_aside_note(extraction_failed, could_not_tell, assembled_elsewhere=(), shells=(),
-                    artefact_pages=(), gateways=(), listings=(), redirects=()):
+                    artefact_pages=(), gateways=(), listings=(), redirects=(), frames=()):
     """The short pages this check declined to judge, and why, or "".
 
     A short page dropped without being named is a page the reader believes was
@@ -1794,6 +1857,14 @@ def _set_aside_note(extraction_failed, could_not_tell, assembled_elsewhere=(), s
                          "; ".join("{} - `{}` to {}".format(url, via, target or "an address "
                                                            "the script computes")
                                    for url, via, target in sorted(redirects)[:3])))
+    if frames:
+        parts.append("{} nothing but a frame holding another document of this site's ({}), "
+                     "and no link of any kind; the copy is in the framed document, so that is "
+                     "reported as a page whose main content is in a frame rather than as a "
+                     "page written short".format(
+                         plural(len(frames), "page carries", "pages carry"),
+                         "; ".join("{} - {}".format(url, src)
+                                   for url, src in sorted(frames)[:3])))
     if gateways:
         parts.append("{} a way into the site rather than a page of copy: {} - its content is "
                      "its links, every one of those pages delivered its own content, and "
@@ -2165,7 +2236,7 @@ def _check_thin_pages(result, content_pages, shells, snapshot=None, unsettled=()
 
     thin, could_not_tell, extraction_failed = [], [], []
     set_aside_shells, assembled_elsewhere, publishing_a_placeholder = [], [], []
-    redirecting, gateway_pages, listings = [], [], []
+    redirecting, gateway_pages, listings, framed = [], [], [], []
     for page in judged:
         if page["url"] in shell_urls:
             set_aside_shells.append(page)
@@ -2181,6 +2252,13 @@ def _check_thin_pages(result, content_pages, shells, snapshot=None, unsettled=()
         redirect = _script_redirect(page)
         if redirect:
             redirecting.append((page["url"], redirect[0], redirect[1]))
+            continue
+        # A page that is nothing but a frame of the site's own: its copy is
+        # in the framed document, and `iframed-main-content` reports it with
+        # that fix. See `_frame_is_the_page`.
+        frame = _frame_is_the_page(page)
+        if frame is not None:
+            framed.append((page["url"], frame.get("src") or ""))
             continue
         if page["url"] in gateways:
             gateway_pages.append((page["url"], gateways[page["url"]]))
@@ -2203,7 +2281,9 @@ def _check_thin_pages(result, content_pages, shells, snapshot=None, unsettled=()
     set_aside = _set_aside_note(extraction_failed, could_not_tell,
                                 assembled_elsewhere, set_aside_shells,
                                 publishing_a_placeholder, gateways=gateway_pages,
-                                listings=listings, redirects=redirecting)
+                                listings=listings, redirects=redirecting, frames=framed)
+    if framed:
+        result.signal("short_pages_that_are_a_frame", sorted(url for url, _ in framed)[:10])
     if redirecting:
         result.signal("short_pages_that_redirect_by_script",
                       sorted(url for url, _, _ in redirecting)[:10])
@@ -2498,13 +2578,19 @@ def _check_image_locked(result, content_pages, shells):
     shell_urls = {p["url"] for p in shells}
     by_template, site_wide = _template_image_count(content_pages)
     missed = _text_this_audit_missed(content_pages)
-    locked, template_only, unread = [], [], []
+    locked, template_only, unread, covers = [], [], [], []
     for page in content_pages:
         if page["url"] in shell_urls:
             continue  # already reported as a shell; do not double-count
         images = page.get("images") or {}
         text_len = page.get("body_text_len", 0)
         if text_len >= IMAGE_DOMINANT_TEXT:
+            continue
+        # A cover page's pictures are its way into the site, and the page is
+        # reported once as a cover page with that cost named. See
+        # `_is_a_cover_page`.
+        if _is_a_cover_page(page):
+            covers.append(page)
             continue
         # Checked after the text bar, so only a page this check would otherwise
         # have accused is named as set aside.
@@ -2580,6 +2666,12 @@ def _check_image_locked(result, content_pages, shells):
         set_aside += _missed_text_note(unread, "what its pictures carry")
         result.signal("pages_whose_text_this_audit_could_not_read_for_images",
                       sorted(p["url"] for p in unread)[:10])
+    if covers:
+        set_aside += (". Set aside: the homepage at {} is a cover page - at most {} "
+                      "characters of text and a few links into the site - so its pictures "
+                      "are its way in rather than facts locked in pixels, and the cover page "
+                      "is reported once, as a cover page, by the check of what the homepage "
+                      "tells a visitor.".format(covers[0]["url"], COVER_PAGE_TEXT))
 
     if not locked:
         result.skip("facts-locked-in-images",
@@ -3079,6 +3171,12 @@ def _check_iframed_content(result, content_pages, shells):
             continue
         frames = [f for f in (page.get("iframes") or [])
                   if not f["is_video"] and not f["is_map"] and not f.get("is_invisible")]
+        # A frame marked invisible is still the content where it is the only
+        # thing on the page: sized by a script, it reads as hidden in the
+        # delivered HTML. See `_frame_is_the_page`.
+        if not frames:
+            whole = _frame_is_the_page(page)
+            frames = [whole] if whole is not None else []
         if not (frames and page.get("body_text_len", 0) < MIN_QUOTABLE_TEXT):
             continue
         # "The page's own text is too short, so the frame must hold the
@@ -3117,6 +3215,9 @@ def _check_iframed_content(result, content_pages, shells):
             "Where the iframe hosts your own content, render it directly in the page template.",
             "Where it is a third-party embed (a booking widget, a menu tool), write the same "
             "core facts as HTML text above or below it.",
+            "Where the frame is an interactive viewer - a virtual tour, a 3D model, a "
+            "floor plan - keep it, and write beside it on this page what it shows, with "
+            "links to the pages about what is in it and to the section it belongs to.",
         ],
         effort="medium", owner="developer",
         rationale="An iframe is a separate document. Consumers that read the parent "
@@ -3305,6 +3406,13 @@ def _check_pagination(result, snapshot, content_pages):
         if links.get("internal_count", len(internal)) > len(internal):
             continue
         if any(PAGINATION_RE.search(url) for url in internal):
+            continue
+        # A `<link rel="next">` in the head is crawlable pagination whatever
+        # the body offers: a shop's bag category was told to "add <link
+        # rel=\"next\">" while carrying `<link rel="next" href="?page=2">`.
+        # Read from the extractor's record of the head's pagination links where
+        # the snapshot has one.
+        if page.get("rel_next") or (page.get("head_links") or {}).get("next"):
             continue
         offenders.append(page)
 

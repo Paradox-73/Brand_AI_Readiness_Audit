@@ -918,6 +918,9 @@ EVIDENCE_BASIS = {
 # thing twice and `test_no_override_repeats_what_its_cause_already_says` would
 # have failed the build for it.
 EVIDENCE_BASIS_BY_FINDING = {
+    # A cover page is read straight off the delivered homepage: its character
+    # count and its links, nothing decided about what the site is.
+    "homepage-is-a-cover-page": OBSERVED,
     # `no-org-schema` counts every crawled page for its site-wide claim. This
     # check counts only the pages a regular expression read a street and a
     # postcode out of, and on one real site those were product codes printed
@@ -1366,6 +1369,32 @@ _LOCALE_SEGMENT_RE = re.compile(
 # be corroborated, and one page under a numeric path never is.
 _NOT_A_LOCALE = frozenset({"us", "uk", "eu", "ac", "co", "hr", "pr", "tv"})
 
+# Three-letter language codes as editions write them: ISO 639-2 (`/eng`,
+# `/jpn`, `/kor`, `/deu`) and the commonest informal forms beside them (`/chn`,
+# `/esp`), in either case. A national museum serves `/ENG`, `/JPN` and `/CHN`
+# beside its Korean pages, none of them was read as an edition, and the
+# navigation check compared each translated menu with the Korean one and
+# reported the editions as pages without the site's normal navigation.
+#
+# A list, not a shape. Three letters are what ordinary sections are called -
+# `/api`, `/faq`, a hotel's `/spa`, a newspaper's `/pol` - so only codes that
+# name nothing else are here, and the corroboration a two-letter code needs
+# applies to these too.
+_THREE_LETTER_LANGUAGES = {
+    "eng": "en", "jpn": "ja", "kor": "ko", "chn": "zh", "zho": "zh",
+    "cht": "zh", "chs": "zh", "fra": "fr", "fre": "fr", "deu": "de", "ger": "de",
+    "esp": "es", "ita": "it", "por": "pt", "rus": "ru", "ara": "ar", "tha": "th",
+    "vie": "vi", "vnm": "vi", "idn": "id", "nld": "nl", "dut": "nl", "heb": "he",
+    "hin": "hi", "urd": "ur", "fas": "fa", "swe": "sv", "ukr": "uk", "ell": "el",
+    "ces": "cs", "cze": "cs", "hun": "hu", "ron": "ro", "khm": "km", "msa": "ms",
+}
+
+
+def locale_language(code):
+    """The language an edition's path code names: `en-gb` -> `en`, `ENG` -> `en`."""
+    base = primary_subtag(code)
+    return _THREE_LETTER_LANGUAGES.get(base, base)
+
 
 def _locale_candidate(url):
     """The leading path segment, if it is shaped like a language code."""
@@ -1373,6 +1402,8 @@ def _locale_candidate(url):
     first = path.strip("/").split("/")[0].lower() if path.strip("/") else ""
     if not first or first in _NOT_A_LOCALE:
         return ""
+    if first in _THREE_LETTER_LANGUAGES:
+        return first
     if not _LOCALE_SEGMENT_RE.match(first):
         return ""
     return first
@@ -1389,7 +1420,8 @@ def locale_editions(pages):
     """
     candidates = {}
     for page in pages or []:
-        if page.get("status") != 200:
+        # A skipped record - a PDF, an image - is not a page of any edition.
+        if page.get("status") != 200 or page.get("skipped"):
             continue
         candidate = _locale_candidate(page.get("url") or "")
         if candidate:
@@ -1401,7 +1433,7 @@ def locale_editions(pages):
     self_declared = set()
     for page in pages or []:
         candidate = candidates.get(page.get("url"))
-        if candidate and primary_subtag(page.get("lang")) == candidate.split("-")[0].split("_")[0]:
+        if candidate and primary_subtag(page.get("lang")) == locale_language(candidate):
             self_declared.add(candidate)
 
     distinct = set(candidates.values())
@@ -1422,7 +1454,26 @@ def locale_editions(pages):
     trusted = distinct if (self_declared or len(distinct) > 1) else set()
     if not trusted:
         return {}
-    return {url: code for url, code in candidates.items() if code in trusted}
+    editions = {url: code for url, code in candidates.items() if code in trusted}
+    # The two country codes `_NOT_A_LOCALE` holds back, once the site has shown
+    # it is divided by edition and the page itself declares that very region. A
+    # furniture retailer serves one storefront per country - `/au`, `/ca`,
+    # `/sg`, `/uk`, `/us` - and the last two were read as sections of some
+    # other edition, so their menus were compared against a different
+    # country's. `uk` is written `GB` in a language tag; see
+    # `_REGION_SUBTAG_ALIASES`.
+    for page in pages or []:
+        if page.get("status") != 200 or page.get("skipped"):
+            continue
+        url = page.get("url") or ""
+        path = urlparse(url).path.strip("/")
+        first = path.split("/")[0].lower() if path else ""
+        if first not in ("us", "uk"):
+            continue
+        region = str(page.get("lang") or "").strip().lower().replace("_", "-").split("-")[1:]
+        if region and region[-1] == _REGION_SUBTAG_ALIASES.get(first, first):
+            editions[url] = first
+    return editions
 
 
 def group_by_edition(pages, editions):
@@ -1613,6 +1664,34 @@ def site_script(pages):
     return dominant_script(language_sample(pages)) or ""
 
 
+def _front_door_languages(pages):
+    """(the homepage's declared language, the `x-default` edition's), "" where unknown.
+
+    The homepage is the page at `/`. The `x-default` edition is the address
+    any page's `hreflang` set names as the default, read back through the
+    crawled page at that address.
+    """
+    by_url, home, default_url = {}, "", ""
+    for page in pages or []:
+        if page.get("status") != 200 or page.get("skipped"):
+            continue
+        code = primary_subtag(page.get("lang"))
+        for address in (page.get("url"), page.get("final_url")):
+            if address and code:
+                by_url.setdefault(address.rstrip("/"), code)
+        try:
+            parsed = urlparse(page.get("url") or "")
+        except ValueError:
+            continue
+        if code and not home and (parsed.path or "/") == "/" and not parsed.query:
+            home = code
+        for alternate in page.get("hreflang") or []:
+            if (not default_url and isinstance(alternate, dict)
+                    and str(alternate.get("hreflang") or "").lower() == "x-default"):
+                default_url = str(alternate.get("url") or "")
+    return home, (by_url.get(default_url.rstrip("/"), "") if default_url else "")
+
+
 def detect_site_language(pages):
     """The language of the site, and how we know.
 
@@ -1634,15 +1713,26 @@ def detect_site_language(pages):
     script = dominant_script(sample) or ""
     non_latin = script in NON_LATIN_PROSE_SCRIPTS
 
-    declared = {}
-    for page in pages or []:
-        if page.get("status") != 200:
+    declared, first_seen = {}, {}
+    for index, page in enumerate(pages or []):
+        if page.get("status") != 200 or page.get("skipped"):
             continue
         code = primary_subtag(page.get("lang"))
         if code:
             declared[code] = declared.get(code, 0) + 1
+            first_seen.setdefault(code, index)
     if declared:
-        code = max(declared, key=lambda k: (declared[k], k))
+        # A tie is broken by what the site says its front door is, never by
+        # the alphabet. An English-first site serving one page per language
+        # had `/` and `/en` in English and `/pt` and `/pt-br` in Portuguese:
+        # two each, `pt` sorted last and won, and four English prose checks
+        # were skipped on an English site "because it is in PT". The homepage
+        # declares its language, and the `x-default` edition is the one the
+        # site offers a visitor it knows nothing about; after those, the
+        # language the crawl met first.
+        home_code, default_code = _front_door_languages(pages)
+        code = max(declared, key=lambda k: (declared[k], k == home_code,
+                                             k == default_code, -first_seen[k]))
         source = "declared"
         # The declaration and the letters disagree, and the letters win. Asked
         # of every language rather than of English alone: a site declaring
@@ -2428,6 +2518,29 @@ def without_marks(name):
     return re.sub(r"\s+", " ", _NAME_MARK_RE.sub("", str(name or ""))).strip()
 
 
+# A country written after a name, which is where the business trades rather
+# than part of what it is called. Abbreviations are matched in capitals only,
+# so a name ending in the word "us" keeps it.
+_TRAILING_PLACES = (
+    "singapore", "india", "malaysia", "indonesia", "thailand", "philippines",
+    "vietnam", "japan", "korea", "south korea", "china", "hong kong", "taiwan",
+    "australia", "new zealand", "canada", "united kingdom", "united states",
+    "america", "ireland", "germany", "france", "spain", "italy", "netherlands",
+    "belgium", "switzerland", "austria", "sweden", "norway", "denmark", "finland",
+    "poland", "portugal", "brazil", "mexico", "argentina", "chile", "dubai",
+    "saudi arabia", "qatar", "egypt", "south africa", "nigeria", "kenya",
+    "pakistan", "bangladesh", "sri lanka", "nepal", "europe", "asia",
+)
+_TRAILING_PLACE_RE = re.compile(
+    r"[\s,|–—-]+(?:(?i:" + "|".join(re.escape(p) for p in sorted(
+        _TRAILING_PLACES, key=len, reverse=True)) + r")|US|USA|UK|UAE)\.?$")
+# Words after which a place is part of the name: "Bank of <Country>".
+_NAME_JOINING_WORDS = frozenset({
+    "of", "for", "and", "&", "de", "du", "des", "del", "della", "von", "van",
+    "the", "in", "at",
+})
+
+
 def name_forms(declared, domain_token=""):
     """Every way an organisation could reasonably refer to itself in a sentence.
 
@@ -2493,6 +2606,27 @@ def name_forms(declared, domain_token=""):
         without_article = LEADING_ARTICLE_RE.sub("", value).strip()
         if without_article and without_article != value:
             forms.add(without_article)
+    # The name without the country it trades in. A design studio declares
+    # "<Name> Singapore" in `og:site_name` and its Organization markup, and its
+    # homepage's meta description reads "<Name> is a multidisciplinary design
+    # studio based in Singapore". Every form derived from the declared string
+    # kept the country, so that sentence was never tried against the name it
+    # uses, and the definition check quoted a press line from a blog post
+    # instead. The place comes off only where what is left is still a name -
+    # two words or more, or the word the domain spells, so "Air <Country>"
+    # keeps its country - and never after "of", "for" or "and", where the
+    # place is part of the name ("Bank of <Country>").
+    place_token = re.sub(r"[^a-z0-9]", "", (domain_token or "").lower())
+    for value in list(forms):
+        match = _TRAILING_PLACE_RE.search(value)
+        if not match:
+            continue
+        rest = value[:match.start()].strip().rstrip(",|–—-").strip()
+        words = rest.split()
+        if not words or words[-1].lower() in _NAME_JOINING_WORDS:
+            continue
+        if len(words) >= 2 or re.sub(r"[^a-z0-9]", "", rest.lower()) == place_token:
+            forms.add(rest)
     # The leading words that spell the domain. A restaurant group declares
     # "Walmgate Indian Restaurants" and writes "Each Walmgate is a love letter to
     # Bombay"; the check searched for the full three-word legal name, which
@@ -4306,11 +4440,70 @@ _QUESTION_HEADING_RE = re.compile(
 # body: a help page explaining what a 404 is would otherwise be mistaken for
 # one, and a shop's search results legitimately say "no results found" in the
 # body of a page that is working correctly.
+# The same statement in the languages this marketplace already names
+# elsewhere. A national museum answers a missing address with HTTP 200, the
+# title "Notice" in Korean and one line of text - "the web page cannot be
+# found" - and the report said the response "says nothing about the page being
+# missing". Short, whole phrases only: each says "this page does not exist" and
+# nothing else, so none turns up in an ordinary page's prose.
+_SOFT_404_PHRASES = (
+    # Korean
+    "페이지를 찾을 수 없", "페이지가 존재하지 않", "존재하지 않는 페이지", "찾을 수 없는 페이지",
+    # Japanese
+    "ページが見つかりません", "ページは見つかりません", "ページが存在しません",
+    "ページは存在しません", "お探しのページは",
+    # Chinese
+    "页面不存在", "頁面不存在", "网页不存在", "網頁不存在", "找不到页面", "找不到頁面",
+    "页面未找到", "頁面未找到", "找不到网页", "找不到網頁",
+    # Thai
+    "ไม่พบหน้า", "หน้านี้ไม่มีอยู่",
+    # Arabic
+    "الصفحة غير موجودة", "الصفحة المطلوبة غير موجودة", "لم يتم العثور على الصفحة",
+    # Persian
+    "صفحه یافت نشد", "صفحه مورد نظر یافت نشد", "صفحه پیدا نشد",
+    # Hebrew
+    "הדף לא נמצא", "העמוד לא נמצא", "הדף המבוקש לא נמצא",
+    # Russian
+    "страница не найдена", "страница не существует", "такой страницы нет",
+    # German
+    "seite nicht gefunden", "seite wurde nicht gefunden", "seite existiert nicht",
+    # French
+    "page introuvable", "page non trouvée", "page n'existe pas",
+    # Spanish
+    "página no encontrada", "no se encontró la página", "no se ha encontrado la página",
+    "página no existe",
+    # Portuguese
+    "página não encontrada", "página não existe",
+    # Italian
+    "pagina non trovata", "pagina non esiste", "pagina non è stata trovata",
+    # Dutch
+    "pagina niet gevonden", "pagina bestaat niet",
+    # Indonesian
+    "halaman tidak ditemukan", "halaman tidak ada",
+    # Vietnamese
+    "không tìm thấy trang", "trang không tồn tại",
+)
+
 _SOFT_404_MARKERS = (
     "page not found", "not found", "404", "no longer available", "nothing to see here",
     "page doesn't exist", "page does not exist", "page unavailable", "oops",
     "sorry, we can't find", "we couldn't find that page",
-)
+) + _SOFT_404_PHRASES
+
+# What a missing-page notice's body may be read for. The title and heading
+# markers above include the bare "404" and "oops", which in running text are a
+# product code and an apology; the body is held to whole phrases.
+_SOFT_404_TEXT_MARKERS = (
+    "page not found", "page doesn't exist", "page does not exist",
+    "sorry, we can't find", "we couldn't find that page", "error 404", "404 error",
+    "404 not found",
+) + _SOFT_404_PHRASES
+
+# A missing-page notice is short. Its body is read as well as its title and
+# heading when the whole of it is under this many characters, because the
+# museum's notice has no heading and a title that says only "notice"; on a
+# longer page the same phrase is more likely a sentence about some other page.
+SOFT_404_TEXT_MAX_CHARS = 600
 
 
 
@@ -4381,8 +4574,20 @@ def looks_like_soft_404(page):
         h1s = headings.get("h1") or []
         heading = h1s[0] if h1s else ""
     heading = heading or (page.get("h1") or "")
-    haystack = "{} {}".format(page.get("title") or "", heading).lower()
-    return any(marker in haystack for marker in _SOFT_404_MARKERS)
+    haystack = "{} {}".format(page.get("title") or "", heading).lower().replace(u"’", "'")
+    if any(marker in haystack for marker in _SOFT_404_MARKERS):
+        return True
+    # The body, where the whole page is a notice: short, and with no heading of
+    # its own. A page with a heading that does not say "missing" is a page about
+    # something - an article on designing error pages quotes "page not found"
+    # in its first line. See `SOFT_404_TEXT_MAX_CHARS`.
+    if heading.strip():
+        return False
+    text = " ".join(str(page.get("body_text") or page.get("text") or "").split())
+    if not text or len(text) > SOFT_404_TEXT_MAX_CHARS:
+        return False
+    text = text.lower().replace(u"’", "'")
+    return any(marker in text for marker in _SOFT_404_TEXT_MARKERS)
 
 
 # schema.org types that mean "this node is the organisation itself".
@@ -5346,6 +5551,64 @@ def names_a_civic_institution(value):
     match = _CIVIC_NAME_RE.search(text)
     return bool(match) and _reads_as_a_proper_name(match.group(0))
 
+
+# A public body saying what it is, in its own words.
+#
+# The registry suffix is the strongest reading this classifier has, and it is
+# only as wide as the suffixes a country reserves for government. A central
+# bank's address sits under its country's label for organisations, its markup
+# declares nothing, and its about page says "<its name> is a public
+# institution with a mandate to ...". The site kind came back undetermined and
+# the report gave a central bank advice written for a business.
+#
+# Read from the site's own prose, and only where the sentence's subject is the
+# site: its own name, or "we". A commercial bank's page saying the central bank
+# "is the regulator" is about somebody else, and the subject is what tells the
+# two apart. The noun has to name a public body outright - an institution
+# qualified as public, a central bank, a ministry of something, an authority or
+# regulator qualified as statutory, national, financial and the like - because
+# the bare words are also trade words: a maker of pressure regulators is "a
+# regulator manufacturer", and a charity can be "a ministry".
+_PUBLIC_BODY_QUALIFIER = (
+    r"(?:independent|national|federal|state|public|statutory|government(?:al)?|"
+    r"financial|monetary|central|regional|provincial|municipal|local|autonomous|"
+    r"official|competent|supervisory|prudential|banking|sole|chief|principal)")
+_PUBLIC_BODY_NOUN = (
+    r"(?:public\s+(?:institution|body|authority|agency|corporation|"
+    r"organi[sz]ation|entity|enterprise)"
+    r"|central\s+bank|reserve\s+bank"
+    r"|(?:government|state)\s+(?:agency|department|ministry|body|institution|"
+    r"organi[sz]ation|entity)"
+    r"|ministry\s+(?:of|responsible)"
+    r"|statutory\s+(?:body|authority|corporation|board|agency)"
+    r"|" + _PUBLIC_BODY_QUALIFIER + r"\s+(?:authority|regulator|agency)"
+    r"|regulator\s+(?:of|for|responsible))\b")
+# How much of each page the reading looks at. An institution says what it is
+# near the top of the page that introduces it.
+PUBLIC_BODY_SELF_DESCRIPTION_CHARS = 20000
+
+
+def public_body_self_description(snapshot, pages=None):
+    """The words in which the site calls itself a public body, or "".
+
+    The subject is the site's own name or "we"; see the block above.
+    """
+    brand = re.sub(r"\s+", " ", str((snapshot.get("brand") or {}).get("name") or "")).strip()
+    subjects = [r"we"] + ([re.escape(brand)] if len(brand) >= 3 else [])
+    pattern = re.compile(
+        r"\b(?:" + "|".join(subjects) + r")\s+(?:is|are|serves\s+as|acts\s+as|"
+        r"was\s+established\s+as)\s+(?:a|an|the)\s+(?:[\w'’-]+\s+){0,3}?"
+        + _PUBLIC_BODY_NOUN, re.I)
+    for page in (snapshot.get("pages") or []) if pages is None else pages:
+        if page.get("status") != 200 or page.get("skipped"):
+            continue
+        text = re.sub(r"\s+", " ", str(page.get("body_text") or ""))
+        match = pattern.search(text[:PUBLIC_BODY_SELF_DESCRIPTION_CHARS])
+        if match:
+            return match.group(0)
+    return ""
+
+
 _PUBLICATION_JSONLD = frozenset({
     "newsmediaorganization", "periodical", "publicationissue",
     "publicationvolume", "blog",
@@ -5557,6 +5820,7 @@ def _site_kind_signals(snapshot):
         "civic_markup": bool(jsonld & _CIVIC_JSONLD),
         "civic_name": next((name for name in _site_identity_strings(snapshot)
                             if names_a_civic_institution(name)), ""),
+        "public_self_description": public_body_self_description(snapshot, pages),
         # `None` where no page recorded its nodes, which the rule below reads
         # as "no evidence" and not as "no".
         "person_is_the_site": person_speaks_for_the_site(pages),
@@ -5590,7 +5854,7 @@ def documentation_tree_pages(snapshot):
     """How many crawled pages sit in a documentation tree, by address or by type."""
     count = 0
     for page in snapshot.get("pages") or []:
-        if page.get("status") != 200:
+        if page.get("status") != 200 or page.get("skipped"):
             continue
         try:
             path = urlparse(page.get("url") or "").path or "/"
@@ -5629,6 +5893,13 @@ def site_kind(snapshot):
         return SiteKind(PUBLIC_BODY, "medium",
                         ['the site calls itself "{}", which is the name of a '
                          "public institution".format(facts["civic_name"]),
+                         "nothing is for sale"])
+    # See `public_body_self_description`: the site's own sentence about what
+    # it is, where no suffix and no markup says it.
+    if facts["public_self_description"] and not (facts["sells"] or facts["has_basket"]):
+        return SiteKind(PUBLIC_BODY, "medium",
+                        ['the site says of itself "{}"'.format(
+                            truncate(facts["public_self_description"], 140)),
                          "nothing is for sale"])
 
     if facts["registry"] == PERSONAL_OR_ACADEMIC:
@@ -6555,6 +6826,65 @@ def regional_homepage(url, lang, root_links):
     return parts[0] == code
 
 
+# How little of its own a root page carries before a row of regional homes
+# makes it a gateway rather than a homepage: no H1 and less text than this.
+GATEWAY_MAX_TEXT_CHARS = 600
+
+
+def site_homepage(snapshot):
+    """The site's front door, decided once for every skill that says "the homepage".
+
+    `{"url", "page", "is_gateway", "regional_homes", "why"}`.
+
+    The root page, unless the root is a gateway - a country or language picker
+    leading to separate regional storefronts. Then `is_gateway` is true,
+    `regional_homes` lists the storefronts' addresses, and `page` is still the
+    root: a skill describing "the homepage" of such a site describes the picker
+    and says it is one, instead of quietly choosing one country. A furniture
+    retailer's root has no H1 and links five storefronts; one skill graded the
+    root as having no heading while another quoted the `/au` storefront's H1,
+    "Up to $600 off", as what "the homepage leads with" - two different pages
+    called the homepage in one report.
+
+    A gateway needs both halves: at least `REGIONAL_HOME_MIN_SIBLINGS` regional
+    homes the root links to (`regional_homepage`), and a root that carries
+    little of its own - no H1 and under `GATEWAY_MAX_TEXT_CHARS` of text. A
+    full homepage with a country switcher in its footer is still the homepage.
+    """
+    pages = pages_of(snapshot)
+    root = None
+    for page in pages:
+        try:
+            parsed = urlparse(page.get("url") or "")
+        except ValueError:
+            continue
+        if (parsed.path or "/") == "/" and not parsed.query:
+            root = page
+            break
+    if root is None:
+        first_home = next((p for p in (snapshot.get("pages") or [])
+                           if p in pages and p.get("page_type") == "home"), None)
+        return {"url": (first_home or {}).get("url") or snapshot.get("origin") or "",
+                "page": first_home, "is_gateway": False, "regional_homes": [],
+                "why": "the root page was not among the pages read" if first_home is None
+                       else "the root page was not read, so the first homepage the crawl reached"}
+    root_links = (root.get("links") or {}).get("internal") or []
+    regional = [p["url"] for p in pages if p is not root
+                and regional_homepage(p.get("url") or "", p.get("lang"), root_links)]
+    heading = any(str(h).strip() for h in ((root.get("headings") or {}).get("h1") or []))
+    text_len = root.get("body_text_len")
+    if text_len is None:
+        text_len = len(root.get("body_text") or "")
+    thin = not heading and text_len < GATEWAY_MAX_TEXT_CHARS
+    is_gateway = len(regional) >= REGIONAL_HOME_MIN_SIBLINGS and thin
+    return {
+        "url": root.get("url"), "page": root, "is_gateway": is_gateway,
+        "regional_homes": sorted(regional) if is_gateway else [],
+        "why": ("the root page is a gateway: it has no H1, little text, and links {} regional "
+                "homepages".format(len(regional)) if is_gateway else "the root page"),
+    }
+
+
 def detect_page_type(url, html_meta):
     """Classify a page from URL shape, then confirm or override with content.
 
@@ -6585,7 +6915,7 @@ def detect_page_type(url, html_meta):
     # enough - plenty of English sites keep an IT department at `/it`.
     locale = _locale_candidate(url)
     if (locale and not parsed.query and path.count("/") == 1
-            and primary_subtag(html_meta.get("lang")) == locale.split("-")[0].split("_")[0]):
+            and primary_subtag(html_meta.get("lang")) == locale_language(locale)):
         return "home"
     # One region's storefront, where the caller knows what the root page links
     # to. See `regional_homepage`: the crawl passes the root's links once it
@@ -8368,11 +8698,21 @@ _NAME_MARK = u"(?:\\s?[" + NAME_MARKS + u"])?"
 # and a bare noun phrase ("is independent software for ...") are untouched.
 _DEFINITION_NOT_A_CATEGORY = (
     r"(?!\s)(?!(?:(?:all|really|just|truly)\s+)?about\b"
-    r"|more\s+than\b|so\s+much\s+more\b|not\s+(?:just|only|merely|simply|your)\b"
+    r"|more\s+than\b|so\s+much\s+more\b"
+    # A negative says what the brand is not, which is never what it is. "<Brand>
+    # is not affiliated with any marketplace" on a shop's FAQ page was quoted as
+    # the one sentence saying what a design studio is. `not just`, `not only`
+    # and the like were already here for the same reason.
+    r"|not\b|no\s+longer\b|neither\b"
     r"|here\s+(?:to|for)\b|there\s+for\b|for\s+(?:everyone|anyone|you|people)\b"
     r"|where\b|what\b|how\b|why\b|when\b"
     r"|(?:proud|committed|dedicated|passionate|determined|driven|devoted)\b"
-    r"|on\s+a\s+mission\b)")
+    r"|on\s+a\s+mission\b"
+    # News rather than identity: "<Brand> is opening its first store in ...",
+    # "<Brand> is thrilled to announce ...". Each reports what the brand is
+    # doing this month, and none says what kind of thing it is.
+    r"|(?:now\s+)?(?:opening|launching|expanding|celebrating|returning|coming\s+to"
+    r"|thrilled|excited|delighted|pleased)\b)")
 
 _DEFINITION_COPULAR = (
     r"\b{brand}\b" + _NAME_MARK + _DEFINITION_ALIAS +
@@ -8388,9 +8728,27 @@ _DEFINITION_COPULAR = (
 DEFINING_VERBS = ("provides", "offers", "makes", "builds", "publishes",
                   "sells", "designs", "runs", "helps", "lets", "gives",
                   "delivers", "supplies", "creates", "tracks", "maintains")
+
+# What may not follow a defining verb, because the sentence reports an event
+# rather than saying what the brand is. A design studio's press page reads
+# "<Brand> makes its debut in the country's capital with the opening of the
+# <Brand> Design House", which has the verb and a long predicate and says
+# nothing about what the studio is. It was quoted as the one sentence on the
+# site saying what the brand is - over the homepage's own meta description,
+# which says it. The event nouns are read only where the verb takes them as
+# its object ("makes its debut", "makes a splash", "makes history"), so "provides
+# a way to publish" and "makes launch videos" are untouched. Braces are doubled
+# for the `.format` the templates go through.
+_DEFINITION_NOT_AN_EVENT = (
+    r"(?!its\s+(?:[\w-]+\s+){{0,2}}?(?:debut|return|comeback|way|mark|entrance|"
+    r"arrival|bow|premiere|appearance|move)\b)"
+    r"(?!(?:an?|the)\s+(?:[\w-]+\s+){{0,2}}?(?:debut|return|comeback|splash|"
+    r"appearance|entrance|arrival|bow|premiere|milestone)\b)"
+    r"(?!(?:history|headlines|waves|news)\b)")
+
 _DEFINITION_VERB = (
     r"\b{brand}\b" + _NAME_MARK + _DEFINITION_ALIAS +
-    r"\s+(?:" + "|".join(DEFINING_VERBS) + r")\s+"
+    r"\s+(?:" + "|".join(DEFINING_VERBS) + r")\s+" + _DEFINITION_NOT_AN_EVENT +
     r"(?P<rest>[^.!?]{{{minlen},400}})")
 
 # The other shape a definition comes in. A tagline set off from the name by a
@@ -8672,6 +9030,25 @@ def says_something(predicate):
     return any(w not in CONTENTLESS_NOUNS for w in content)
 
 
+# A line spoken to the reader rather than about the brand. "Your home should
+# feel like an extension of you." sits under a furniture shop's H1 and was
+# printed at the top of its report as the line in which the shop "describes
+# itself as" - campaign copy whose only subject is the visitor, with no
+# category in it at all. A definition's subject is the thing being defined; a
+# line that opens with the reader's word is about the reader.
+_READER_OPENING_RE = re.compile(
+    r"^\W*(?:you|your|yours|you're|you’re|you'll|you’ll|you've|you’ve)\b", re.I)
+
+
+def addresses_the_reader(text):
+    """Does this line open by addressing the reader, the way campaign copy does?
+
+    For a caller that reads a line with no subject of its own - the line under
+    a heading, a meta description - as what the brand is.
+    """
+    return bool(_READER_OPENING_RE.match(text or ""))
+
+
 def _starts_a_sentence(text, index):
     """Is the brand mention at `index` the subject of its own sentence?
 
@@ -8700,7 +9077,15 @@ def _reads_as_a_sentence(text, match):
     whole = match.group(0)
     # A slice, not the rest of the page: `$` then means "the text ended here",
     # which is the case this test has to let through.
-    if not _DEFINITION_TAIL_RE.match(text[match.end():match.end() + 8]):
+    tail = _DEFINITION_TAIL_RE.match(text[match.end():match.end() + 8])
+    if not tail:
+        return False
+    # A question asks; it does not say what anything is. A shop's FAQ entry "I
+    # am an international customer, can I order from abroad?" has the
+    # first-person shape exactly, and it was quoted as the one sentence saying
+    # what a design studio is.
+    terminator = tail.group(0).rstrip()[-1:]
+    if terminator and terminator in u"?？؟":
         return False
     if _DEFINITION_NUMBER_RUN_RE.search(whole):
         return False
@@ -8783,10 +9168,23 @@ def defining_sentence(text, brand_name, brand=None, accept=None):
         head = _DEFINITION_HEAD_RE.search(text[:match.start()] or "").group(0)
         if _DEFINITION_OPENING_QUOTE_RE.search(head):
             continue
+        # A frequently asked question written in the customer's voice. A shop's
+        # FAQ reads "I am an international customer. What are the payment
+        # methods available to me?", and the first sentence was quoted as the
+        # one saying what a design studio is. The asker introduces themselves
+        # and then asks; the question straight after is what says whose voice
+        # the first sentence is in.
+        if _NEXT_SENTENCE_IS_A_QUESTION_RE.match(text[match.end():match.end() + 240]):
+            continue
         definition = usable(match)
         if definition:
             return definition
     return ""
+
+
+# The rest of a sentence, its full stop, and a whole next sentence that ends in
+# a question mark. See the first-person loop in `defining_sentence`.
+_NEXT_SENTENCE_IS_A_QUESTION_RE = re.compile(r"^[^.!?]*[.!]\s+[^.!?]{1,200}[?？]")
 
 
 # A capitalised run standing where `defining_sentence` puts the brand: one to
@@ -8917,29 +9315,70 @@ def some_subject_is_defined(text):
 # so the honest number is always available for free.
 # --------------------------------------------------------------------------
 
+# The second way a total is only a subtotal is inside one file. The crawl stops
+# reading a sitemap's entries at `SITEMAP_URLS_READ_PER_FILE`, and at its byte
+# cap, and neither is the file ending. A library's one child sitemap holds
+# 44,909 URLs and 4,014 `<lastmod>` values; the crawl read the first 5,000, the
+# index was "complete" because its one child had been fetched, and the reports
+# said "The sitemap lists 5,000 URLs" and "47 of 5,000 entries (0.9%)" carry a
+# date - a count of this audit's reading, printed as the site's own.
+# --------------------------------------------------------------------------
+
+# The entry count at which `crawl.py` stops reading one sitemap file. A file
+# read to exactly this count was stopped by the audit, not by its own end.
+SITEMAP_URLS_READ_PER_FILE = 5000
+
+
+def _sitemap_cut_short(record):
+    """Did the crawl stop reading this sitemap file before the file ended?"""
+    if not record.get("url_count"):
+        return False
+    return bool(record.get("url_cap_reached") or record.get("truncated")
+                or record.get("url_count", 0) >= SITEMAP_URLS_READ_PER_FILE)
+
+
 def sitemap_scope(sitemaps):
     """What the sitemap counts cover, and what they leave out."""
-    declared, read, counted, lastmods = set(), set(), 0, 0
+    declared, read, counted, lastmods, cut_short = set(), set(), 0, 0, 0
     for record in sitemaps or ():
         declared.update(record.get("child_sitemaps") or [])
         if record.get("status") == 200:
             read.add(record.get("url"))
             counted += record.get("url_count", 0)
             lastmods += record.get("lastmod_count", 0)
+            if _sitemap_cut_short(record):
+                cut_short += 1
     unread = declared - read
     return {
         "urls_counted": counted,
         "lastmods_counted": lastmods,
         "children_declared": len(declared),
         "children_read": len(declared & read),
-        "complete": not unread,
+        # Files this audit stopped reading part-way. Their counts, and any
+        # share computed over them, are of the entries read.
+        "files_cut_short": cut_short,
+        "complete": not unread and not cut_short,
     }
 
 
 def sitemap_total_phrase(scope, noun="entries"):
-    """`32,820 entries`, or `at least 7,033 entries` with the reason attached."""
+    """`32,820 entries`, or `at least 7,033 entries` with the reason attached.
+
+    Every caller puts a count or a percentage beside this phrase, so where the
+    reading stopped at a cap the phrase says what that count is of.
+    """
     if scope["complete"]:
         return "{:,} {}".format(scope["urls_counted"], noun)
+    unread = scope["children_declared"] - scope["children_read"]
+    if scope.get("files_cut_short") and not unread:
+        return ("at least {:,} {} (this audit read the first {:,}, and any share given "
+                "here is of those)").format(scope["urls_counted"], noun, scope["urls_counted"])
+    if scope.get("files_cut_short"):
+        return ("at least {:,} {} - the sitemap index names {} sub-sitemaps, this audit read "
+                "{} of them and stopped part-way through {}, so the real total is higher and "
+                "any share given here is of the entries read").format(
+                    scope["urls_counted"], noun, scope["children_declared"],
+                    scope["children_read"], plural(scope["files_cut_short"], "file"))
     return ("at least {:,} {} - the sitemap index names {} sub-sitemaps and this audit read "
             "{} of them, so the real total is higher").format(
                 scope["urls_counted"], noun, scope["children_declared"],
@@ -8987,7 +9426,8 @@ def unclassified_note(pages):
     """
     if isinstance(pages, dict):
         pages = [page for bucket in pages.values() for page in bucket]
-    considered = [p for p in (pages or []) if p.get("status") == 200]
+    considered = [p for p in (pages or [])
+                  if p.get("status") == 200 and not p.get("skipped")]
     if not considered:
         return ""
     unknown = [p for p in considered if (p.get("page_type") or "other") == "other"]
@@ -9027,6 +9467,21 @@ def looks_like_content(page):
         return False
     return (page.get("body_text_len", 0) >= UNCLASSIFIED_CONTENT_MIN_CHARS
             and bool((page.get("headings") or {}).get("h1")))
+
+
+def pages_the_crawl_read(snapshot):
+    """How many crawled URLs were pages: answered 200 and were read as HTML.
+
+    `crawl.pages_crawled` and `crawl.pages_ok` count every URL that answered,
+    and a record the crawler skipped - a PDF, an image, a redirect off the
+    origin - answered too. A museum's crawl fetched 105 URLs of which 45 were
+    documents and images, and the report said "105 pages crawled" and sized
+    findings "on 5 of the 105 pages" when 60 pages had been read. The README
+    says a non-HTML response never enters a count; this is the count a report
+    may call pages.
+    """
+    return sum(1 for page in snapshot.get("pages") or []
+               if page.get("status") == 200 and not page.get("skipped"))
 
 
 def pages_of(snapshot, types=None, content_only=False, ok_only=True,

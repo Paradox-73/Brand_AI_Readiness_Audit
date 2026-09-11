@@ -2,7 +2,7 @@
 name: freshness-corroboration-audit
 description: Check whether a brand's facts are current, agreed upon across independent sources, and distinguishable from other things sharing its name. Audits content staleness and missing date signals, counts how many authoritative off-site profiles corroborate the brand and confirms those profile links still resolve, queries Wikidata for name collisions, and detects where the site contradicts itself on telephone, address or boilerplate. Use when an AI assistant describes a brand with outdated prices, an old logo or a discontinued product, when it confuses the brand with a different company of the same name, or when a rebrand has not been picked up anywhere.
 license: MIT
-compatibility: Requires Python 3.10+ with requests. Makes up to 16 extra read-only requests: at most 3 to Wikidata's public JSON API (the declared name, the shorter form when it differs, then one lookup asking which result names this site as its own), one robots.txt per profile host, one HEAD per off-site profile link that host's robots.txt permits, and a GET to confirm any HEAD that returned 404 or 410. A host that disallows automated requests is reported unchecked, never probed. Pass --no-network for none.
+compatibility: Requires Python 3.10+ with requests. Makes up to 16 extra read-only requests, each only where that host's own robots.txt allows it - Wikidata's API included: robots.txt per host, up to 3 Wikidata lookups, one HEAD per off-site profile link and a GET to confirm any 404 or 410. A host whose robots.txt disallows the request is recorded unchecked, never probed. Pass --no-network for none.
 allowed-tools: Bash(python3:*) Bash(python:*) Read WebSearch
 metadata:
   author: brand-ai-readiness-audit
@@ -74,7 +74,10 @@ gives the marks, the digit sets and the conversion.
    gone is **low**, more than one **medium**. Only six platforms answer honestly about whether
    a profile exists; the rest are recorded unchecked, never dead. Dead links are **not**
    subtracted from check 6's count, which is compared against a study of declared links.
-8. **Entity ambiguity.** Wikidata's search API for the name, then one lookup asking which
+8. **Entity ambiguity.** Wikidata's robots.txt first, read with the same reader the profile
+   probes use; where it closes the API path (`Disallow: /w/`) no lookup is made and the check
+   is recorded unchecked with that reason, never as a finding. Otherwise Wikidata's search API
+   for the name, then one lookup asking which
    match declares this site as its own. Two or more others with no disambiguation on the site
    is **medium**, four or more **high** — and a single match declaring a *different* host is a
    collision confirmed, reported at a count of one.
@@ -153,6 +156,9 @@ shapes, reported as a fact about the site.
   fact about the name string this audit was given, never as an absence of collisions.
 - `--no-network` was passed, or Wikidata could not be reached: an audit-environment
   limitation, recorded as such and never as a site defect.
+- Wikidata's robots.txt disallows automated clients on its API path: "Wikidata's robots.txt
+  closes its API to automated clients, so no lookup was made". No request is sent to the API,
+  and nothing is claimed about how many things share the name.
 - A profile host answered 403, timed out, or redirected to a sign-in page. That is recorded
   as unchecked, never as a dead link.
 

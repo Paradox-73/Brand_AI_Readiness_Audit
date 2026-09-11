@@ -327,10 +327,14 @@ def test_a_shop_is_pointed_at_the_places_shoppers_look():
 
 def test_a_site_nothing_was_decided_about_gets_exactly_the_old_advice():
     """The safety property. A wrong guess about what a site is caused these
-    failures, so a classifier that cannot decide has to change nothing at all."""
+    failures, so a classifier that cannot decide keeps the platform list - but
+    not the business-register wording, which assumes a company and reached a
+    central bank and a scholarship network."""
     steps = _steps(UNDETERMINED)
     assert "LinkedIn, Instagram, YouTube, X, Facebook" in steps[1]
-    assert any("business database" in step for step in steps)
+    assert any("registers and directories where organisations like this one are listed"
+               in step for step in steps)
+    assert not any("business database" in step for step in steps)
 
 
 def test_every_kind_gets_a_platform_line_of_its_own():

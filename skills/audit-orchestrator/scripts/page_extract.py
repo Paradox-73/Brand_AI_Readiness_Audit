@@ -556,10 +556,72 @@ _STREET_NUMBER_LABELLED_OTHERWISE_RE = re.compile(
 # A national postal group's contact page carries
 # "所在地 〒100-8791 東京都千代田区大手町二丁目3番1号", and the report said no
 # postal address was found anywhere on the site.
+#
+# The block numbers are written with hyphens as often as with the unit words -
+# "<prefecture>\u5e9c<county>\u90e1<town>\u753a<district>8-1-3" - and a library whose
+# access page printed three addresses that way recorded a postcode and no
+# street on fifty pages. A county (\u90e1) is a municipality's parent the way a
+# prefecture is, so it closes the municipality too.
+_JP_KANA_KANJI = r"\u3040-\u30ff\u4e00-\u9fff"
+_JP_BLOCK_NUMBERS = (r"[0-9\uff10-\uff19]{1,4}"
+                     r"(?:[-\u2010\u2212\uff0d\u30fc][0-9\uff10-\uff19]{1,4}){1,3}"
+                     r"(?![-0-9\uff10-\uff19])")
+_JP_MUNICIPALITY_AND_BLOCK = (
+    r"[" + _JP_KANA_KANJI + r"]{1,12}[\u5e02\u533a\u753a\u6751\u90e1]"
+    r"(?:[^\s]{0,24}?(?:\u4e01\u76ee|\u756a\u5730|\u756a|\u53f7)"
+    r"|[" + _JP_KANA_KANJI + r"]{0,12}?" + _JP_BLOCK_NUMBERS + r")")
 JP_STREET_RE = re.compile(
-    r"[\u3040-\u30ff\u4e00-\u9fff]{2,12}[\u90fd\u9053\u5e9c\u770c]"
-    r"[\u3040-\u30ff\u4e00-\u9fff]{1,12}[\u5e02\u533a\u753a\u6751]"
-    r"[^\s]{0,24}?(?:\u4e01\u76ee|\u756a\u5730|\u756a|\u53f7)")
+    r"[" + _JP_KANA_KANJI + r"]{2,12}[\u90fd\u9053\u5e9c\u770c]"
+    + _JP_MUNICIPALITY_AND_BLOCK)
+
+# Inside its own prefecture a postmarked address routinely leaves the
+# prefecture off: "\u3012100-0000 <ward>\u533a<town>1-2-3". The postal mark directly in
+# front is what says this is an address, so here it stands in for the
+# prefecture - and only here, because a ward and a number with nothing in front
+# of them are just as often a sentence.
+JP_POSTMARKED_STREET_RE = re.compile(
+    r"(?:(?<=\u3012\d{3}-\d{4})|(?<=\u3012\d{3}-\d{4}\s)"
+    r"|(?<=\u3012\s\d{3}-\d{4})|(?<=\u3012\s\d{3}-\d{4}\s))"
+    + _JP_MUNICIPALITY_AND_BLOCK)
+
+# A Korean road-name address, largest unit first like the Japanese one: a city
+# or province (\uc2dc/\ub3c4, or one of the special and metropolitan forms), a district
+# (\uad6c/\uad70, or \uc2dc inside a province), a road whose name ends \ub85c or \uae38, and the
+# building number. A national museum's footer printed "<5-digit code> <city>\uc2dc
+# <district>\uad6c <road>\ub85c 137(<neighbourhood> 168-6)" on every page, the extractor
+# found the postcode and no street, and the report said no postal address was
+# found anywhere.
+#
+# The hierarchy is the guard. \ub85c is also one of the commonest particles in the
+# language ("by", "to", "as"), so a road name on its own would read half of
+# every sentence as a street. A city, then a district, then a road, then a
+# number that is not followed by a unit of time, money or count, is an address
+# and nothing else. Where the city is left off, the five-digit postcode
+# directly in front stands in for it, the way the postal mark does above.
+_HANGUL = r"\uac00-\ud7a3"
+_KR_DISTRICT_ROAD_NUMBER = (
+    r"(?:[" + _HANGUL + r"]{1,8}(?:\uc2dc|\uad70|\uad6c)\s?){1,2}"
+    r"(?:[" + _HANGUL + r"]{1,8}(?:\uc74d|\uba74)\s?)?"
+    r"[" + _HANGUL + r"0-9]{1,15}(?:\ub85c|\uae38)\s?[0-9]{1,5}(?:-[0-9]{1,5})?"
+    r"(?![0-9.,%])(?!\s?(?:\ub144|\uc6d4|\uc77c|\uc6d0|\uba85|\uac1c|\uce35))")
+KR_STREET_RE = re.compile(
+    r"(?:[" + _HANGUL + r"]{1,8}(?:\ud2b9\ubcc4\uc2dc|\uad11\uc5ed\uc2dc"
+    r"|\ud2b9\ubcc4\uc790\uce58\uc2dc|\ud2b9\ubcc4\uc790\uce58\ub3c4|\uc2dc|\ub3c4)\s?"
+    r"|(?<=(?<![0-9])[0-9]{5}\s))"
+    + _KR_DISTRICT_ROAD_NUMBER)
+
+# A Chinese address, largest unit first again: an optional province (\u7701 or
+# \u81ea\u6cbb\u533a), a city (\u5e02), a district or county (\u533a/\u5340/\u53bf/\u7e23), a road
+# (\u8def/\u8857/\u5927\u8857/\u5927\u9053/\u9053/\u5df7/\u5f04/\u80e1\u540c, with its \u6bb5 section where the road has
+# them), and the number closed by \u53f7/\u865f. The closing mark is the guard: a
+# sentence naming a city and a road never ends in a numbered \u53f7.
+CN_STREET_RE = re.compile(
+    r"(?:[\u4e00-\u9fff]{2,7}(?:\u7701|\u81ea\u6cbb\u533a))?"
+    r"[\u4e00-\u9fff]{2,7}\u5e02"
+    r"[\u4e00-\u9fff]{1,7}(?:\u533a|\u5340|\u53bf|\u7e23|\u5e02)"
+    r"[\u4e00-\u9fff0-9]{0,12}?(?:\u8def|\u8857|\u5927\u9053|\u9053|\u5df7|\u5f04|\u80e1\u540c)"
+    r"(?:[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]{1,3}\u6bb5)?"
+    r"[0-9\uff10-\uff19]{1,5}(?:-[0-9]{1,5})?(?:\u53f7|\u865f)")
 
 # The postal mark. It exists to say "a postcode follows", so unlike a bare run
 # of digits it needs no corroboration.
@@ -567,7 +629,8 @@ JP_POSTCODE_RE = re.compile(r"\u3012\s?\d{3}-\d{4}")
 
 
 _STREET_PATTERNS = (STREET_TYPE_RE, STREET_AMBIGUOUS_TYPE_RE, STREET_CAPITALISED_RE,
-                    STREET_NAMED_RE, STREET_LABELLED_NUMBER_RE, JP_STREET_RE)
+                    STREET_NAMED_RE, STREET_LABELLED_NUMBER_RE, JP_STREET_RE,
+                    JP_POSTMARKED_STREET_RE, KR_STREET_RE, CN_STREET_RE)
 
 
 # A house number never continues a number that started before it.
@@ -1287,6 +1350,10 @@ def extract_page(url, final_url, status, headers, html, redirect_chain, elapsed_
         # tag that is not there.
         "meta_robots_by_agent": {k: meta[k] for k in ROBOTS_META_KEYS[1:] if meta.get(k)},
         "canonical": _canonical(soup, final_url),
+        # `<link rel="next">` - the pagination a crawler follows without
+        # pressing a button. A shop's collection page declared it, and was
+        # told to add it, because nothing recorded it.
+        "rel_next": _rel_next(soup, final_url),
         "meta_refresh": _meta_refresh(soup, final_url),
         # The page's own `<link rel="alternate" hreflang>` declarations, and a
         # script that sends the page to a fixed address on the same site. The
@@ -1873,6 +1940,14 @@ def _canonical(soup, base):
     return normalise_url(link["href"], base) or ""
 
 
+def _rel_next(soup, base):
+    """The address a `<link rel="next">` in the head names, or ""."""
+    link = soup.find("link", rel=lambda v: v and "next" in [x.lower() for x in (v if isinstance(v, list) else [v])])
+    if not link or not link.get("href"):
+        return ""
+    return normalise_url(link["href"], base) or ""
+
+
 def _heading_text(tag):
     """The words a heading contributes, including an image's alt text.
 
@@ -2181,6 +2256,12 @@ def _prose_blocks(soup):
     out, seen = [], set()
     for tag in soup.find_all(True):
         if tag.name in _INLINE_ELEMENTS or tag.name in _NOT_PROSE_PARENTS:
+            continue
+        # Nothing from the `<head>`. The `<title>` is not a passage the page
+        # writes, and because every page carries one it read as a line the
+        # site repeats: "<Brand> | <what it does>" then passed for a tagline
+        # definition on a site that states what it is nowhere.
+        if tag.name in ("head", "title") or tag.find_parent("head") is not None:
             continue
         text = _own_text(tag)
         if len(text) < PROSE_BLOCK_MIN_CHARS or reads_as_source_not_prose(text):
@@ -2776,7 +2857,27 @@ def _is_tracking_pixel(tag, width, height):
     style = (tag.get("style") or "").replace(" ", "").lower()
     if "display:none" in style or "visibility:hidden" in style:
         return True
+    # Sized in its style instead of its attributes: `width:1px;height:1px`.
+    sized = dict(re.findall(r"(?<![\w-])(width|height):(\d+(?:\.\d+)?)px", style))
+    if len(sized) == 2 and all(float(v) <= 3 for v in sized.values()):
+        return True
+    if _TRACKING_ENDPOINT_RE.search(tag.get("src") or tag.get("data-src") or ""):
+        return True
     return _within_hidden(tag)
+
+
+# The address of a beacon rather than a picture. A coffee roaster's pages carry
+# `<img src=".../cde/eventTracking.htm?pixelId=...">` from an advertising
+# network, and one such beacon written without a size or a hidden style was
+# counted as an image with no alt text. Its address says what it is: an event
+# endpoint - a page, not an image file - named for tracking, a spacer or pixel
+# file, or a pixel identifier in the query. Nobody can describe it, and no alt
+# text belongs on it.
+_TRACKING_ENDPOINT_RE = re.compile(
+    r"/[\w.-]*(?:track|pixel|beacon|collect|impression|event)[\w.-]*"
+    r"\.(?:htm|html|php|aspx?|jsp|cgi)(?:[?#]|$)"
+    r"|/(?:pixel|beacon|spacer|tracking?|1x1)\.gif(?:[?#]|$)"
+    r"|[?&](?:pixel_?id|pxid)=", re.I)
 
 
 _SCHEMA_TYPE_TAIL = re.compile(r"[/#:]([A-Za-z][A-Za-z0-9_]*)\s*$")
@@ -3101,7 +3202,12 @@ def _images(soup, base):
         # inside a `<figure>` with a `<figcaption>`, or carrying `aria-label`,
         # `aria-labelledby` or `title`, is described; a screen reader and a
         # crawler both get the words.
-        "undescribed_count": len(missing_alt) - described_elsewhere,
+        #
+        # Counted from the list itself. It was `len(missing_alt)` less the
+        # images described some other way, but that second count includes
+        # images carrying `alt=""`, which were never in the first - so a
+        # coffee roaster's homepage recorded -1 undescribed images.
+        "undescribed_count": len(undescribed),
         # The URLs behind that count, not behind `missing_alt_count`. A
         # finding about images nobody describes was quoting `missing_alt_sample`,
         # which includes every image named by a caption - so the evidence for
@@ -5176,20 +5282,116 @@ def _identifies_by_number(bare, path_segments):
     return bool(_IDENTIFIED_BY_NUMBER_RE.match(path_segments[-1]))
 
 
-def _names_the_site(url, site_names):
-    """Does this address spell a name the site publishes about itself?
+# The words a site puts beside its own name in a handle when the plain name was
+# taken, or when it keeps one account per market or per product: `<name>hq`,
+# `<name>_official`, `get<name>`, `<name>app`. A handle that is the name and
+# one of these is still the name.
+#
+# Anything else beside the name is somebody else's words. A documentation
+# site's paste-ready `sameAs` listed another developer's package,
+# `/package/<name>-wasm-http`, and a third-party blog's article,
+# `/an-unscientific-benchmark-of-<name>-vs-the-file-system-btrfs/`, as the
+# site's own accounts, because the name was one word inside each and the test
+# asked only whether it was there. A name inside a longer slug is a mention.
+_NAME_AFFIXES = frozenset({
+    "hq", "official", "app", "apps", "inc", "global", "intl", "team", "online",
+    "org", "labs", "dev", "project", "foundation", "community", "group",
+    "corp", "ltd", "llc", "gmbh", "news", "support", "help", "status",
+    "the", "get", "use", "try", "go", "join", "we",
+})
+# A country or language code beside the name, which is how one site names its
+# accounts per market or per edition: `<name>_jp`, `<name>uk`, `<name>.en`.
+_NAME_REGION_AFFIXES = frozenset(
+    "us uk gb au ca nz ie in jp kr cn tw hk sg my id th vn ph de fr es it pt br "
+    "mx ar cl co pe nl be ch at se no dk fi pl cz ru ua tr il ae sa eg za ng ke "
+    "pk bd en ja ko zh he fa hi eng kor jpn chn esp fra deu ita por rus ara "
+    "tha".split())
 
-    Either in the handle or in the hostname. The host carries the name when a
+
+def _handle_of(bare):
+    """The path segment that says whose account an address is.
+
+    The first segment on a repository host, where everything after the owner
+    is somebody's project; elsewhere the handle the shape reader finds, or the
+    last segment where it finds none.
+    """
+    without_scheme = bare.split("://")[-1]
+    host = strip_www(without_scheme.split("/")[0])
+    segments = [s for s in without_scheme.split("/")[1:] if s]
+    if not segments:
+        return ""
+    if any(host == repo or host.endswith("." + repo) for repo in _REPOSITORY_HOSTS):
+        return segments[0]
+    return _account_shape(bare)[1] or segments[-1]
+
+
+def _handle_is_the_name(url, site_names):
+    """Is this address's handle one of the site's own names, and no more?
+
+    Equal once case and separators are gone, or the name with one affix from
+    the two sets above - never the name as one word among several.
+    """
+    bare = (url or "").lower().split("?")[0].split("#")[0].rstrip("/")
+    handle = re.sub(r"[^a-z0-9]", "", _handle_of(bare))
+    if not handle:
+        return False
+    for name in site_names or ():
+        key = re.sub(r"[^a-z0-9]", "", (name or "").lower())
+        if len(key) < 3:
+            continue
+        if handle == key:
+            return True
+        if handle.startswith(key):
+            affix = handle[len(key):]
+        elif handle.endswith(key):
+            affix = handle[:-len(key)]
+        else:
+            continue
+        if affix in _NAME_AFFIXES or affix in _NAME_REGION_AFFIXES:
+            return True
+    return False
+
+
+# The first path segment of a page that signs somebody up rather than showing
+# an account. On a platform that gives each brand a subdomain, the host carries
+# the brand's name and the path carries the programme -
+# `<brand>.<an influencer platform>/join/<campaign>` - and that address was
+# counted among a shop's own profiles. It is the platform's application form
+# for the brand's influencer programme, which nobody keeps an account on.
+_PROGRAMME_PATH_SEGMENTS = frozenset({
+    "join", "apply", "application", "applications", "signup", "sign-up",
+    "register", "registration", "enroll", "enrol", "onboarding", "referral",
+    "refer", "invite", "login", "signin", "sign-in",
+})
+
+
+def _is_a_programme_page(bare):
+    """Does this address open with a sign-up or application step?"""
+    segments = [s for s in bare.split("://")[-1].split("/")[1:] if s]
+    return bool(segments) and segments[0] in _PROGRAMME_PATH_SEGMENTS
+
+
+def _names_the_site(url, site_names):
+    """Is this address one of the names the site publishes about itself?
+
+    Either the handle or the hostname. The host carries the name when a
     platform gives each customer a subdomain - `<the site's name>.<a hosted
     documentation host>` - and there the handle is `/en/stable/`, which spells
     nothing. Reading only the handle there dropped an address whose whole
     left-hand label is the site's own name.
+
+    The handle has to be the name, not contain it - see `_NAME_AFFIXES`. And a
+    brand's subdomain opening with a sign-up step is a programme page, not an
+    account - see `_PROGRAMME_PATH_SEGMENTS`.
     """
-    if any(profile_names_brand(url, name) for name in site_names):
+    if _handle_is_the_name(url, site_names):
         return True
+    bare = (url or "").lower().split("?")[0].split("#")[0]
     try:
         host = strip_www((urlparse(url or "").hostname or "").lower())
     except ValueError:
+        return False
+    if _is_a_programme_page(bare):
         return False
     return bool(_host_is_the_account(host, site_names))
 
@@ -5370,12 +5572,19 @@ def _off_site_profiles(external_links, jsonld, soup=None, base="",
     # a coincidence, and no name the site asserts can be spelled in a Latin
     # handle to settle it another way. A noodle shop's account on a city page
     # does not open with the city's domain word, so it stays unattributed.
+    #
+    # On a platform this audit names, and nowhere else. Only there is the last
+    # segment of an address a handle at all; on any other host it is a
+    # package, a mailing-list archive or an article slug, and three of those
+    # opening with a documentation site's name are not a family of accounts.
+    recognised = frozenset(SOCIAL_PLATFORMS.values())
     for name in site_names:
         key = re.sub(r"[^a-z0-9]", "", (name or "").lower())
         if len(key) < PROFILE_FAMILY_MIN_NAME:
             continue
         family = [entry for entry in order
-                  if _account_handle_key(entry["url"]).startswith(key)]
+                  if entry["platform"] in recognised
+                  and _account_handle_key(entry["url"]).startswith(key)]
         if len({_account_handle_key(e["url"]) for e in family}) >= PROFILE_FAMILY_MIN_ACCOUNTS:
             for entry in family:
                 entry["names_the_site"] = True
@@ -5462,6 +5671,14 @@ def _host_is_the_account(host, site_names):
     leading = re.sub(r"[^a-z0-9]", "", labels[0].lower())
     if len(leading) < 3:
         return ""
+    # A platform is somebody's domain, so at least one label between the name
+    # and the top-level domain has to be a word rather than a registry's.
+    # `<name>.or.<cc>` is an organisation's own website under a country
+    # registry, not an account on anything: a museum's footer link to a
+    # separate association at such an address was counted as its profile on
+    # "platform or.<cc>", and the profile count rose by one.
+    if all(label in _REGISTRY_LABELS for label in labels[1:-1]):
+        return ""
     for name in site_names:
         if leading == re.sub(r"[^a-z0-9]", "", (name or "").lower()):
             return ".".join(labels[1:])
@@ -5513,6 +5730,12 @@ def _profiles_among(candidates, site_names=(), published=(), subresource_hosts=(
         # `_host_is_the_account`; the subresource test still applies, so a host
         # the site only ever loads code from cannot arrive this way.
         domain = _host_is_the_account(host, site_names)
+        # A brand's subdomain on a platform, opening with a sign-up step, is
+        # that platform's programme page for the brand - see
+        # `_PROGRAMME_PATH_SEGMENTS`. Neither the host nor the path is an
+        # account there, whatever role word the path begins with.
+        if domain and _is_a_programme_page(bare):
+            continue
         named_host = bool(domain) and counts_as_off_site_profile(
             url, declared=True, subresource_hosts=subresource_hosts)
         if not counts_as_off_site_profile(url):
@@ -5525,8 +5748,9 @@ def _profiles_among(candidates, site_names=(), published=(), subresource_hosts=(
         # `/pricing`, `/catalogue` - unless it spells this site's own name, in
         # which case a page named after the audited site on somebody else's
         # host is the thing this check exists to find.
-        if kind == "handle" and not platform and not any(
-                profile_names_brand(url, name) for name in site_names):
+        # Spells it, not contains it: an article slug on a stranger's blog
+        # contains the site's name and is still the stranger's article.
+        if kind == "handle" and not platform and not _handle_is_the_name(url, site_names):
             kind = ""
         # An individual's account is this site's only where the site says so.
         if kind == "personal" and not (declared or url in published):
@@ -5610,7 +5834,7 @@ def _repository_owner(host, bare, repeated_owners, site_names=()):
     if len(segments) < 2 or segments[0] in _NOT_A_HANDLE:
         return ""
     owner = "https://" + host + "/" + segments[0]
-    if any(profile_names_brand(owner, name) for name in site_names):
+    if _handle_is_the_name(owner, site_names):
         return owner
     if repeated_owners.get((host, segments[0]), 0) < _OWN_REPOSITORY_LINKS:
         return ""

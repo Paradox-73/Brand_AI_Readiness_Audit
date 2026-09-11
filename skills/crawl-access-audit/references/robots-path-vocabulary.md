@@ -48,6 +48,31 @@ The tools create their directories in capitals, while the same letters in lower 
 ordinary words: a recruitment agency's `/cvs` is a page of curricula vitae. The dot-prefixed
 and underscore-prefixed forms need no such care, because no word begins with a full stop.
 
+Two more classes arrived later, from a software project and a central bank.
+
+**A Windows web server's own system folders.** `/_vti_bin/`, `/_vti_pvt/` and the rest of the
+`_vti_` family, the list-and-library store `/_catalogs/` and the REST endpoint `/_api/`, beside
+`/_layouts/`, which was already excused. A central bank's robots.txt closes `/_layouts/`,
+`/_vti_bin/` and `/_catalogs/` and nothing else; two of the three were ranked first as "paths
+that look like real content". The leading underscore makes these safe to match without care:
+no word a person reads begins with one.
+
+**The web front ends of a source repository.** `/src`, `/docsrc`, `/cvstrac`, `/trac`, `/svn`,
+`/git`, `/cgit`, `/gitweb`, `/hg` — the file browser, the diff and timeline views, the ticket
+tracker. A database library's robots.txt closes `/cvstrac`, `/src`, `/docsrc` and `/contrib`,
+and all four were ranked first on a project whose whole site is documentation. Each expands
+into a page per file per revision, and closing them is what the tools' own install notes say
+to do. Matched as a **whole first segment** only (`$`, `/`, `?` or `*` after it): `/src-images`
+and `/git-guide` are somebody's pages.
+
+Five names these tools use are also ordinary sections: `/timeline` (a museum's history page),
+`/source` (a newsroom's methodology note), `/cvs` (a recruitment agency's curricula vitae),
+`/fossil` (a natural-history collection), `/contrib` (a community's contributors page). They
+are excused **only when the same group also closes one of the unambiguous repository paths
+above** — the file then describes a software project, and on one these are its tools. Alone,
+each is reported like any other section. `benign_disallow(rule, siblings)` takes the rest of
+the group's `Disallow` list for exactly this.
+
 Two shapes are deliberately **not** in the vocabulary:
 
 - **A path that happens to 404.** One report listed `/latest`, which answers 404. Nothing in

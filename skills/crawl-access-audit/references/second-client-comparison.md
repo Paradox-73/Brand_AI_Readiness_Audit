@@ -63,7 +63,7 @@ reaches this code and pays nothing for it.
 
 | second client saw | verdict | what the report says |
 | --- | --- | --- |
-| some names refused, others served | `UA_NAMES_DIFFER` | the name is what that edge reads: high severity, `bot-manager-block`, naming which agents were refused and which were served |
+| some names refused, others served | `UA_NAMES_DIFFER` | that edge treats these names differently from this address: high severity at medium confidence, `bot-manager-block`, naming which agents were refused and which were served, and saying the address was not the crawlers' own (see below) |
 | every name served, this audit's own name served | `UA_CLIENT_SCORED` | no name is being read; the primary client is what is refused, and no crawler allow rule lifts it |
 | every name served, this audit's own name refused by both clients | `UA_AUDIT_ONLY` | the edge reads the name and decides in the crawlers' favour — a limit on this run, not a defect in the site |
 | every name refused, through both clients | `UA_CLIENT_REFUSED` | still undecided, and it says so: two clients can share an address, and an edge refusing this address refuses both alike |
@@ -73,6 +73,31 @@ skill cannot make: a loop from the reader's own machine printing one status per
 crawler name, which changes the network as well as the client and the name. The
 allow rule is written from that output. Never open with a list of every answer
 crawler; several of them are usually already being answered.
+
+## What no probe from here can see: the address behind the name
+
+Every request this skill sends leaves from the machine running the audit. A real answer
+crawler never does: it sends from its operator's published address ranges, and the large CDNs
+check that — by reverse DNS, or against the operator's published list — before treating a
+request as the crawler it names. A request claiming `Claude-SearchBot` from any other address
+is an impersonator to that rule, and refusing it is the rule working while the real crawler is
+served.
+
+So a refused name proves the edge treats that name differently **from this address**. It
+cannot separate a rule on the name from a rule verifying the address behind the name, and the
+two have opposite fixes: the first needs an allow rule, the second needs nothing. Two shops had
+this finding ranked critical and first in "Start here", telling them to allow crawlers their
+CDN may have been serving all along.
+
+What the findings do about it:
+
+- `bot-manager-blocks-ai-crawlers` is **high** at most (medium where the response is not
+  blocking-shaped), never critical, and at **medium** confidence.
+- `edge-refuses-named-answer-crawlers` stays **high**, at **medium** confidence.
+- Both evidence lines say the requests came from this audit's address and not the crawlers'.
+- Both fixes open with the check the owner has to make first: the CDN's verified-bot
+  settings and its firewall log for those names. Only a rule refusing the name whatever
+  address sends it is one to change.
 
 ## Why the refused names are named, and not merely counted
 

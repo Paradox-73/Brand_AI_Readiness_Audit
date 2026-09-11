@@ -177,7 +177,8 @@ def test_at_most_two_lookups_are_made():
     told the brand to go and create the item it already had.
     """
     _, fetcher = _ambiguity([BRAND, BRAND])
-    assert fetcher.count <= 2
+    # The robots.txt read that precedes them is not a lookup.
+    assert len([url for url in fetcher.calls if "api.php" in url]) <= 2
 
 
 def test_no_network_means_no_lookup_and_a_stated_reason():

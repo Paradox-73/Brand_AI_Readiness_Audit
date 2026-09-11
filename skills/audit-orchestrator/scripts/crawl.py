@@ -418,8 +418,25 @@ def dedup_key(url):
     that crawl went to duplicates, and the report then said 25 of 60 pages
     share a title. Counting is repaired downstream; the slots are only
     recoverable here, before the request goes out.
+
+    A trailing slash is not the site telling two pages apart either. A home
+    decor shop links `/home-visit` from one menu and `/home-visit/` from
+    another; both answered 200 with the same page, both were read, and every
+    count over the crawl carried that page twice. So the key drops a final
+    slash from any path but the root, and the first of the two spellings to
+    be queued is the one read - its response is the one kept. A site where
+    the two spellings really are different pages is the rare case, and it
+    costs one page of sample rather than a doubled finding.
     """
-    return page_identity(url)
+    key = page_identity(url)
+    if not key:
+        return key
+    address, question, query = key.partition("?")
+    scheme, _, rest = address.partition("://")
+    host, slash, path = rest.partition("/")
+    if path.endswith("/"):
+        path = path.rstrip("/")
+    return "{}://{}{}{}{}{}".format(scheme, host, slash, path, question, query)
 
 
 # Non-HTML endings we never queue: they cost a request and carry no prose.
@@ -791,6 +808,10 @@ def fetch_sitemaps(fetcher, origin, robots_record, deadline):
                             "alternates": [list(pair) for pair in
                                            alternates[:SITEMAP_HREFLANG_CODES]]}
                 if len(record["urls"]) >= 5000:
+                    # Said, not inferred from the round number: a national
+                    # library's sitemap holds 44,909 addresses and the report
+                    # called the first 5,000 the site's total.
+                    record["url_cap_reached"] = True
                     break
         results.append(record)
         # Only when the host is answering. A site that answered 404 at
@@ -1311,6 +1332,17 @@ def fetch_page(fetcher, url, depth, source, origin):
         html=html, redirect_chain=chain, elapsed_ms=getattr(response, "elapsed_ms", 0),
         depth=depth, source=source, origin=origin,
     )
+    # When this response was read, twice over: the server's own `Date` header
+    # and this machine's clock. A page generated per request sends
+    # `Last-Modified` equal to the moment it answered, and without either
+    # time in the record nothing downstream could tell that from a real
+    # modification date - the sitemap snippet printed the audit's own date as
+    # `<lastmod>` on twelve pages of a documentation site, directly above the
+    # advice "Do not set <lastmod> to today's date". The page record keeps
+    # only a short list of headers, and `date` was not on it.
+    if headers.get("date"):
+        record.setdefault("headers", {})["date"] = headers["date"]
+    record["fetched_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     # A page we stopped reading at the size cap is a limit of ours. Recorded
     # here so the crawl notes can say so, rather than letting a half-read
     # document look like a site that omitted the second half.

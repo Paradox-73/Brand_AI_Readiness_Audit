@@ -7,11 +7,11 @@ Point it at any website. It reports why AI assistants cannot find, read, trust o
 describe that brand, and why visitors who do arrive leave again — with the evidence for each
 problem and the specific fix.
 
-> **Read-only.** GET and HEAD only. robots.txt obeyed, `Crawl-delay` included and in full — a
-> slower crawl means a smaller sample, not a faster crawler. One exception, named not hidden:
-> two calls to Wikidata's public JSON API, which Wikimedia asks bots to use *instead of*
-> crawling wiki pages. Never signs in, submits a form, or touches `/cart`, `/checkout`,
-> `/login` or `/admin`. Both its HTTP clients pass one guard: enforced in code, not in prose.
+> **Read-only.** GET and HEAD only. robots.txt obeyed on every host it contacts, `Crawl-delay`
+> in full — a slower crawl means a smaller sample, not a faster crawler. No exceptions: where a
+> third party's robots.txt closes an address, the check makes no request and says it could not
+> look. Never signs in, submits a form, or touches `/cart`, `/checkout`, `/login` or `/admin`.
+> Both its HTTP clients pass one guard: enforced in code, not in prose.
 
 ---
 
@@ -30,7 +30,7 @@ matters if the one before it passed.
 | `freshness-corroboration-audit` | Is it current, and does anywhere else agree? Dates, staleness, off-site profile breadth, name collisions | Trusted |
 | `engagement-audit` | Does the person who clicks through stay? Orientation, dead ends, orphans, broken links, breadcrumbs, interstitials, forms | Visitor stays |
 
-Between them the six run **96 checks**, drawing on a catalogue of **119 distinct findings**
+Between them the six run **96 checks**, drawing on a catalogue of **127 distinct findings**
 and **59 named root causes**. A single audit reports only the ones its evidence supports — a
 typical small site produces ten to twenty. Six is the number of gates there are, and a test
 fails the build if any two skills ever claim the same root cause.
@@ -237,8 +237,8 @@ links still resolve, on the six platforms that answer that question honestly.
 - **Some sites refuse us, and we do not work around it.** Completing our HTTP headers changed
   nothing on zero of fifteen blocked sites, and getting in would mean wearing a browser's
   identity. A block is a finding.
-- **Name conflicts are checked against Wikidata only.** That says how many organisations share
-  a name, not which one an assistant currently prefers.
+- **Name conflicts are checked against Wikidata only, where its robots.txt allows** — otherwise
+  unanswered. It says how many organisations share a name, not which one an assistant prefers.
 - **Only six platforms can be asked whether a profile exists** — LinkedIn, X, YouTube, GitHub,
   Wikipedia and Wikidata answer 404 for one that is not there. Nine others answer 200 for
   anything or refuse every crawler, and are reported as unchecked.

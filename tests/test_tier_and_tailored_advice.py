@@ -439,13 +439,16 @@ def test_a_program_is_not_told_to_claim_a_business_listing():
 
 
 def test_a_site_the_classifier_cannot_place_keeps_todays_advice():
-    """The rule that makes gating safe: a wrong guess may cost tailoring, never
-    an entry. An unplaceable site gets the default list and every step."""
+    """A wrong guess may cost tailoring, never an entry: an unplaceable site
+    still gets the recommendation and the default platform list. It does not
+    get the company-record step, which assumes a company - that step told a
+    central bank, a scholarship network and a one-page essay to claim "a
+    business database entry and an employer profile"."""
     blank = _kinded_snapshot([_typed("https://example.test/", "home")])
     assert not compose.site_kind(blank).determined
     steps = _steps(blank, "R-SAMEAS-WIKIDATA", profile_breadth=1)
     assert compose._CLAIM_PLATFORMS_WHATEVER_THE_SITE_IS in steps
-    assert "employer profile" in steps
+    assert "employer profile" not in steps
 
 
 def test_a_program_is_not_told_when_it_was_founded_or_who_it_serves():

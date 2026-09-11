@@ -300,6 +300,16 @@ _BENIGN_DISALLOW = re.compile(
     # safe to match without case: no ordinary word starts with one.
     r"app_themes|app_data|app_code|app_start|controls|_next|_nuxt|_astro|"
     r"_app|_layouts|web-inf|meta-inf|bin|obj|\.git|\.svn|\.hg|\.bzr|_darcs|cgi|"
+    # The system folders a Windows web server's collaboration and publishing
+    # extensions create at the root: `_vti_bin`, `_vti_pvt`, `_vti_cnf` and
+    # the rest of that family, the list-and-library store `_catalogs` and the
+    # REST endpoint `_api`, beside `_layouts`, which was already here. A
+    # central bank's robots.txt closes `/_layouts/`, `/_vti_bin/` and
+    # `/_catalogs/` and nothing else; the first was excused, the other two
+    # were named as "paths that look like real content" and ranked first in
+    # the report. A leading underscore is why these are safe to match wide:
+    # no word a person reads begins with one.
+    r"_vti_[a-z0-9_]*|_catalogs|_api|"
     # Error, maintenance and utility pages. A site is right to keep these
     # out of an index, and none of them is content anyone would quote.
     r"pageerror|error|errors|404|500|not-found|notfound|maintenance|"
@@ -440,8 +450,45 @@ _MACHINE_FILE_RE = re.compile(
 _VCS_METADATA_RE = re.compile(r"(?:^|/)(?:RCS|CVS|SCCS)(?:$|[/*])")
 
 
-def benign_disallow(rule):
-    """True for the admin/cart/search/parameter paths every site blocks on purpose."""
+# The web front ends of a source repository: the file browser, the diff and
+# timeline views, the ticket tracker bolted to it. A database library's
+# robots.txt closes `/cvstrac`, `/src`, `/docsrc` and `/contrib` - its
+# repository browser, its documentation sources and its contributed code -
+# and all four were reported as "paths that look like real content", ranked
+# first, on a project whose whole site is documentation. Every one of those
+# addresses expands into a page per file per revision, an endless set of
+# diffs, and closing it to crawlers is what the tools' own install notes
+# recommend.
+#
+# Whole first segment only, with the strict boundary `(?=$|[/?*])`: a hyphen
+# must not excuse `/src-images` or `/git-guide`, which are somebody's pages.
+_CODE_BROWSER_RE = re.compile(
+    r"^/(?:src|docsrc|cvstrac|trac|svn|cgit|gitweb|git|hg|fossil-scm)(?=$|[/?*])", re.I)
+
+# Names a repository front end also uses, and a site of prose uses as well.
+# `/timeline` is a museum's history page, `/source` a newsroom's methodology
+# note, `/cvs` a recruitment agency's page of curricula vitae, `/fossil` a
+# natural-history collection, `/contrib` a community's contributors page.
+# Excused only where the same group also closes one of the unambiguous
+# repository paths above: the file then describes a software project, and
+# on a software project these are the project's tools. Alone, each is read
+# as the section of a site it usually is.
+_CODE_BROWSER_CONTEXT_RE = re.compile(
+    r"^/(?:source|contrib|timeline|fossil|cvs)(?=$|[/?*])", re.I)
+
+
+def _closes_a_code_browser(siblings):
+    """Does this group also close an unambiguous repository front end?"""
+    return any(_CODE_BROWSER_RE.match((rule or "").strip()) for rule in siblings or ())
+
+
+def benign_disallow(rule, siblings=None):
+    """True for the admin/cart/search/parameter paths every site blocks on purpose.
+
+    `siblings` is the rest of the group's `Disallow` list, for the few names
+    that are plumbing only in the company of others - see
+    `_CODE_BROWSER_CONTEXT_RE`. Without it those names are read as content.
+    """
     rule = (rule or "").strip()
     if not rule or rule in ("/", "/*"):
         return False
@@ -450,6 +497,10 @@ def benign_disallow(rule):
     if _BENIGN_COMMERCE_DISALLOW.match(rule):
         return True
     if _MACHINE_FILE_RE.search(rule) or _VCS_METADATA_RE.search(rule):
+        return True
+    if _CODE_BROWSER_RE.match(rule):
+        return True
+    if _CODE_BROWSER_CONTEXT_RE.match(rule) and _closes_a_code_browser(siblings):
         return True
     # A rule that is only a parameter or wildcard filter blocks duplicates,
     # not content.
@@ -481,8 +532,9 @@ def substantive_disallows(parsed, agent):
     grp = group_for(parsed, agent)
     if grp is None:
         return []
-    return sorted({r.strip() for r in grp.get("disallow", [])
-                   if r.strip() and not benign_disallow(r)
+    rules = grp.get("disallow", [])
+    return sorted({r.strip() for r in rules
+                   if r.strip() and not benign_disallow(r, rules)
                    and is_disallowed(parsed, agent, _sample_path(r.strip()))})
 
 

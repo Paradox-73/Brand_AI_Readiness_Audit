@@ -352,5 +352,7 @@ def test_the_wikidata_half_of_this_skill_never_exceeds_three_requests():
         [_item("Q777001{}".format(i), "Ashgrove, Vershire") for i in range(6)],
         sites={"Q7770010": "https://ashgrove-vt.test"})
     _run(stub, "https://an-invented-host.test", brand=brand)
-    assert len(stub.urls) == 3
+    # Wikidata's own robots.txt is read first, like every other host's; the
+    # three counted here are the API calls it permits.
+    assert len([url for url in stub.urls if "api.php" in url]) == 3
     assert len(stub.searches) == 2

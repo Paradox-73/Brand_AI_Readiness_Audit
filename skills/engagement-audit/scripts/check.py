@@ -62,7 +62,8 @@ from audit_common import (  # noqa: E402
     language_of, letter_runs, link_verdict,
     load_snapshot, locale_editions, no_network_reason, normalise_url, ORGANISATION,
     pages_of, pct, PERSONAL_OR_ACADEMIC, plural, PROJECT, PUBLIC_BODY, PUBLICATION,
-    publishing_platform, sample, site_kind, sitemap_scope, sitemap_total_phrase,
+    publishing_platform, sample, site_homepage, site_kind, sitemap_scope,
+    sitemap_total_phrase,
     SkillResult, truncate, USER_AGENT, where_the_template_is, who_edits_the_template,
     word_count, words_are_separated
 )
@@ -436,7 +437,15 @@ def run(snapshot, allow_network=True, time_budget=None, snapshot_path=None):
             result.skip(name, reason)
         return result
 
-    home = next((p for p in pages if p["page_type"] == "home"), None)
+    # The page every skill means by "the homepage", decided once in the shared
+    # library: the root, unless the root is a country or language picker. A
+    # retailer's report graded its `/au` storefront's heading as "what the
+    # homepage leads with" while another skill graded the root.
+    front = site_homepage(snapshot) or {}
+    front_page = front.get("page") or {}
+    by_url = {p["url"]: p for p in pages}
+    home = by_url.get(front_page.get("url")) or next(
+        (p for p in pages if p["page_type"] == "home"), None)
     # Why there is no homepage to judge, when there is none. "The homepage was
     # not crawled" was printed on a client-rendered site whose homepage was
     # crawled, answered 200, and was then set aside by `_delivered_stub`
@@ -457,9 +466,22 @@ def run(snapshot, allow_network=True, time_budget=None, snapshot_path=None):
     result.signal("site_kind", kind.kind or "undetermined")
     gateway_home = stub_home if stub_home is not None and stub_home["url"] in gateway_urls \
         else None
+    # A cover page is a delivered page, not a stub, so the gateway rule above
+    # never sees it. See `_cover_page_links`: it is reported once, by the
+    # orientation check, with everything it costs, and the menu check does not
+    # describe the same page a second time.
+    cover = _cover_page_links(home)
+    if cover:
+        result.signal("homepage_is_a_cover_page", home["url"])
+    elif front.get("is_gateway") and home is not None and home is by_url.get(
+            front_page.get("url")):
+        # A picker leading to regional storefronts that the shared library has
+        # read as one: judged as a way in, as a stub gateway is, and named.
+        gateway_home, home = home, None
     _check_homepage_orientation(result, home, english, stub_home=stub_home,
-                                gateway_home=gateway_home)
-    _check_navigation(result, home, pages, stub_home=stub_home, gateway_home=gateway_home)
+                                gateway_home=gateway_home, cover=cover)
+    _check_navigation(result, home, pages, stub_home=stub_home, gateway_home=gateway_home,
+                      cover=cover)
     _check_dead_ends(result, pages, render_mode, kind)
     _check_landing_page_answers(result, pages, english, render_mode)
     _check_landing_page_leads_with_the_price(result, pages)
@@ -533,8 +555,122 @@ def _gateway_sentence(page):
                 ", ".join(example_urls(reachable, 3))))
 
 
+# --------------------------------------------------------------------------
+# A cover page
+#
+# A central bank's root address redirects to a splash page: a picture, no text
+# at all, and two links - one per language edition - neither of which carries
+# a word. Three findings from two skills described that one page: the homepage
+# does not orient a visitor, the menu has no items, the main content is in
+# images. None of them called it what it is, so the owner read three separate
+# jobs where there is one decision: keep a cover page, or not.
+#
+# A cover page is the homepage (after any redirect) delivering almost no text
+# and a handful of links into the site. It is reported once, here, as a way
+# into the site, with each of its costs named in that one place.
+# --------------------------------------------------------------------------
+
+# Visible characters in the whole delivered document, header and footer
+# included, at or under which the page says nothing a machine can repeat. The
+# same bar as a quotable passage is not needed here: this is the whole page.
+COVER_PAGE_TEXT = 200
+# Links into the site a cover offers. One to three: a language choice, an
+# "enter" link, a pair of editions. More than that is a menu.
+COVER_PAGE_MAX_LINKS = 3
+# A first path segment shaped like a language or country code.
+_EDITION_SEGMENT_RE = re.compile(r"^[a-z]{2,3}(?:[-_][a-z]{2,4})?$", re.I)
+
+
+def _cover_page_links(home):
+    """The addresses a cover homepage leads to, or [] when it is not one.
+
+    Not a script redirect, which is its own finding: that page has no links at
+    all. Not a stub, which the gateway rule handles.
+    """
+    if home is None or home.get("page_type") != "home" or home.get("script_redirect"):
+        return []
+    if _delivered_stub(home):
+        return []
+    if (home.get("text_len") or 0) > COVER_PAGE_TEXT:
+        return []
+    reachable = sorted(_pages_reachable_from(home))
+    if not 1 <= len(reachable) <= COVER_PAGE_MAX_LINKS:
+        return []
+    return reachable
+
+
+def _report_cover_page(result, home, destinations):
+    # The orientation check's finding, raised from here: registered again so
+    # the finding is stamped with the check it answers.
+    result.check("homepage-orientation")
+    labels = {}
+    for link in (home.get("links") or {}).get("internal") or []:
+        if isinstance(link, dict) and link.get("url") in destinations:
+            labels.setdefault(link["url"], (link.get("text") or "").strip())
+    unlabelled = [url for url in destinations if not labels.get(url)]
+    segments = [urlparse(url).path.strip("/").split("/")[0] for url in destinations]
+    editions = (len(destinations) > 1 and len(set(segments)) == len(segments)
+                and all(_EDITION_SEGMENT_RE.match(s or "") for s in segments))
+    landed = home.get("final_url") or home["url"]
+    where = (" (the address {} redirects to)".format(home["url"])
+             if normalise_url(landed) != normalise_url(home["url"]) else "")
+    label_cost = (
+        "none of those links carries a word of text, so a machine cannot tell where each "
+        "one leads before it follows it" if len(unlabelled) == len(destinations) else
+        "{} of those links {} no text at all".format(
+            len(unlabelled), "carries" if len(unlabelled) == 1 else "carry")
+        if unlabelled else
+        "the links are labelled {}".format(
+            ", ".join('"{}"'.format(labels[url]) for url in destinations)))
+    result.add(
+        id_hint="homepage-is-a-cover-page",
+        title="The homepage is a cover page with almost nothing on it for a machine to read",
+        severity="medium", confidence="high",
+        evidence="The homepage at {}{} is a cover page: its whole delivered document holds {} "
+                 "of visible text and {} into the site{} - {}. It is a way into the site "
+                 "rather than a page of it, and that costs three things, stated here once "
+                 "rather than as three findings: an assistant that fetches the front page "
+                 "to learn what this site is finds no sentence to repeat; there is no menu "
+                 "on it, so a crawler entering there reaches only the {} it links; and "
+                 "{}.".format(
+                     landed, where,
+                     plural(home.get("text_len") or 0, "character", "characters"),
+                     plural(len(destinations), "link", "links"),
+                     ", one for each language edition" if editions else "",
+                     ", ".join(destinations),
+                     plural(len(destinations), "page", "pages"), label_cost),
+        mechanism="G", root_cause="no-orientation",
+        summary="Make the cover page say in text what this site is and link into it with "
+                "labelled links, or replace it with a server redirect to the main edition.",
+        how_to_fix=[
+            "Write one or two sentences on the cover page, as HTML text rather than inside "
+            "a picture, saying what this site is and who runs it. That is the sentence an "
+            "assistant repeats when it fetches the front page.",
+        ] + ([
+            "Give each link on it a text label naming where it leads - the language or the "
+            "edition - as the picture's `alt` text or as words beside it.",
+        ] if unlabelled else []) + [
+            "Or retire the cover: answer the homepage address with a server redirect "
+            "(HTTP 302 where the choice depends on the visitor's language, 301 otherwise) "
+            "to the edition most visitors want, and keep `<link rel=\"alternate\" "
+            "hreflang>` tags naming every edition.",
+            "If the cover stays, link the main sections of each edition from it as plain "
+            "`<a href>` links, so a machine entering at the front page reaches more than "
+            "{}.".format(plural(len(destinations), "page", "pages")),
+        ],
+        effort="low", owner="developer",
+        rationale="A cover page is a door, not a room. An assistant asked what this site is "
+                  "reads the front page first, and finds nothing there to quote; a crawler "
+                  "entering there sees only the doors.",
+        affected_pages=[home["url"]],
+        checked=("the visible text of the whole delivered homepage document, its header and "
+                 "footer included",
+                 "every `<a href>` on it that leads to another address on this site"),
+    )
+
+
 def _check_homepage_orientation(result, home, english=True, stub_home=None,
-                                gateway_home=None):
+                                gateway_home=None, cover=None):
     """Does the homepage say where you are and what to do next?
 
     Two of the three signals here are English: the list of headings that say
@@ -575,6 +711,9 @@ def _check_homepage_orientation(result, home, english=True, stub_home=None,
                             stub_home.get("url"), stub_home.get("text_len") or 0))
             return
         result.skip("homepage-orientation", "the homepage was not crawled")
+        return
+    if cover:
+        _report_cover_page(result, home, cover)
         return
 
     h1s = (home.get("headings") or {}).get("h1") or []
@@ -775,8 +914,27 @@ def _check_homepage_orientation(result, home, english=True, stub_home=None,
     )
 
 
-def _check_navigation(result, home, pages, stub_home=None, gateway_home=None):
+def _check_navigation(result, home, pages, stub_home=None, gateway_home=None, cover=None):
     result.check("primary-navigation")
+    if home is not None and cover:
+        result.skip("primary-navigation",
+                    "the homepage at {} is a cover page carrying {} into the site and no "
+                    "menu, which is reported once, under homepage-orientation, with what it "
+                    "costs a visitor and a machine".format(
+                        home.get("url"), plural(len(cover), "link", "links")))
+        return
+    # A homepage that is a script sending the browser on is not a page with a
+    # bad menu. It carries no links at all, and what that costs a machine is the
+    # front-door finding, which prescribes the server redirect. "Give the site
+    # three top-level navigation items" was printed under it about the same
+    # empty page.
+    if home is not None and home.get("script_redirect") and not _pages_reachable_from(home):
+        result.skip("primary-navigation",
+                    "the homepage at {} is a script that sends the browser to another address "
+                    "and carries no link of its own, so it has no menu to judge; what that "
+                    "costs a crawler is homepage-links-into-the-site's to report, and the fix "
+                    "is a server redirect rather than a menu".format(home.get("url")))
+        return
     if home is None:
         if gateway_home is not None:
             result.skip("primary-navigation", _gateway_sentence(gateway_home))
@@ -1513,8 +1671,14 @@ _RETURNS_PROPERTIES = ("hasmerchantreturnpolicy", "merchantreturnpolicy",
 # working where the third reading below cannot run.
 _DELIVERY_PATH_RE = re.compile(
     r"(?:^|[/_-])(?:shipping|delivery|deliveries|postage|dispatch|freight)(?:$|[/_.-])", re.I)
+# A whole path segment that is the policy, not a word inside another name: a
+# shop's `/collections/return-gifts` is a festival gift collection, and it was
+# read as the page stating the returns policy.
 _RETURNS_PATH_RE = re.compile(
-    r"(?:^|[/_-])(?:returns?|refunds?|exchanges?|cancellation)(?:$|[/_.-])", re.I)
+    r"(?:^|/)(?:[\w-]*[-_])?(?:returns?|refunds?|exchanges?|cancellations?)"
+    r"(?:[-_](?:and|&)[-_](?:returns?|refunds?|exchanges?|cancellations?))?"
+    r"(?:[-_](?:polic(?:y|ies)|info|information|centre|center|terms|process|guide))?"
+    r"(?:$|[/.?#])", re.I)
 
 # And the third: the page's own words. English, and deliberately narrow -
 # every phrase here has to be about the thing being sold rather than a word
@@ -2092,6 +2256,18 @@ def _check_orphans(result, snapshot, pages, stub_urls=()):
                     "no sitemap is published, so there is no list of pages to compare the "
                     "crawl against: {}. Without it an orphan cannot be told from a page the "
                     "crawl simply did not reach".format(why))
+        return
+    # Answered and listing nothing is no sitemap. A site answering 200 with its
+    # ordinary HTML page at every address was told "the sitemap that answered
+    # lists 0 URLs", in a report whose sitemap finding said no XML sitemap is
+    # available - a sentence about a file that is not there.
+    if not sitemap_urls:
+        result.skip("orphan-pages",
+                    "no sitemap listing any page was found: {} answered at a sitemap address "
+                    "and none of them held a single `<loc>` entry, which is what a page "
+                    "served in a sitemap's place looks like. Without a list of pages an "
+                    "orphan cannot be told from a page the crawl simply did not "
+                    "reach".format(plural(len(answered), "address", "addresses")))
         return
     if len(sitemap_urls) < 5:
         result.skip("orphan-pages",
@@ -3115,10 +3291,33 @@ def _check_one_subject_per_page(result, pages):
     )
 
 
+# Words in a title that promise content somebody else's script supplies: the
+# reviews, testimonials and ratings a review widget fills in after the page
+# loads. English, like every other title-word test in this check.
+_SCRIPT_SUPPLIED_TITLE_RE = re.compile(r"\b(?:reviews?|testimonials?|ratings?)\b", re.I)
+
+
+def _promises_what_a_script_supplies(page):
+    """True when the title promises reviews and the page loads outside scripts.
+
+    A shop's "Customer Reviews and Testimonials" page was reported as not
+    delivering what its title promises, "missing reviews, testimonials". The
+    reviews are there for a visitor: a review widget loads them by script, and
+    no browser ran. The vendor is never named here; that the page loads code
+    from somewhere else and its title promises what such code delivers is the
+    whole test. A page read by a browser is judged as usual.
+    """
+    if page.get("content_from") == "rendered":
+        return False
+    if not _SCRIPT_SUPPLIED_TITLE_RE.search(page.get("title") or ""):
+        return False
+    return bool((page.get("scripts") or {}).get("external_count"))
+
+
 def _check_title_body_drift(result, pages):
     """Does the page deliver what its title promised?"""
     result.check("title-body-alignment")
-    candidates, listings, unmeasured = [], [], []
+    candidates, listings, unmeasured, supplied = [], [], [], []
     for page in pages:
         if not page.get("title") or page.get("body_text_len", 0) < 400:
             continue
@@ -3132,9 +3331,19 @@ def _check_title_body_drift(result, pages):
             listings.append(page)
         elif not _title_words_are_comparable(page):
             unmeasured.append(page)
+        elif _promises_what_a_script_supplies(page):
+            supplied.append(page)
         else:
             candidates.append(page)
     set_aside = _set_aside_note(listings, unmeasured)
+    if supplied:
+        set_aside.append(
+            "{} whose title promises reviews or testimonials and which load{} scripts from "
+            "other addresses ({}): that is how a review widget delivers its reviews, no "
+            "browser ran during this audit, so what the title promises may be on the page "
+            "a visitor sees".format(
+                plural(len(supplied), "page", "pages"), "s" if len(supplied) == 1 else "",
+                ", ".join(example_urls([p["url"] for p in supplied], 3))))
     if len(candidates) < 3:
         result.skip("title-body-alignment",
                     "fewer than 3 pages could be compared: a page needs a title, 400+ "
@@ -3244,10 +3453,13 @@ def _check_title_body_drift(result, pages):
 CHROME_MENU_MIN = 3
 
 
-def _stranded_within(pages):
+def _stranded_within(pages, own_sections=None):
     """Pages missing the header/footer links most of this group shares.
 
-    Returns (stranded, carrying_count, reason_it_could_not_judge).
+    Returns (stranded, carrying_count, reason_it_could_not_judge). Pages that
+    sit in a section of their own and carry that section's menu are appended
+    to `own_sections` rather than to either count - see
+    `_carries_its_own_sections_menu`.
 
     Judged against the links shared across the group, not against one
     template's whole set. Matching one template exactly picks whichever
@@ -3263,6 +3475,7 @@ def _stranded_within(pages):
     back into the site from wherever they landed. A page carrying those is not
     stranded however much of some other template it lacks.
     """
+    own_sections = [] if own_sections is None else own_sections
     signatures = [tuple((p.get("chrome_signature") or {}).get("nav_paths") or [])
                   for p in pages]
     # A page carrying one link is not carrying a menu. Taking any non-empty
@@ -3295,6 +3508,11 @@ def _stranded_within(pages):
 
     required = max(1, int(len(core) * CHROME_CORE_PRESENT))
     stranded, carrying = [], 0
+    # Sections the main menu navigates inside, not ones it merely links the
+    # front of: every page of the museum links `/CHILD`, and that link does not
+    # make the children's museum's own pages part of the main site's menu.
+    core_sections = {_first_segment(path) for path in core
+                     if "/" in path.strip("/")}
     for page, signature in zip(pages, signatures):
         # Two readings before a page is called stranded. The norm above is
         # still drawn from `chrome_signature` alone so it cannot shift, but a
@@ -3306,9 +3524,43 @@ def _stranded_within(pages):
         carried = set(signature) | _chrome_paths(page)
         if len(core & carried) >= required:
             carrying += 1
+        elif _carries_its_own_sections_menu(page, carried, core_sections):
+            own_sections.append(page)
         else:
             stranded.append(page)
     return stranded, carrying, ""
+
+
+# A menu of its own, as opposed to a logo and two legal links: at least this
+# many same-site destinations in the page's own header and footer.
+SECTION_MENU_MIN = 8
+
+
+def _first_segment(path):
+    """The first segment of a path, lower-cased: `/ENG/main` -> `eng`."""
+    return (urlparse(path or "").path or path or "").strip("/").split("/")[0].lower()
+
+
+def _carries_its_own_sections_menu(page, carried, core_sections):
+    """True when a page sits in a section of its own and carries that section's menu.
+
+    A museum's English and Japanese editions and its children's museum each
+    have a full menu of their own - 12 to 23 links, into `/ENG/...`,
+    `/JPN/...`, `/CHILD/...` - and were reported as pages that "do not carry
+    the site's normal navigation", because they were compared with the main
+    site's menu. The same shape on a storefront whose root is a country
+    picker: `/us` carries fifty `/us/...` links in its footer and was compared
+    against the `/au/...` edition's. An edition or a section with a menu of its
+    own is a different site's chrome, not a page with none.
+
+    Both conditions: the page's first path segment holds none of the main
+    menu's destinations, so it is a section the main site does not navigate
+    as its own, and the page carries a real menu.
+    """
+    section = _first_segment(page.get("url"))
+    if not section or section in core_sections:
+        return False
+    return len(carried) >= SECTION_MENU_MIN
 
 
 def _check_chrome_consistency(result, pages):
@@ -3335,13 +3587,24 @@ def _check_chrome_consistency(result, pages):
                         len(groups)))
         return
 
-    stranded, carrying, reasons = [], 0, []
+    stranded, carrying, reasons, own_sections = [], 0, [], []
     for code, group in sorted(judged.items()):
-        found, count, why = _stranded_within(group)
+        found, count, why = _stranded_within(group, own_sections)
         carrying += count
         stranded.extend(found)
         if why:
             reasons.append("{}{}".format("/{}: ".format(code) if code else "", why))
+    # Named wherever they are set aside, so a page left out of both counts is
+    # never one the reader believes was judged.
+    sections = sorted({"/" + urlparse(p["url"]).path.strip("/").split("/")[0]
+                       for p in own_sections})
+    set_aside = (" Not compared with the main site's menu: {} in a section of {} own ({}) "
+                 "and {} that section's menu of {} or more links, which is a separate "
+                 "edition's or section's navigation rather than a missing one".format(
+                     plural(len(own_sections), "page sits", "pages sit"),
+                     "its" if len(own_sections) == 1 else "their", ", ".join(sections),
+                     "carries" if len(own_sections) == 1 else "carry", SECTION_MENU_MIN)
+                 if own_sections else "")
 
     if not stranded:
         # A reason means the check could not judge, and that is not a pass.
@@ -3353,16 +3616,18 @@ def _check_chrome_consistency(result, pages):
         # navigation". That is the case this check exists to catch, announced
         # as a clean bill of health.
         result.skip("consistent-site-chrome",
-                    reasons[0] if reasons else
-                    "all {} crawled pages carry the header and footer links this site "
-                    "shares across its templates{}".format(
-                        sum(len(g) for g in judged.values()),
-                        " within their own language edition ({})".format(
-                            ", ".join("/{}".format(c) for c in sorted(judged) if c))
-                        if len(judged) > 1 else ""))
+                    (reasons[0] if reasons else
+                     "all {} crawled pages carry the header and footer links this site "
+                     "shares across its templates{}".format(
+                         sum(len(g) for g in judged.values()) - len(own_sections),
+                         " within their own language edition ({})".format(
+                             ", ".join("/{}".format(c) for c in sorted(judged) if c))
+                         if len(judged) > 1 else "")) + (
+                        "." + set_aside if set_aside else ""))
         return
 
-    pages = [p for group in judged.values() for p in group]
+    aside = {id(p) for p in own_sections}
+    pages = [p for group in judged.values() for p in group if id(p) not in aside]
 
     result.add(
         id_hint="pages-missing-site-navigation",
@@ -3378,11 +3643,12 @@ def _check_chrome_consistency(result, pages):
         # the shared core removes the middle bucket rather than describing it.
         evidence="Of {} judged, {} the header/footer links that most pages on "
                  "this site share and {} few or none of them. These are the ones that "
-                 "do not: {}.".format(
+                 "do not: {}.{}".format(
                      plural(len(pages), "page", "pages"),
                      plural(carrying, "page carries", "pages carry"),
                      plural(len(stranded), "page carries", "pages carry"),
-                     ", ".join(example_urls([p["url"] for p in stranded]))),
+                     ", ".join(example_urls([p["url"] for p in stranded])),
+                     set_aside + "." if set_aside else ""),
         mechanism="G", root_cause="inconsistent-chrome",
         summary="Apply the standard header and footer to every page template.",
         how_to_fix=[

@@ -2,7 +2,7 @@
   "fixture": "blocked-site",
   "why": "An ironmongery merchant whose content is good but whose access is shut. robots.txt disallows four answer crawlers and two training crawlers, and also disallows two real content paths; a WAF returns 403 to any AI user agent robots.txt does allow; one product page carries X-Robots-Tag noindex; the about page canonicalises to a different domain; the sitemap advertises a URL that 404s. This is the gate-1 fixture, and it also proves the answer-crawler versus training-crawler split.",
   "expect_zero_findings": false,
-  "expect_critical_at_least": 1,
+  "expect_critical_at_least": 0,
   "must_find": [
     "robots-block",
     "bot-manager-block",
@@ -20,10 +20,22 @@
     "missing-core-fact",
     "stale-content"
   ],
-  "must_recommend": ["R-LLMS-TXT", "R-BOILERPLATE"],
-  "critical_root_causes": ["bot-manager-block"],
+  "must_recommend": [
+    "R-LLMS-TXT",
+    "R-BOILERPLATE"
+  ],
+  "critical_root_causes": [],
   "expect_info_at_least": 1,
-  "blocked_answer_crawlers": ["OAI-SearchBot", "PerplexityBot"],
-  "blocked_training_crawlers": ["Google-Extended", "CCBot", "GPTBot", "ClaudeBot"],
-  "note": "This robots.txt blocks four AI crawlers by name. Two of them - GPTBot and ClaudeBot - are training crawlers by their operators' own documentation, so they belong with CCBot and Google-Extended in the info-severity rights decision, not in the citation defect. An earlier version of this audit put them in the answer group and told owners to allow-list them to be cited, which would have reopened the site to training collection it had deliberately opted out of. The answer-crawler block - OAI-SearchBot and PerplexityBot - must still be high."
+  "blocked_answer_crawlers": [
+    "OAI-SearchBot",
+    "PerplexityBot"
+  ],
+  "blocked_training_crawlers": [
+    "Google-Extended",
+    "CCBot",
+    "GPTBot",
+    "ClaudeBot"
+  ],
+  "note": "This robots.txt blocks four AI crawlers by name. Two of them - GPTBot and ClaudeBot - are training crawlers by their operators' own documentation, so they belong with CCBot and Google-Extended in the info-severity rights decision, not in the citation defect. An earlier version of this audit put them in the answer group and told owners to allow-list them to be cited, which would have reopened the site to training collection it had deliberately opted out of. The answer-crawler block - OAI-SearchBot and PerplexityBot - must still be high.",
+  "note_on_severity": "The WAF block is reported at high severity and medium confidence, not critical: the probe sends a crawler's name from the auditor's own address, and a CDN that verifies crawlers by IP refuses that request while serving the real crawler, so a name probe alone cannot show the rule is on the name."
 }

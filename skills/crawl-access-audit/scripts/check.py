@@ -27,6 +27,7 @@ import os
 import re
 import sys
 from collections import Counter, namedtuple
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlparse
 
@@ -72,8 +73,8 @@ from audit_common import (  # noqa: E402
     incomplete_certificate_chain,
     is_search_result_page, link_verdict,
     is_forbidden_path, locale_editions,
-    load_snapshot, looks_like_soft_404, make_soup, no_network_reason, pages_of, pct,
-    publishing_platform, template_change_steps,
+    load_snapshot, looks_like_soft_404, make_soup, no_network_reason, page_identity,
+    pages_of, pct, primary_subtag, publishing_platform, template_change_steps,
     plural, REFUSED_STATUS, response_is_an_html_page, response_text, response_timing,
     same_site, sample,
     sitemap_scope, sitemap_total_phrase, SkillResult,
@@ -474,14 +475,24 @@ def run(snapshot, allow_network=True, time_budget=None):
     home = _homepage_record(pages, home_url)
     if home is not None and home.get("status") is None and not pages_of(snapshot):
         _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher, UA_UNTESTED)
-        for name in ("robots-txt-reachable", "robots-blocks-all-crawlers",
+        unreached = ("robots-txt-reachable", "robots-blocks-all-crawlers",
                      "robots-blocks-ai-answer-crawlers", "robots-crawl-delay",
                      "robots-agent-groups-unambiguous", "sitemap-present",
                      "sitemap-excludes-private-paths",
                      "sitemap-parses", "sitemap-urls-resolve", "canonical-targets",
                      "bot-manager-user-agent-comparison", "https-transport",
                      "bot-manager-challenge-page", "unknown-paths-return-200",
-                     "llms-txt-presence"):
+                     "llms-txt-presence")
+        # One reason per check. `_check_status_and_indexability` runs the
+        # canonical check on its way through, and on a host that served no
+        # page that check declines with "no crawled page declares a canonical
+        # URL" - true of an empty list, and printed in the appendix directly
+        # above this branch's own line for the same check, so a national
+        # library's report listed `canonical-targets` twice with two different
+        # explanations. The host's answer is the one that explains it.
+        result.not_applicable = [entry for entry in result.not_applicable
+                                 if entry["check"] not in unreached]
+        for name in unreached:
             # A host that answered with a certificate chain one link short did
             # respond, and saying otherwise sent a national library's owner to
             # look for an outage. The skip says what did happen.
@@ -2046,8 +2057,28 @@ def _check_robots_blocks(result, robots, origin, pages=None):
         # The useful sentence here is not "you blocked a training crawler".
         # It is: that is your decision, and here are the agents from the same
         # companies that decide whether you get cited - check those are open.
-        counterparts = [name for name in answer_side_counterparts(blocked_training)
-                        if name not in blocked_answer]
+        # Three situations, and the old two-way branch had a sentence for two.
+        # Where these operators run no answer-side agent at all - a file
+        # closing only a web-archive crawler and a video platform's scraper -
+        # the list is empty for a reason that has nothing to do with blocking,
+        # and the `else` printed "Every answer-side agent from these same
+        # companies is also blocked, which is reported separately" on a site
+        # where nothing else was blocked and nothing was reported.
+        same_operators = answer_side_counterparts(blocked_training)
+        counterparts = [name for name in same_operators if name not in blocked_answer]
+        if counterparts:
+            counterpart_step = (
+                "The agents from the same companies that do decide citation are {}, and "
+                "robots.txt already lets them in. Keep it that way.".format(
+                    ", ".join(counterparts[:6])))
+        elif same_operators:
+            counterpart_step = (
+                "Every answer-side agent from these same companies is also blocked, which is "
+                "reported separately and is the one worth reconsidering.")
+        else:
+            counterpart_step = (
+                "None of these companies runs a separate search or live-fetch agent that this "
+                "audit knows of, so this opt-out closes nothing an answer engine reads.")
         result.add(
             id_hint="robots-blocks-training-crawlers",
             title="robots.txt blocks AI training crawlers (this is often deliberate)",
@@ -2063,12 +2094,7 @@ def _check_robots_blocks(result, robots, origin, pages=None):
                 "is the intended policy.",
                 "If it is, no change is needed here. Do not allow these back in to fix a "
                 "citation problem - they are not the agents that produce citations.",
-                ("The agents from the same companies that do decide citation are {}, and "
-                 "robots.txt already lets them in. Keep it that way.".format(
-                     ", ".join(counterparts[:6]))
-                 if counterparts else
-                 "Every answer-side agent from these same companies is also blocked, which is "
-                 "reported separately and is the one worth reconsidering."),
+                counterpart_step,
                 "If the opt-out was not intended, remove these user-agent groups from "
                 "/robots.txt.",
             ],
@@ -2536,29 +2562,81 @@ def _observed_lastmod(page):
     # on a news site's dynamic pages - directly above the next finding's
     # "Do not set <lastmod> to today's date". A date that is only the day of
     # the request is not a date the page was changed, and is left out.
-    fetched_day = _header_day(headers.get("date"))
+    #
+    # The `Date` header is one witness and the crawl's own clock is the
+    # other. The page record kept neither for a long time, so this guard
+    # compared against nothing and never fired: a documentation site and a
+    # publisher each got the audit's date on every snippet entry. Where no
+    # time of fetch is recorded at all, the day this check runs stands in
+    # for it, because a snippet may never print the audit's own date.
+    fetched = _header_moment(headers.get("date")) or _iso_moment(page.get("fetched_at"))
+    excluded = {_day_of(fetched)} if fetched is not None else set(_audit_days())
     dates = page.get("dates") or {}
     candidates = [dates.get("jsonld_date_modified"), dates.get("jsonld_date_published")]
     candidates.extend(dates.get("machine_readable") or [])
     for value in candidates:
         match = _ISO_DATE_RE.match(str(value or "").strip())
-        if match and match.group(1) != fetched_day:
+        if match and match.group(1) not in excluded:
             return match.group(1)
-    day = _header_day(headers.get("last-modified"))
-    if day and day != fetched_day:
-        return day
-    return ""
+    modified = _header_moment(headers.get("last-modified"))
+    if modified is None:
+        return ""
+    # Generated on request: the server stamped the page with the moment it
+    # built it. Minutes rather than the day, so a page modified the evening
+    # before a morning fetch is not mistaken for one, and the day rule above
+    # still catches the rest.
+    if fetched is not None and abs((fetched - modified).total_seconds()) <= GENERATED_ON_REQUEST_S:
+        return ""
+    day = _day_of(modified)
+    return "" if day in excluded else day
+
+
+# How close `Last-Modified` may sit to the moment of the fetch before it is
+# read as the moment the server built the response rather than the moment
+# somebody changed the page. A server generating per request stamps the
+# second it answered; a few minutes covers a clock that disagrees with this
+# machine's and a crawl that paused between pages.
+GENERATED_ON_REQUEST_S = 300
+
+
+def _header_moment(raw):
+    """An aware UTC datetime from an HTTP date header, or None."""
+    if not raw:
+        return None
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc)
+
+
+def _iso_moment(raw):
+    """An aware UTC datetime from the crawl's `fetched_at`, or None."""
+    try:
+        when = datetime.strptime(str(raw or ""), "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+    return when.replace(tzinfo=timezone.utc)
+
+
+def _day_of(moment):
+    return moment.strftime("%Y-%m-%d")
+
+
+def _audit_days():
+    """Today, by UTC and by this machine's clock - they differ near midnight."""
+    return (datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            datetime.now().strftime("%Y-%m-%d"))
 
 
 def _header_day(raw):
     """`YYYY-MM-DD` from an HTTP date header, or ""."""
-    if not raw:
-        return ""
-    try:
-        when = parsedate_to_datetime(raw)
-    except (TypeError, ValueError, IndexError):
-        return ""
-    return when.strftime("%Y-%m-%d") if when is not None else ""
+    moment = _header_moment(raw)
+    return _day_of(moment) if moment is not None else ""
 
 
 def _sitemap_snippet(snapshot):
@@ -2893,6 +2971,19 @@ def _check_sitemaps(result, snapshot, fetcher, robots=None):
                  if s.get("status") == 200 and not s.get("parse_error")
                  and not s.get("looks_like_html")]
     broken = [s for s in sitemaps if s.get("status") == 200 and s.get("parse_error")]
+    # A 200 whose recorded body is an HTML page, with no parse error to send
+    # it through `broken`. A museum answers `/sitemap.xml` and
+    # `/sitemap_index.xml` with a short page reading "the web page cannot be
+    # found", served as `text/html` with status 200; the parser raised
+    # nothing on it, so it was neither reachable nor broken nor absent, and
+    # the report said "no sitemap request produced an answer ... a refused or
+    # failed request is evidence that this crawler was not allowed to look" -
+    # about two addresses that had both answered 200. An HTML document at a
+    # sitemap address is not a sitemap whatever words it holds, which is the
+    # rule the branch below already applies to a body that fails to parse.
+    recorded_pages = [s for s in sitemaps if s.get("status") == 200
+                      and not s.get("parse_error") and s.get("looks_like_html")
+                      and not s.get("truncated")]
     # Sitemaps the crawl fetched but could not read to the end. A limit this
     # audit imposes on itself is not a defect in the site, so they are neither
     # "reachable" nor "broken" - they are unchecked, and said to be.
@@ -2936,6 +3027,7 @@ def _check_sitemaps(result, snapshot, fetcher, robots=None):
     html_shells, shell_redirects, body_verified = (
         _sitemaps_that_are_html(fetcher, broken, robots, catch_all)
         if broken else ([], {}, True))
+    html_shells = html_shells + recorded_pages
     shell_urls = {s["url"] for s in html_shells}
     if html_shells:
         broken = [s for s in broken if s["url"] not in shell_urls]
@@ -3885,6 +3977,14 @@ def _check_bot_manager(result, snapshot, robots, fetcher, allow_network, time_bu
     # is held constant across every name in it.
     probe = _ask_each_name_again(result, fetcher, probe_url, robots)
     named = probe if probe is not None and probe.refused and probe.served else None
+    # High at most, and medium confidence. Every request here carried a
+    # crawler's name from this audit's own address, and the crawler never
+    # sends from there: it sends from its operator's published ranges. CDNs
+    # routinely refuse a request that claims a verified crawler's name from
+    # an address that is not that crawler's, and serve the real one. So the
+    # measurement cannot tell a rule on the name from a rule checking the
+    # address behind it, and two shops were told at critical, first in
+    # "Start here", to allow crawlers their CDN may already let in.
     result.add(
         id_hint="bot-manager-blocks-ai-crawlers",
         title="A bot manager or WAF refuses {} and serves the rest".format(
@@ -3892,8 +3992,8 @@ def _check_bot_manager(result, snapshot, robots, fetcher, allow_network, time_bu
                    "named answer-engine crawlers"))
               if named else
               "A bot manager or WAF serves AI crawlers a different response from the homepage",
-        severity="critical" if blocking else "medium",
-        confidence="high",
+        severity="high" if blocking else "medium",
+        confidence="medium",
         # Where the second client enumerated the names, its two lists replace
         # the two clauses that used to stand in for them - "robots.txt does not
         # disallow <candidate>" and "<the other probe name> answered normally".
@@ -3901,7 +4001,7 @@ def _check_bot_manager(result, snapshot, robots, fetcher, allow_network, time_bu
         # printing all four sentences said the same thing twice in a finding
         # whose whole job is to be acted on line by line.
         evidence="{} returned {} for user agent `{}` on two consecutive requests, but "
-                 "HTTP {} with the page itself for the audit user agent.{}{}".format(
+                 "HTTP {} with the page itself for the audit user agent.{}{}{}".format(
                      probe_url, difference, candidate, baseline,
                      "" if named else
                      " robots.txt does not disallow {}.{}".format(
@@ -3910,12 +4010,16 @@ def _check_bot_manager(result, snapshot, robots, fetcher, allow_network, time_bu
                          "than against every crawler.".format(
                              ", ".join("`{}`".format(n) for n in tried if n != candidate))
                          if len(tried) > 1 else ""),
-                     _named_probe_sentence(named, probe, robots, probe_url)),
+                     _named_probe_sentence(named, probe, robots, probe_url),
+                     ADDRESS_CAVEAT),
         mechanism="A", root_cause="bot-manager-block",
-        summary="Allow {} through your CDN or WAF bot rules.".format(
-            ", ".join("`{}`".format(n) for n in named.refused)) if named else
-                "Allow-list the AI answer crawlers in your CDN or WAF bot rules.",
+        summary=("Check whether your CDN or WAF refuses {} by name, or only refused a request "
+                 "claiming the name from an address that is not the crawler's.".format(
+                     ", ".join("`{}`".format(n) for n in named.refused)) if named else
+                 "Check whether your CDN or WAF refuses AI answer crawlers by name, or only "
+                 "requests claiming their names from addresses that are not theirs."),
         how_to_fix=_named_block_steps(named) if named else [
+            VERIFIED_BOT_STEP,
             "Open your CDN or WAF bot-management settings (Cloudflare, Akamai, Fastly, "
             "AWS WAF and similar all have a bot category list).",
             "Add {} and the other AI answer crawlers to the allow list, or set their "
@@ -4133,16 +4237,19 @@ def _report_named_crawler_block(result, probe, robots, baseline=None):
     # ran and found nothing wrong.
     result.check("bot-manager-user-agent-comparison")
     result.signal("bot_manager_block", True)
+    # Medium confidence for the reason `ADDRESS_CAVEAT` gives: the name was
+    # the only thing that differed in what this audit sent, and the address
+    # it sent from is the one thing no crawler shares with it.
     result.add(
         id_hint="edge-refuses-named-answer-crawlers",
         title="The edge refuses {} by name while serving others".format(
             plural(len(probe.refused), "named answer-engine crawler",
                    "named answer-engine crawlers")),
         severity="high",
-        confidence="high",
+        confidence="medium",
         evidence="{} answered HTTP {} to {} and HTTP 200 with the page to {}. All {} "
                  "requests were sent from one HTTP client seconds apart, so the crawler "
-                 "name is the only thing that differed between them.{}{}".format(
+                 "name is the only thing that differed between them.{}{}{}".format(
                      probe.url,
                      ", ".join(str(s) for s in statuses),
                      describe_agents(tuple(probe.refused), limit=6),
@@ -4158,10 +4265,12 @@ def _report_named_crawler_block(result, probe, robots, baseline=None):
                      " This audit's own HTTP client was refused at that URL as well{}, which "
                      "is a separate rule about the client rather than about any name.".format(
                          " (HTTP {})".format(baseline) if baseline else "")
-                     if baseline else ""),
+                     if baseline else "",
+                     ADDRESS_CAVEAT),
         mechanism="A", root_cause="bot-manager-block",
-        summary="Allow {} through your CDN or WAF bot rules.".format(
-            ", ".join("`{}`".format(n) for n in probe.refused)),
+        summary="Check whether your CDN or WAF refuses {} by name, or only refused a request "
+                "claiming the name from an address that is not the crawler's.".format(
+                    ", ".join("`{}`".format(n) for n in probe.refused)),
         how_to_fix=_named_block_steps(probe),
         effort="medium", owner="developer",
         rationale="These agents fetch pages so an assistant can answer a question with "
@@ -4174,9 +4283,34 @@ def _report_named_crawler_block(result, probe, robots, baseline=None):
     return UA_NAMES_DIFFER
 
 
+# What a name probe cannot see. Every request this skill sends leaves from the
+# machine running the audit, and an answer crawler never does: it sends from
+# its operator's published address ranges, and the large CDNs verify that -
+# by reverse DNS or against the published list - before treating a request as
+# the crawler it claims to be. A request claiming `Claude-SearchBot` from any
+# other address is an impersonator to that rule, and refusing impersonators is
+# the rule working. Two shops were told at critical severity to allow crawlers
+# their CDN may well have been serving all along.
+ADDRESS_CAVEAT = (
+    " These requests carried the crawlers' names but came from this audit's own "
+    "address, not from the address ranges those crawlers publish. A CDN that checks a "
+    "crawler's address before trusting its name - reverse DNS, or the operator's published "
+    "list - refuses a request like this one and serves the real crawler, so this "
+    "measurement cannot tell a rule on the name from a rule on the address behind it.")
+
+VERIFIED_BOT_STEP = (
+    "Before changing anything, find out which kind of rule this is. In your CDN or WAF, "
+    "look at the verified-bot settings and at the firewall log for these crawler names: a "
+    "rule that verifies the crawler's address (reverse DNS, or the operator's published IP "
+    "list) refuses anyone else using the name and lets the real crawler in, and needs no "
+    "change. Only a rule that refuses the name itself, whatever address it comes from, "
+    "is the one to change.")
+
+
 def _named_block_steps(probe):
     """The fix, written from the measurement rather than from the agent table."""
     steps = [
+        VERIFIED_BOT_STEP,
         # The last sentence, because a rule keyed to crawler names proves
         # somebody wrote one and never proves the reader is that somebody. A
         # shop on a hosted platform has no console to open, and an instruction
@@ -4937,6 +5071,27 @@ def _deliberate_noindex_reason(page):
     return ""
 
 
+# The host a TLS failure names, as the HTTP library writes it.
+_TLS_POOL_HOST_RE = re.compile(r"HTTPSConnectionPool\(host='([^']+)'", re.I)
+
+
+def _tls_subject(url, error):
+    """Who "answered over HTTPS", in words that match the scheme used.
+
+    A national library was audited at `http://`, the server redirected the
+    request to HTTPS, and the handshake there failed. The sentence read
+    "http://<host>/ answered over HTTPS", which is a contradiction a reader
+    stops at: an `http://` address does not answer over HTTPS. The library's
+    own error names the HTTPS host the redirect reached, so the sentence can
+    say what happened in order.
+    """
+    if urlparse(url).scheme != "http":
+        return url
+    match = _TLS_POOL_HOST_RE.search(str(error or ""))
+    host = match.group(1) if match else urlparse(url).hostname
+    return "{} redirects to HTTPS, and https://{}/".format(url, host)
+
+
 def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=None,
                                    ua_verdict=UA_UNTESTED, robots=None, recheck=None):
     result.check("homepage-reachable")
@@ -4961,6 +5116,11 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
         # authority. The general branch below prescribed reading the CDN log
         # for several days of developer time, on a national library whose fix
         # is one file on the web server.
+        #
+        # Registered again, because `_report_response_time` registered its own
+        # check after the five above and a finding is filed under whichever
+        # was registered last: this one was listed under `origin-response-time`.
+        result.check("homepage-reachable")
         result.add(
             id_hint="homepage-not-reachable",
             title="The homepage's HTTPS certificate is sent without its intermediate "
@@ -4970,7 +5130,8 @@ def _check_status_and_indexability(result, snapshot, pages, ok_pages, fetcher=No
                      "this is not an outage: browsers that already hold the intermediate "
                      "load the page, and crawlers, command-line clients and many phones "
                      "do not.".format(
-                         home_url, explain_fetch_error(home.get("error")),
+                         _tls_subject(home_url, home.get("error")),
+                         explain_fetch_error(home.get("error")),
                          next((words for words in ("unable to get local issuer certificate",
                                                    "unable to verify the first certificate")
                                if words in str(home.get("error") or "").lower()),
@@ -5677,7 +5838,10 @@ def _check_soft_404_handling(result, snapshot, fetcher, robots=None, time_budget
         or looks_like_soft_404({
             "title": landed_soup.title.get_text(strip=True) if landed_soup.title else "",
             "headings": {"h1": [landed_soup.h1.get_text(strip=True)]
-                         if landed_soup.h1 else []}})))
+                         if landed_soup.h1 else []},
+            # The body as well: a museum's not-found notice has no heading,
+            # and its only words are the notice itself.
+            "text": landed_soup.get_text(" ", strip=True)})))
     result.signal("unknown_path_lands_on_an_error_page", lands_on_an_error_page)
 
     if hop is not None and not duplicates and not lands_on_an_error_page:
@@ -5706,7 +5870,8 @@ def _check_soft_404_handling(result, snapshot, fetcher, robots=None, time_budget
     h1 = soup.h1.get_text(strip=True) if soup.h1 else ""
     # `looks_like_soft_404` is the shared test for "this page's own words say
     # it is missing", already used by the noindex check twenty lines above.
-    admits = looks_like_soft_404({"title": title, "headings": {"h1": [h1]}})
+    admits = looks_like_soft_404({"title": title, "headings": {"h1": [h1] if h1 else []},
+                                  "text": soup.get_text(" ", strip=True)})
     result.signal("soft_404_shell", hop is None)
     result.signal("soft_404_admits_in_text", admits)
 
@@ -6285,6 +6450,126 @@ def _edition_sample(pages, editions):
     return [by_edition[code] for code in sorted(by_edition)][:HREFLANG_PROBE_LIMIT]
 
 
+# Readable text below which a crawled page holds nothing an answer could be
+# drawn from. The page this was measured on held two words, its site's name
+# twice; an interstitial country picker holds a hundred characters or more
+# of choices and is a legitimate `x-default`.
+X_DEFAULT_EMPTY_CHARS = 20
+# Below this, a page that also sends the reader on by script or meta refresh
+# is a redirect stub rather than a page of its own.
+X_DEFAULT_STUB_CHARS = 200
+
+
+def _page_key(url):
+    """`page_identity` with a final slash dropped from any path but the root."""
+    key = page_identity(url or "") or ""
+    head, question, query = key.partition("?")
+    if head.count("/") > 3 and head.endswith("/"):
+        head = head.rstrip("/")
+    return head + question + query
+
+
+def _crawled_record(pages, url):
+    """The crawl record for `url` by requested or answering address, or None."""
+    key = _page_key(url)
+    if not key:
+        return None
+    for page in pages or []:
+        if key in (_page_key(page.get("url")), _page_key(page.get("final_url"))):
+            return page
+    return None
+
+
+def _x_default_is_empty(result, snapshot, ok_pages, editions, declaring):
+    """Report an `x-default` alternate that names a page with nothing on it.
+
+    Returns True when it reported one. `x-default` is the edition served to
+    a reader whose language the site does not publish. A one-page site's
+    editions all name `/` as that edition, and `/` is a document holding its
+    name twice and a script that picks a language from the browser and moves
+    the reader on. A crawler that runs no script and follows `x-default`
+    arrives at two words. The editions themselves were linked correctly, so
+    the check had passed.
+
+    Read from the crawl record only: the target has to be a page this crawl
+    fetched, and the stub is established by its own recorded text and
+    redirect, never guessed from the address.
+    """
+    targets = []
+    for page in declaring:
+        for alt in page.get("hreflang") or []:
+            if alt.get("hreflang") == "x-default" and alt.get("url") not in targets:
+                targets.append(alt.get("url"))
+    for target in targets:
+        record = _crawled_record(snapshot.get("pages") or [], target)
+        if record is None or record.get("status") != 200:
+            continue
+        text_len = record.get("text_len") or 0
+        redirect = record.get("script_redirect") or record.get("meta_refresh")
+        if not (text_len < X_DEFAULT_EMPTY_CHARS
+                or (redirect and text_len < X_DEFAULT_STUB_CHARS)):
+            continue
+        # Where the reader should land instead: the edition the script names
+        # when it names one, else the edition written in the language the
+        # stub itself declares.
+        default = ""
+        named = (record.get("script_redirect") or {}).get("url") or (
+            (record.get("meta_refresh") or {}).get("url") if record.get("meta_refresh") else "")
+        if named and _crawled_record(ok_pages, named) is not None:
+            default = named
+        if not default:
+            language = primary_subtag(record.get("lang"))
+            for page in sorted(ok_pages, key=lambda p: (p.get("depth") or 0, p.get("url") or "")):
+                code = editions.get(page.get("url"))
+                if language and code and code.split("-")[0].split("_")[0] == language:
+                    default = page.get("final_url") or page.get("url")
+                    break
+        naming = sum(1 for page in declaring
+                     if any(alt.get("hreflang") == "x-default" and alt.get("url") == target
+                            for alt in page.get("hreflang") or []))
+        how = ("redirects by script" if record.get("script_redirect")
+               else "redirects by meta refresh" if record.get("meta_refresh")
+               else "delivers no content")
+        result.check("hreflang-between-language-editions")
+        result.add(
+            id_hint="hreflang-x-default-is-an-empty-page",
+            title="The `x-default` language alternate points at a page that {}".format(how),
+            severity="low", confidence="high",
+            evidence="{} of the {} crawled edition pages declaring `hreflang` name {} as "
+                     "`hreflang=\"x-default\"`, the edition for a reader whose language the "
+                     "site does not publish. This crawl fetched it: it answered HTTP 200 with "
+                     "{} of readable text{}. A crawler that runs no script and follows "
+                     "`x-default` gets that page and nothing else.".format(
+                         naming, len(declaring), target,
+                         plural(text_len, "character", "characters"),
+                         ", and sends the reader on by script rather than by an HTTP redirect"
+                         if record.get("script_redirect") else
+                         ", and sends the reader on with a meta refresh"
+                         if record.get("meta_refresh") else ""),
+            mechanism="A", root_cause="canonical-broken",
+            summary="Point `x-default` at the real default edition{}.".format(
+                " ({})".format(default) if default else ""),
+            how_to_fix=[
+                "Change one attribute in the shared `<link rel=\"alternate\">` block: "
+                "`<link rel=\"alternate\" hreflang=\"x-default\" href=\"{}\">`. Every edition "
+                "carries the same block, so this is one edit in the template.".format(
+                    default or "<the URL of the edition you want served by default>"),
+                "Leave the language redirect on {} in place for visitors if you want it; "
+                "the change is only to which address the alternate names.".format(target),
+                "Confirm by requesting any edition and checking its `x-default` alternate "
+                "names a page with the full text on it.",
+            ],
+            effort="low", owner="developer",
+            rationale="`x-default` is the page an engine hands to a reader it has no "
+                      "edition for. Pointing it at an address whose content is chosen by "
+                      "script hands that reader, and every machine that does not run the "
+                      "script, an empty page in place of the site.",
+            affected_pages=[target],
+        )
+        return True
+    return False
+
+
 def _check_hreflang(result, snapshot, ok_pages, fetcher, robots=None):
     """Does a site serving several language editions link them to each other?"""
     result.check("hreflang-between-language-editions")
@@ -6300,15 +6585,26 @@ def _check_hreflang(result, snapshot, ok_pages, fetcher, robots=None):
                      "path segment the site's own `lang` attributes confirm is a language"))
         return
 
-    # The record first, where the crawl ever grows a field for it. Today it
-    # does not, and the paid probe below is what settles this - two GETs on a
-    # multi-locale site and none at all on the monolingual sites that are most
-    # of the web.
-    recorded = [p for p in ok_pages if p.get("hreflang")]
-    if recorded:
-        result.skip("hreflang-between-language-editions",
-                    "{} crawled page(s) declare `hreflang`, so the editions are linked to "
-                    "each other".format(len(recorded)))
+    # The record first: the crawl keeps every page's own `<link rel="alternate"
+    # hreflang>` tags. The paid probe below settles what the record cannot -
+    # two GETs on a multi-locale site and none at all on the monolingual
+    # sites that are most of the web.
+    #
+    # The edition pages themselves, not any page anywhere. A furniture
+    # retailer with `/au`, `/sg` and `/us` storefronts passed this check with
+    # "1 crawled page(s) declare `hreflang`" - the one page was the root
+    # country picker, and not one regional page names another. A declaration
+    # only one side makes is ignored by the engines that read it, so the
+    # picker's tags link nothing to anything.
+    edition_pages = [p for p in ok_pages if editions.get(p.get("url"))]
+    declaring_editions = [p for p in edition_pages if p.get("hreflang")]
+    one_way = [p for p in ok_pages if p.get("hreflang") and not editions.get(p.get("url"))]
+    if declaring_editions:
+        if not _x_default_is_empty(result, snapshot, ok_pages, editions, declaring_editions):
+            result.skip("hreflang-between-language-editions",
+                        "{} of the {} crawled edition page(s) declare `hreflang`, so the "
+                        "editions are linked to each other".format(
+                            len(declaring_editions), len(edition_pages)))
         return
 
     # The sitemap is the other place a site declares its editions, and the
@@ -6380,6 +6676,16 @@ def _check_hreflang(result, snapshot, ok_pages, fetcher, robots=None):
                     "the editions declare `hreflang`: {} carries it".format(declaring[0]))
         return
 
+    # Where a page outside every edition declares them, say so - an owner
+    # who opens the root and sees the tags would otherwise read this finding
+    # as wrong. The tags are there; they are on the one page that is not an
+    # edition, and nothing answers them.
+    one_way_note = (
+        " {} does declare `hreflang` alternates naming the editions, but it is not one of "
+        "them, and a declaration only one side makes is ignored: each edition page has to "
+        "name the others and itself.".format(
+            one_way[0].get("final_url") or one_way[0].get("url"))
+        if one_way else "")
     result.add(
         id_hint="no-hreflang-between-language-editions",
         title="This site publishes {} language editions and none links to the others".format(
@@ -6394,9 +6700,10 @@ def _check_hreflang(result, snapshot, ok_pages, fetcher, robots=None):
                  "agrees with it, or where the crawl met more than one such prefix. {} "
                  "re-read in full and searched for the attribute name `hreflang` wherever it "
                  "can appear - a `<link rel=\"alternate\">`, an anchor, or a `Link:` response "
-                 "header - and neither carries it: {}. {}".format(
+                 "header - and neither carries it: {}.{} {}".format(
                      len(codes), ", ".join("/{}/".format(c) for c in codes),
                      plural(len(read), "page was", "pages were"), ", ".join(read),
+                     one_way_note,
                      "The {} this crawl read, holding {}, carry no `<xhtml:link "
                      "rel=\"alternate\">` either, which is the sitemap's way of declaring the "
                      "same thing.".format(

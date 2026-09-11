@@ -203,10 +203,9 @@ itself as `BrandAIReadinessAudit/1.0 (+read-only audit)`.
 There is exactly one exception to the user-agent rule and two third-party services, all three
 declared: the AI-user-agent comparison probe in `crawl-access-audit` (skipped where robots.txt
 disallows the agent, three requests at most), and `freshness-corroboration-audit`'s profile-link
-and Wikidata lookups. Each profile link is a page fetch, so that host's own robots.txt is read
-first and a platform that disallows automated requests is reported as unchecked rather than
-probed. The Wikidata lookup uses the public JSON API Wikimedia asks bots to use in place of
-crawling wiki pages. `references/crawl-mechanics.md` states each boundary in full.
+and Wikidata lookups. Every one of them reads that host's own robots.txt first: a profile
+platform, or Wikidata's API path, that disallows automated requests is reported as unchecked
+rather than asked. `references/crawl-mechanics.md` states each boundary in full.
 
 ### Claims of absence
 

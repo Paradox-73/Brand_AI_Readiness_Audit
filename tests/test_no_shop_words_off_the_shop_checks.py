@@ -70,6 +70,11 @@ SELLING_IS_THE_SUBJECT = frozenset({
     "product-schema-missing-offer-details",
     "markup-declares-more-than-one-brand-name",
     "listing-pages-have-no-itemlist-markup",
+    # Two more raised only over `Product` and `Offer` blocks the site itself
+    # published: a category word in `brand`, and a first offer that is out of
+    # stock. Neither can fire on a site that sells nothing.
+    "product-brand-is-a-category",
+    "first-offer-is-out-of-stock",
 })
 
 # Nouns that assert the site sells something. Not a style list: every one of
