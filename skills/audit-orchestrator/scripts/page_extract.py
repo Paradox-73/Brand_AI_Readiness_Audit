@@ -759,6 +759,25 @@ UNLOCATED_CTA_OFFSET = 10 ** 6
 
 CTA_MARKUP_RE = re.compile(r"\b(btn|button|cta|call-to-action|primary-action)\b", re.I)
 
+# The elements other than `<a href>` a visitor presses to act. A
+# project-management product's homepage puts its next step - a three-minute
+# video tour - in a `<button>` directly under the H1, and the scan read links
+# only, so the page's first call to action was recorded as a testimonials link
+# 2,072 characters down and the homepage was reported as offering nothing to
+# do in its first screen. `<a role="button">` is already read as a link.
+CTA_BUTTON_SELECTOR = 'button, [role="button"], input[type="submit"], input[type="button"]'
+
+# Button labels that operate the page rather than name a next step. Several
+# open with a word in CTA_VERBS ("Open menu", "Play video", "Search"), and a
+# button is far more often a control than a link is. English, like the verb
+# list it corrects; the structural tests in `_button_is_a_control` carry the
+# same exclusions in every language.
+_CTA_CONTROL_LABEL_RE = re.compile(
+    r"^(?:(?:open|close|toggle|show|hide)(?: the)? (?:menu|navigation|nav|search|filters?|cart|basket)"
+    r"|(?:play|pause|mute|unmute|replay)(?: the)?(?: video| audio| animation| slideshow)?"
+    r"|(?:accept|reject|allow|deny)(?: all)?(?: cookies)?|cookie settings|manage cookies"
+    r"|menu|search|close|dismiss|ok|got it|skip(?: to (?:main )?content)?)$", re.I)
+
 NEWSLETTER_HINTS = ("newsletter", "subscribe", "mailing list", "email updates", "join our list")
 
 GENERIC_H1 = {
@@ -4219,8 +4238,77 @@ def _has_search(soup, origin=""):
     return False
 
 
+def _cta_is_worded_as_one(low, marker):
+    """The call-to-action test, one definition for links and buttons alike:
+    an imperative opening verb, or markup that styles the element as a button.
+    The verb half is English; the markup half is not."""
+    first_word = re.sub(r"[^a-z]", "", low.split()[0]) if low.split() else ""
+    return ((first_word in CTA_VERBS and not _VERB_IS_AN_ADJECTIVE_HERE.match(low))
+            or bool(CTA_MARKUP_RE.search(marker)))
+
+
+def _cta_chrome_ids(soup):
+    """The site's own menu, footer and banner, as a set of element ids.
+
+    A `<header>` counts only outside the page's content and only when it does
+    not hold the H1: a hero section written as `<header class="masthead">`
+    around the H1 and its button is this page's opening, and section headers
+    inside `<main>` are its content.
+    """
+    chrome = list(soup.select(NAV_SELECTOR) or _nav_by_shape(soup))
+    chrome += soup.select("footer, [role=contentinfo]")
+    for node in soup.select("header, [role=banner]"):
+        if node.find("h1") is not None:
+            continue
+        if node.find_parent(["main", "article", "section"]) is not None \
+                or node.find_parent(attrs={"role": "main"}) is not None:
+            continue
+        chrome.append(node)
+    return {id(node) for node in chrome}
+
+
+def _button_is_a_control(node, chrome_ids):
+    """True for a button that operates the site rather than offering a next step.
+
+    Read from structure, so it holds in any language: a menu or accordion
+    toggle says so with `aria-expanded`, a toggle with `aria-pressed`, a
+    dropdown with `aria-haspopup`, a close button with a dismiss attribute; a
+    search submit sits in a search form; a consent button sits in a dialog or a
+    cookie notice; and anything in the site's menu, footer or banner is the
+    site's furniture rather than this page's invitation. A dialog-opening
+    button is kept - "Book a demo" often opens one.
+    """
+    if node.name == "a":
+        return True     # read as a link already
+    if node.has_attr("disabled") or (node.get("type") or "").strip().lower() == "reset":
+        return True
+    if node.get("aria-expanded") is not None or node.get("aria-pressed") is not None:
+        return True
+    if str(node.get("aria-haspopup") or "").strip().lower() not in ("", "false", "dialog"):
+        return True
+    if node.has_attr("data-dismiss") or node.has_attr("data-bs-dismiss"):
+        return True
+    for holder in [node, *node.parents]:
+        if id(holder) in chrome_ids:
+            return True
+        if holder.name in ("template", "noscript", "dialog") or _is_hidden(holder):
+            return True
+        role = str(holder.get("role") or "").lower()
+        if role in ("dialog", "alertdialog", "search") \
+                or str(holder.get("aria-modal", "")).lower() == "true":
+            return True
+        identity = " ".join([" ".join(holder.get("class") or []),
+                             str(holder.get("id") or "")]).lower()
+        if any(hint in identity for hint in COOKIE_BANNER_HINTS):
+            return True
+        if holder.name == "form" and _form_is_search(holder, _text_or_empty(holder).lower()):
+            return True
+    return False
+
+
 def _cta(soup, body_text, origin, base):
-    """The first call-to-action link and where it sits in the body text.
+    """The first call to action - a link or a button - and where it sits in
+    the body text.
 
     Position matters: a CTA 4,000 characters down is not orientation.
     """
@@ -4228,22 +4316,33 @@ def _cta(soup, body_text, origin, base):
     first_offset = None
     first_text = ""
     first_url = ""
+    first_kind = ""
     in_main = False
     first_located = False
-    main_anchors = {id(a) for a in main_region(soup).find_all("a", href=True)}
-    for anchor in soup.find_all("a", href=True):
-        text = _text_or_empty(anchor)
+    main = main_region(soup)
+    main_ids = {id(a) for a in main.find_all("a", href=True)}
+    main_ids.update(id(b) for b in main.select(CTA_BUTTON_SELECTOR))
+    candidates = [(anchor, "link") for anchor in soup.find_all("a", href=True)]
+    chrome_ids = _cta_chrome_ids(soup)
+    candidates += [(node, "button") for node in soup.select(CTA_BUTTON_SELECTOR)
+                   if not _button_is_a_control(node, chrome_ids)]
+    for node, kind in candidates:
+        # An `<input>` shows its `value`; everything else shows its text. The
+        # value is not in the body copy, so an input's position is unknown and
+        # it sorts behind every located call to action, exactly as a link with
+        # an image for a label does.
+        text = (collapse_whitespace(node.get("value") or "") if node.name == "input"
+                else _text_or_empty(node))
         low = text.lower().strip()
         if not low or len(low) > 60:
             continue
-        first_word = re.sub(r"[^a-z]", "", low.split()[0]) if low.split() else ""
+        if kind == "button" and _CTA_CONTROL_LABEL_RE.match(low):
+            continue
         marker = " ".join(filter(None, [
-            " ".join(anchor.get("class") or []), anchor.get("id") or "",
-            anchor.get("role") or "",
+            " ".join(node.get("class") or []), node.get("id") or "",
+            node.get("role") or "",
         ]))
-        is_cta = ((first_word in CTA_VERBS and not _VERB_IS_AN_ADJECTIVE_HERE.match(low))
-                  or bool(CTA_MARKUP_RE.search(marker)))
-        if is_cta:
+        if _cta_is_worded_as_one(low, marker):
             offset = lowered.find(low[:40])
             located = offset >= 0
             if not located:
@@ -4254,18 +4353,26 @@ def _cta(soup, body_text, origin, base):
                 first_offset = offset
                 first_located = located
                 first_text = text
-                first_url = normalise_url(anchor["href"], base) or ""
+                first_kind = kind
+                first_url = (normalise_url(node["href"], base) or "") if kind == "link" else ""
                 # Set here, with the rest of this anchor's facts. Set outside
                 # the branch it described *any* qualifying anchor, so the
                 # record could name a footer "Contact" link as the page's call
                 # to action while asserting it sits in the main region - and
                 # the dead-end check reads exactly that pair.
-                in_main = id(anchor) in main_anchors
+                in_main = id(node) in main_ids
     buttons = len(soup.select('button, [role="button"], input[type="submit"], .btn, .button'))
     return {
         "found": first_offset is not None,
         "text": truncate(first_text, 80),
         "url": first_url,
+        # "link" or "button". A button has no `url`.
+        "kind": first_kind,
+        # What this scan reads. A snapshot written before buttons were read
+        # lacks the field, and a check reading it can then say that where the
+        # page's buttons sit was not measured, rather than treating a late
+        # link as the page's first next step.
+        "kinds_read": ["link", "button"],
         "offset": first_offset if first_offset is not None else -1,
         # False when the link exists but its label could not be found in the
         # body copy, so `offset` is a sort key and not a character position.

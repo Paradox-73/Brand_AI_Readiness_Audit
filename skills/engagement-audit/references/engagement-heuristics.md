@@ -36,12 +36,20 @@ The first version matched a fixed list of marketing phrases and missed most real
 "Browse the ironmongery range" and "Speak to the trade counter" are plainly calls to action
 and matched nothing.
 
-A link is now a CTA if **its first word is an imperative verb** (get, start, book, buy, shop,
+A link — or a `<button>`, `role="button"` element or submit input — is now a CTA if **its
+first word is an imperative verb** (get, start, book, buy, shop,
 browse, view, see, request, contact, call, order, try, download, subscribe, join, apply,
 explore, discover, find, learn, read, watch, schedule, reserve, sign, register, talk, speak,
 ask, enquire, compare, choose, select, plan, build, create, send, email, visit, check, claim,
 take, open, configure, estimate, quote, hire, arrange…) **or** it carries button markup
 (`btn`, `button`, `cta`, `call-to-action`, `primary-action` in its class, id or role).
+
+A button is more often a control than a link is, so buttons that operate the site are set
+aside first, from structure: anything in the menu, footer or a banner without the H1; a
+toggle (`aria-expanded`, `aria-pressed`, a menu `aria-haspopup`); a dismiss button; a search
+form's submit; anything in a dialog, a cookie notice, a `<template>` or hidden markup. A short
+English list of control labels ("Open menu", "Play video", "Search", "Accept all") backs that
+up. An input's label is its `value`, which is not body copy, so its position is unknown.
 
 This was a false positive found by running the clean fixture, and it is a good example of why
 `good-site` exists.

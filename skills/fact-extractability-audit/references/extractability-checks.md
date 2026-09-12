@@ -144,7 +144,7 @@ same report quotes.
   declined, so four-of-four can never be printed over facts nobody checked.
 - **Ceiling:** **high**, and only twice — a missing price on a site that has a pricing page
   and prints a currency figure, and a missing location on a site carrying LocalBusiness
-  signals or location pages. Contact method tops out at **medium** and has no high branch at
+  markup or a location page printing a street address of its own. Contact method tops out at **medium** and has no high branch at
   all. Founding facts are **medium**, or **low** where a named person was found. Confidence is
   `medium` for every one of them: an absence claim in this check is never high confidence.
   `mechanism="B"`, `root_cause="missing-core-fact"`.
@@ -379,7 +379,7 @@ still a whole statement, so the floor on quotable evidence is lower for this fac
 ### Location or service area
 
 A postal address, or a statement of where the business operates. Missing on a site with LocalBusiness
-signals or location pages is **high**.
+markup or a location page printing a street address of its own is **high**.
 
 **A street can be named without a number.** Museums, colleges, hospitals and most named buildings have no
 house number, and a pattern requiring one told a museum, as its single high-severity finding, that it never

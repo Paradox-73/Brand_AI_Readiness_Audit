@@ -122,6 +122,28 @@ def _branch(city, postcode):
                      "postalCode": postcode}}]}
 
 
+def test_a_location_path_alone_does_not_earn_local_business():
+    """A language foundation's event calendar keeps a venue listing for each
+    user-group meeting at `/events/<calendar>/locations/<id>/`, with no street
+    and no postcode. `page_type` is read off the path, and one such page handed
+    the whole foundation a LocalBusiness snippet."""
+    venue = {"url": "https://quillwort-lang.test/events/groups/locations/1418/",
+             "page_type": "location", "jsonld": [],
+             "contact_facts": {"has_address": False, "declared_phones": []}}
+    listing = _snapshot([venue])
+    assert SD._identity_type(listing, listing["pages"], {}) == "Organization"
+
+
+def test_a_location_page_printing_its_own_address_still_earns_local_business():
+    find_us = {"url": "https://ropewalk-cafe.test/find-us", "page_type": "location",
+               "jsonld": [],
+               "contact_facts": {"street_hint": "14 Harbour Lane", "postcode_hint": "YO1 7HH",
+                                 "street_source": "main", "has_address": True,
+                                 "declared_phones": []}}
+    cafe = _snapshot([find_us])
+    assert SD._identity_type(cafe, cafe["pages"], {}) == "LocalBusiness"
+
+
 def test_many_branches_make_an_organization_not_a_local_business():
     """A 500-branch chain was handed markup calling it one storefront."""
     snapshot = _snapshot([_branch("York", "YO1 9TT"), _branch("Leeds", "LS1 1AA")])

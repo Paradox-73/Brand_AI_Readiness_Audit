@@ -85,6 +85,92 @@ def test_that_verdict_names_the_pattern_rather_than_counting():
     assert "no page states in one sentence what it is" in verdict
 
 
+def test_a_definition_on_the_about_page_is_not_reported_as_no_page_having_one():
+    """A programming-language foundation's verdict said "no page states in one
+    sentence what it is" and then quoted the site's own sentence "from its own
+    one-sentence definition"; its finding F-008 said "The homepage never says
+    what the brand is, though the about page does". The finding shares its root
+    cause with the one that found nothing, and the verdict read the cause."""
+    about = "https://www.quillwort-lang.test/about/"
+    sentence = ("Quillwort is a programming language that lets you work quickly and "
+                "integrate systems more effectively.")
+    findings = [{"root_cause": "no-org-schema", "severity": "medium",
+                 "id_hint": "no-organization-schema"},
+                {"root_cause": "no-entity-definition", "severity": "low",
+                 "id_hint": "definition-not-on-the-homepage"},
+                {"root_cause": "weak-corroboration", "severity": "medium"}]
+    signals = {"profile_breadth": 1, "entity_definition_found": True,
+               "entity_definition": sentence, "entity_definition_placement": "at the top of"}
+    pages = [{"url": "https://www.quillwort-lang.test/", "body_text": "Welcome to Quillwort"},
+             {"url": about, "body_text": "About. " + sentence + " Learn more."}]
+    verdict = compose._verdict(
+        COUNTS, findings, {}, signals, "Quillwort",
+        quotable=compose.what_an_assistant_can_repeat(signals, (), "Quillwort", pages))
+    assert "who the brand is" in verdict
+    assert "no page states" not in verdict
+    assert "one-sentence definition" not in verdict
+    assert "the homepage does not state in one sentence what it is, though {} does".format(
+        about) in verdict
+    assert "({})".format(about) in verdict
+    # And the finding still leads "Start here": the paragraph names it.
+    assert "definition-not-on-the-homepage" in compose.verdict_diagnosis(findings, signals)
+
+
+def test_where_the_page_is_unknown_the_verdict_still_does_not_say_no_page():
+    findings = [{"root_cause": "no-org-schema", "severity": "medium",
+                 "id_hint": "no-organization-schema"},
+                {"root_cause": "no-entity-definition", "severity": "low",
+                 "id_hint": "definition-not-on-the-homepage"},
+                {"root_cause": "weak-corroboration", "severity": "medium"}]
+    signals = {"profile_breadth": 0, "entity_definition_found": True,
+               "entity_definition": "Quillwort is the home of the Quillwort programming "
+                                    "language and its community."}
+    verdict = compose._verdict(COUNTS, findings, {}, signals, "Quillwort")
+    assert "no page states" not in verdict
+    assert "one-sentence definition" not in verdict
+    assert "though another crawled page does" in verdict
+
+
+def test_a_definition_elsewhere_does_not_on_its_own_make_the_identity_verdict():
+    """The same rule as homepage-only markup: the site has said what it is,
+    one link from the front door, so that alone is not "cannot establish who
+    the brand is"."""
+    findings = [{"root_cause": "no-entity-definition", "severity": "low",
+                 "id_hint": "definition-not-on-the-homepage"},
+                {"root_cause": "weak-corroboration", "severity": "medium"}]
+    signals = {"profile_breadth": 0, "entity_definition_found": True}
+    assert "who the brand is" not in compose._verdict(COUNTS, findings, {}, signals)
+    assert compose.verdict_diagnosis(findings, signals) == set()
+
+
+def _location_page(path, street="", postcode=""):
+    facts = {"has_address": bool(street), "declared_phones": []}
+    if street:
+        facts.update(street_hint=street, postcode_hint=postcode, street_source="main")
+    return {"url": "https://quillwort-lang.test" + path, "status": 200,
+            "page_type": "location", "content_type": "text/html",
+            "headings": {"h1": ["Our Events"]},
+            "paragraphs": ["Find a meeting near you and come along."],
+            "contact_facts": facts}
+
+
+def test_venue_listings_under_a_location_path_are_not_a_shared_audience_template():
+    """A language foundation's event calendar keeps a venue listing for each
+    user-group meeting at `/events/<calendar>/locations/<id>/`, one heading on
+    all of them and no address on any. `page_type` is read off the path, so
+    four of them met R-USE-CASE-PAGES' two-page bar on their own."""
+    venues = {"pages": [_location_page("/events/groups/locations/{}/".format(n))
+                        for n in (1418, 1494, 1584)]}
+    assert compose.audience_pages_running_one_template(venues) == []
+
+
+def test_branch_pages_printing_their_own_addresses_still_count():
+    branches = {"pages": [_location_page("/find-us/york", "14 Harbour Lane", "YO1 7HH"),
+                          _location_page("/find-us/leeds", "3 Canal Wharf", "LS1 4BR")]}
+    assert compose.audience_pages_running_one_template(branches) == sorted(
+        p["url"] for p in branches["pages"])
+
+
 def test_a_site_that_does_declare_itself_gets_the_ordinary_verdict():
     """The guard must not swallow every site into one diagnosis."""
     findings = [{"root_cause": "meta-hygiene", "severity": "high"}]

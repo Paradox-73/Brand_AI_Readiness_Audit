@@ -299,6 +299,223 @@ def test_a_tagline_after_a_dash_is_a_definition():
     assert FACTS._find_definition("Marks-and-Spencer sells clothing", "Marks", {}) is None
 
 
+def test_a_definition_cut_by_the_opening_window_is_quoted_whole():
+    """A programming language's about page had its first 150 words end on
+    "<Language> is developed under an OSI-approved open", and that fragment
+    was published as the site's definition, in the verdict, in a finding's
+    evidence and in a paste-ready line for the homepage."""
+    filler = "Our shelves are stocked every morning. " * 23
+    sentence = ("Brightpath is a demand-forecasting platform that tells mid-market retail "
+                "warehouses how much stock to order each morning across North America")
+    home = _page(HOST + "/", page_type="home", body_text=filler + sentence + ". Call us today.")
+    # The window really does end inside the sentence, or this proves nothing.
+    assert FACTS._top_words(home).endswith("warehouses how much")
+
+    result = SkillResult("fact-extractability-audit")
+    FACTS._check_entity_definition(result, {"pages": [home]}, [home], "Brightpath")
+    assert result.signals["entity_definition"] == sentence
+
+
+def test_a_sentence_the_window_cut_and_the_page_never_finishes_is_not_quoted():
+    """No full stop within the matcher's reach: the part is not returned as
+    though it were the sentence."""
+    filler = "Our shelves are stocked every morning. " * 23
+    runaway = ("Brightpath is a demand-forecasting platform that tells mid-market retail "
+               "warehouses " + "and stores and depots " * 120)
+    home = _page(HOST + "/", page_type="home", body_text=filler + runaway)
+    assert FACTS._read_the_opening(
+        home, lambda text: FACTS._find_definition(text, "Brightpath", {})) is None
+
+
+def test_a_sentence_in_the_passive_voice_is_not_a_definition():
+    """"<Language> is developed under an OSI-approved open source license, making
+    it freely usable and distributable, even for commercial use." is a
+    sentence about a licence. It was quoted as what the language is."""
+    for sentence in (
+            "Kestrel is developed under an OSI-approved open source license, making it "
+            "freely usable and distributable, even for commercial use.",
+            "Kestrel is widely used in scientific and numeric computing.",
+            "Kestrel is used successfully in thousands of real-world business applications "
+            "around the world, including many large and mission critical systems.",
+            "Harbour Loom is based in Leeds and has twelve weavers on staff.",
+            "Harbour Loom is run by a cooperative of twelve weavers.",
+            # A run of participles, in a product's footer naming its maker.
+            "Harbour Loom is designed, built, and backed by Fenwick Works, the people "
+            "behind two other products."):
+        assert FACTS._find_definition(sentence, sentence.split(" is ")[0], {}) is None, sentence
+
+    # The other way: a noun phrase after the copula is still a definition, a
+    # participle further into the sentence does not matter, and "built for"
+    # names who the product is for - which the mutation suite accepts on purpose.
+    found = FACTS._find_definition(
+        "Kestrel is a programming language that lets you work quickly.", "Kestrel", {})
+    assert found and "programming language" in found
+    found = FACTS._find_definition(
+        "Kestrel is a programming language used by millions of developers.", "Kestrel", {})
+    assert found and "programming language" in found
+    found = FACTS._find_definition(
+        "Brightpath is built for retail operations teams at mid-market companies.",
+        "Brightpath", {})
+    assert found and "retail operations teams" in found
+    # And the passive shape refuses one sentence, not the page: the search
+    # carries on to the definition after it.
+    found = FACTS._find_definition(
+        "Kestrel is developed under an OSI-approved open source license. "
+        "Kestrel is a programming language that lets you work quickly.", "Kestrel", {})
+    assert found and "programming language" in found
+
+
+def test_a_shortened_definition_is_never_offered_for_pasting():
+    """A sentence too long to quote whole is quoted with "…" as evidence, and
+    the paste-ready line is a template - never the first 300 characters of the
+    sentence, which would stop mid-clause on the owner's homepage."""
+    long = ("Brightpath is a demand-forecasting platform that tells mid-market retail "
+            "warehouses " + "how much stock to order, when to order it, and from which "
+            "supplier, " * 4 + "every morning")
+    home = _page(HOST + "/", page_type="home",
+                 body_text="Welcome to our shop, browse the catalogue and enjoy the view.")
+    about = _page(HOST + "/about/", page_type="about", body_text=long + ".")
+    pages = [home, about]
+
+    result = SkillResult("fact-extractability-audit")
+    FACTS._check_entity_definition(result, {"pages": pages}, pages, "Brightpath")
+    assert result.signals["entity_definition"].endswith(u"…")
+    [finding] = [f for f in result.findings if f["id_hint"] == "definition-not-on-the-homepage"]
+    action = finding["suggested_action"]
+    assert u"…" not in action["snippet"], action["snippet"]
+    assert u"…" not in action["how_to_fix"][0], action["how_to_fix"][0]
+    assert about["url"] in action["how_to_fix"][0]
+
+
+def test_a_heading_repeated_as_the_first_word_under_it_does_not_split_the_sentence():
+    """A programming language's getting-started page has "Installing" over "Installing
+    Kestrel is generally easy, ...". A full stop after both copies of the
+    heading made "Kestrel is generally easy, ..." a sentence of its own, and it
+    was quoted as the definition of the language."""
+    page = _page(HOST + "/about/gettingstarted/", page_type="about",
+                 headings={"h2": ["Installing"]},
+                 body_text="Installing Installing Kestrel is generally easy, and nowadays many "
+                           "Linux and UNIX distributions include a recent Kestrel.")
+    text = FACTS._readable_text(page)
+    assert "Installing. Installing Kestrel is generally easy" in text, text
+    assert FACTS._find_definition(text, "Kestrel", {}) is None
+
+
+def test_a_customer_quoted_on_the_homepage_is_not_the_sites_definition():
+    """A project-management product's homepage is a wall of customer quotes,
+    each block signed "<Person>, <Company>", and "<Product> makes it easy to
+    create shared understanding in our company." was printed as the site's own
+    one-sentence definition. A quote is somebody else speaking."""
+    blocks = [
+        "Since using Kestrel, our communication is drastically better. Mira Okafor, Fenwick Clinic",
+        "Kestrel makes us tighter as a group. Kestrel makes it easy to create shared "
+        "understanding in our company. Tomas Varga, Lindqvist Bygg",
+        "We don't have to chase each other any more. Ada Brennan, Harbour Loom",
+    ]
+    home = _page(HOST + "/", page_type="home", body_text=" ".join(blocks), prose_blocks=blocks)
+    result = SkillResult("fact-extractability-audit")
+    FACTS._check_entity_definition(result, {"pages": [home]}, [home], "Kestrel")
+    assert result.signals.get("entity_definition_found") is False, result.signals
+
+    # The site's own sentence on the same page is still its definition: the
+    # quotes are refused one at a time, and the search carries on past them.
+    own = ("Kestrel makes project-management software that keeps every discussion, "
+           "file and deadline for a team in one place.")
+    home = _page(HOST + "/", page_type="home", body_text=" ".join(blocks + [own]),
+                 prose_blocks=blocks + [own])
+    result = SkillResult("fact-extractability-audit")
+    FACTS._check_entity_definition(result, {"pages": [home]}, [home], "Kestrel")
+    assert result.signals["entity_definition"] == own.rstrip(".")
+
+
+def test_a_page_of_quotes_from_users_is_not_the_sites_definition():
+    """A programming language's page of user quotes, each in quotation marks
+    and followed by "said <name>, <title>, <company>". "<Language> is
+    everywhere at <studio>" was printed as the language's definition, and the
+    finding's title called the quotes page "the about page"."""
+    blocks = [
+        '"Kestrel is everywhere at our studio. Every frame we render has involved Kestrel '
+        'somewhere in the process," said Ida Marsh, Principal Engineer, Northlight Studios.',
+        '"Kestrel is fast enough for our site and lets a small team ship quickly," said '
+        'Colm Reddy, Software Architect, Fenwick Media.',
+    ]
+    home = _page(HOST + "/", page_type="home", body_text="Download. Documentation. Community.")
+    quotes = _page(HOST + "/about/quotes/", page_type="about", body_text=" ".join(blocks),
+                   prose_blocks=blocks)
+    pages = [home, quotes]
+    result = SkillResult("fact-extractability-audit")
+    FACTS._check_entity_definition(result, {"pages": pages}, pages, "Kestrel")
+    assert result.signals.get("entity_definition_found") is False, result.signals
+    # Without the blocks, the quotation marks in the page's text still say it.
+    quotes.pop("prose_blocks")
+    result = SkillResult("fact-extractability-audit")
+    FACTS._check_entity_definition(result, {"pages": pages}, pages, "Kestrel")
+    assert result.signals.get("entity_definition_found") is False, result.signals
+
+
+def test_a_page_filed_under_about_is_named_by_its_address():
+    """Every page under `/about/` is typed "about". A getting-started guide
+    there was called "the about page" in a finding's title, and a reader who
+    opens the about page does not find the sentence on it."""
+    home = _page(HOST + "/", page_type="home",
+                 body_text="Welcome to our shop, browse the catalogue and enjoy the view.")
+    guide = _page(HOST + "/about/getting-started/", page_type="about",
+                  body_text="Brightpath is a demand-forecasting platform for mid-market "
+                            "retail warehouses.")
+    pages = [home, guide]
+    result = SkillResult("fact-extractability-audit")
+    FACTS._check_entity_definition(result, {"pages": pages}, pages, "Brightpath")
+    [finding] = [f for f in result.findings if f["id_hint"] == "definition-not-on-the-homepage"]
+    assert "the about page" not in finding["title"], finding["title"]
+    assert guide["url"] in finding["title"], finding["title"]
+    assert FACTS._the_sites_about_page(_page(HOST + "/about/", page_type="about"))
+    assert FACTS._the_sites_about_page(_page(HOST + "/about-us", page_type="about"))
+
+
+def test_venue_listings_under_locations_do_not_make_a_missing_location_severe():
+    """A language foundation's event calendar keeps venue listings for other
+    people's meetups under `/locations/`, with no street and no postcode. The
+    path alone raised "never states its location or service area" to high on a
+    site with no premises. A page typed `location` counts only where it prints
+    an address of its own."""
+    home = _page(HOST + "/", page_type="home",
+                 body_text="Kestrel is a programming language for data pipelines.")
+    venues = [_page(HOST + "/events/calendar/locations/{}/".format(n), page_type="location",
+                    body_text="Kestrel user group meetup, upstairs room {}.".format(n))
+              for n in (1, 2)]
+    pages = [home] + venues
+    result = SkillResult("fact-extractability-audit")
+    FACTS._check_core_facts(result, {"pages": pages}, pages, "Kestrel")
+    finding = next(f for f in result.findings
+                   if f.get("id_hint") == "core-fact-missing-location-or-service-area")
+    assert finding["severity"] != "high", finding
+
+    # The markup that does declare premises still makes it high.
+    home["jsonld_types"] = ["LocalBusiness"]
+    result = SkillResult("fact-extractability-audit")
+    FACTS._check_core_facts(result, {"pages": pages}, pages, "Kestrel")
+    finding = next(f for f in result.findings
+                   if f.get("id_hint") == "core-fact-missing-location-or-service-area")
+    assert finding["severity"] == "high", finding
+
+
+def test_the_heading_finding_says_crawled_only_when_the_crawl_agrees():
+    """A crawl of 60 records, 59 of them read as pages, was reported as "10 of
+    the 59 crawled pages have no top-level heading" beside the 60 elsewhere in
+    the same report."""
+    pages = [_page(HOST + "/a", headings_in_markup={}), _page(HOST + "/b")]
+    result = SkillResult("fact-extractability-audit")
+    FACTS._check_heading_hierarchy(result, pages, crawled=3)
+    [finding] = result.findings
+    assert "pages this audit read" in finding["title"], finding["title"]
+    assert "crawled" not in finding["title"] and "crawled page" not in finding["evidence"]
+
+    result = SkillResult("fact-extractability-audit")
+    FACTS._check_heading_hierarchy(result, pages, crawled=2)
+    [finding] = result.findings
+    assert "crawled pages" in finding["title"], finding["title"]
+
+
 def test_a_maintainer_named_in_prose_is_not_reported_as_no_named_team():
     """A mail server's homepage reads "It is <Person>'s mail server ..." and
     "<Person> continues to maintain <Brand>". It was told "no founding year and

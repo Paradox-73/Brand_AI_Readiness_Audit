@@ -271,9 +271,18 @@ def test_a_retailer_with_a_basket_and_showrooms_is_an_online_seller():
 
 
 def test_a_cafe_that_sells_nothing_online_is_still_a_local_business():
+    """The find-us page prints the cafe's own street and postcode, as the
+    extractor records it. A `location` path with no address on the page is not
+    a place the site has; see `location_pages_with_an_address`. The home page
+    prints the same address first, so the page is found by its own address and
+    not lost to the one-entry-per-address fold across the whole site."""
+    address = {"street_hint": "1 Invented Lane", "postcode_hint": "AB1 2CD",
+               "street_source": "in the page body", "has_address": True}
     kind = site_kind(_snapshot("https://cafe.test", [
-        _page("https://cafe.test/", "home"),
-        _page("https://cafe.test/find-us", "location", "1 Invented Lane"),
+        _page("https://cafe.test/", "home", "1 Invented Lane, AB1 2CD",
+              contact_facts=dict(address)),
+        _page("https://cafe.test/find-us", "location", "1 Invented Lane, AB1 2CD",
+              contact_facts=dict(address)),
     ]))
     assert kind.kind == LOCAL_BUSINESS
 

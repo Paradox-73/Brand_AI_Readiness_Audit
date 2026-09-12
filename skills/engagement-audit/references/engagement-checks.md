@@ -91,10 +91,12 @@ operating system and a JavaScript library — each drew the only high-severity f
 report from a missing H1, on a first screen opening "X is a C-language library that implements
 a small, fast … SQL database engine".
 
-Recognise a CTA by *shape*, not by a phrase list: a link opening with an imperative verb
-("Browse the range", "Speak to the team"), or one styled as a button. Count `<button>` elements
-as well as links — a homepage whose action is a `<button>Get a quote</button>` was told at high
-severity that no call to action was found anywhere on it.
+Recognise a CTA by *shape*, not by a phrase list: a link or button opening with an imperative
+verb ("Browse the range", "Speak to the team"), or one styled as a button. Read `<button>`
+elements as well as links — a homepage whose action is a `<button>Get a quote</button>` was
+told at high severity that no call to action was found anywhere on it. Buttons that operate
+the site are set aside first, from structure (menu, footer, banner, toggle, dismiss, search
+form, dialog, cookie notice); `engagement-heuristics.md` lists them.
 
 **Say where the call to action was found, not why it was not found.** Position is measured
 against the body copy — the main region with the menu, header and footer taken out — so a call
@@ -103,6 +105,19 @@ rather than something this page says. Where the label is in neither the copy nor
 only claim available is that its position could not be measured. A menu item reading `Download
 overview`, ordinary anchor text inside a labelled `<nav>`, was reported as sitting "in markup a
 text-only reader never sees".
+
+**Name what was measured, and only the half that failed.** A project-management product's
+homepage — its menu, then an H1 naming what it is, then a `<button>` offering a three-minute
+video tour — was told it "does not tell an arriving visitor where they are or what to do
+next", quoting a testimonials link 2,072 characters down as its first call to action. The
+extractor read `<a href>` only. It now reads buttons too (`page_extract._cta`, which records
+`kind` and `kinds_read`), so that homepage's first call to action is the tour button. A late
+one is reported as "the first link or button worded as a call to action". A snapshot written
+before buttons were read has no `kinds_read`; there the sentence says "the first link", adds
+that where the page's buttons sit was not measured, and confidence drops to **medium**. The
+title, summary and fix follow the half that failed: a good H1 with a late next step is titled
+as a next-step problem and carries no advice to rewrite the H1, and the prose reading above,
+which answers the heading half, no longer downgrades a finding whose heading was fine.
 
 ---
 

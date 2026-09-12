@@ -284,6 +284,69 @@ def _title_problems(titles):
     return " ".join(f["evidence"] for f in result.findings)
 
 
+def test_a_count_over_fewer_pages_than_were_read_names_its_population():
+    """A programming-language foundation's report printed "54 of the 58 crawled
+    pages share a meta description" above "10 of the 59 crawled pages have no
+    top-level heading". Two near-identical user-group event pages were folded
+    into one before the meta count, and nothing said so, so two sizes of one
+    crawl read as a contradiction."""
+    body = ("The Harbourtown user group meets monthly to talk about code, share "
+            "projects and welcome newcomers of every level. ") * 6
+    result = SkillResult("structured-data-audit")
+    pages = []
+    for index in range(6):
+        page = _page("/events/{}/".format(index), title="Our Events | Larkmoor")
+        page["meta_description"] = "The official home of the Larkmoor rope guild"
+        page["body_text"] = "Event {} of the community calendar. ".format(index) * 30
+        pages.append(page)
+    # Two addresses carrying one event's text.
+    for url in ("/events/2204/", "/events/2207/"):
+        page = _page(url, title="Harbourtown User Group | Larkmoor")
+        page["meta_description"] = "The official home of the Larkmoor rope guild"
+        page["body_text"] = body
+        pages.append(page)
+    SD._check_titles_and_descriptions(result, pages, crawled=8)
+    hygiene = [f for f in result.findings if f["id_hint"] == "title-and-description-hygiene"]
+    assert hygiene, "the shared description was not reported"
+    assert "of the 7 distinct pages this audit read" in hygiene[0]["title"]
+    assert "crawled" not in hygiene[0]["title"]
+    evidence = hygiene[0]["evidence"]
+    assert "Counted over 7 distinct pages: of the 8 this crawl read, 1" in evidence
+    assert SITE + "/events/2207/" in evidence
+
+
+def test_a_count_over_every_page_read_keeps_the_plain_wording():
+    result = SkillResult("structured-data-audit")
+    pages = []
+    for index in range(5):
+        page = _page("/p{}".format(index), title="Page {} | Larkmoor".format(index))
+        page["meta_description"] = "One description on every page of the site, word for word."
+        page["body_text"] = "Page {} has its own text about rope. ".format(index) * (index + 10)
+        pages.append(page)
+    SD._check_titles_and_descriptions(result, pages, crawled=5)
+    hygiene = [f for f in result.findings if f["id_hint"] == "title-and-description-hygiene"]
+    assert hygiene[0]["title"].startswith("5 of the 5 crawled pages")
+    assert "Counted over" not in hygiene[0]["evidence"]
+
+
+def test_pages_read_are_not_called_crawled_when_the_crawl_fetched_more():
+    """A project-management product's report: "21 of the 58 crawled pages have
+    no meta description"
+    beside "the 58 of 60 page(s) this audit read" in the same report. The crawl
+    fetched 60 records and two were not pages; 58 is what was read."""
+    result = SkillResult("structured-data-audit")
+    pages = []
+    for index in range(5):
+        page = _page("/p{}".format(index), title="Page {} | Larkmoor".format(index))
+        page["meta_description"] = "One description on every page of the site, word for word."
+        page["body_text"] = "Page {} has its own text about rope. ".format(index) * (index + 10)
+        pages.append(page)
+    SD._check_titles_and_descriptions(result, pages, crawled=7)
+    hygiene = [f for f in result.findings if f["id_hint"] == "title-and-description-hygiene"]
+    assert hygiene[0]["title"].startswith("5 of the 5 pages this audit read")
+    assert "crawled" not in hygiene[0]["title"]
+
+
 def test_titles_in_an_unspaced_script_are_measured_in_that_script():
     assert "fall outside" not in _title_problems(_UNSPACED_TITLES)
 

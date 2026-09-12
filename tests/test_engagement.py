@@ -33,12 +33,14 @@ import importlib.util
 import os
 import sys
 
+import pytest
+
 from conftest import ROOT, SCRIPTS
 
 sys.path.insert(0, SCRIPTS)
 
 from audit_common import SkillResult, make_soup  # noqa: E402
-from page_extract import _breadcrumb, _links  # noqa: E402
+from page_extract import _breadcrumb, _cta, _links, extract_page  # noqa: E402
 
 
 def _module(skill, name):
@@ -313,3 +315,123 @@ def test_a_label_found_nowhere_claims_only_that_it_was_found_nowhere():
     finding = next(f for f in result.findings if f["root_cause"] == "no-orientation")
     assert "could not be measured" in finding["evidence"]
     assert "never sees" not in finding["evidence"]
+
+
+def _late_link(button_count):
+    return {"found": True, "text": "Read over a thousand more customer stories",
+            "url": HOME + "customers", "offset": 2072, "offset_known": True,
+            "within_first_1500": False, "button_count": button_count}
+
+
+def test_a_late_link_beside_unplaced_buttons_claims_only_the_link():
+    """A project-management product's homepage: its menu, then an H1 naming
+    what it is, then a `<button>` offering a three-minute video tour. The
+    extractor reads `<a href>` only, so the first thing it recognised was a
+    testimonials link 2,072 characters down, and the report said the homepage
+    "does not tell an arriving visitor where they are or what to do next" -
+    both halves, about a page with a good H1 and its next step under it."""
+    result = SkillResult("engagement-audit")
+    ENGAGEMENT._check_homepage_orientation(result, _homepage(_late_link(23)))
+    finding = next(f for f in result.findings if f["root_cause"] == "no-orientation")
+    assert "where they are" not in finding["title"]
+    assert "first link worded as a call to action" in finding["evidence"]
+    assert "23 buttons" in finding["evidence"] and "not measured" in finding["evidence"]
+    assert finding["confidence"] == "medium"
+    assert not any("H1" in step for step in finding["suggested_action"]["how_to_fix"])
+    # The prose reading answers the heading half, which did not fail.
+    assert finding["severity"] == "medium"
+    assert "headings and markup problem" not in finding["evidence"]
+
+
+def test_a_homepage_with_no_early_next_step_is_still_reported():
+    """The guard is about buttons nobody placed, not an amnesty: with no
+    button, no form and the only action link 2,072 characters down, the
+    finding stands at full confidence."""
+    result = SkillResult("engagement-audit")
+    ENGAGEMENT._check_homepage_orientation(result, _homepage(_late_link(0)))
+    finding = next(f for f in result.findings if f["root_cause"] == "no-orientation")
+    assert finding["severity"] == "medium" and finding["confidence"] == "high"
+    assert "2072 characters" in finding["evidence"]
+    assert "button" not in finding["evidence"]
+
+
+_TOUR_HOMEPAGE = """<html><head><title>Invented Planner</title></head><body>
+<header><nav><a href="/">Invented Planner</a><a href="/pricing">Sign up free</a>
+<a href="/features">Features</a><a href="/paths">Paths</a></nav></header>
+<div class="intro"><ul>
+<li><a href="/pricing"><span>Pricing and plans</span> - a free tier and paid upgrades</a></li>
+<li><a href="/features"><span>Features</span> - simple and capable</a></li>
+</ul>
+<h1>The plain project planner for small teams who want fewer meetings.</h1>
+<button class="video-trigger modal-trigger" data-src="/tour.mp4">
+<span>Take a three minute tour of Invented Planner</span></button></div>
+<div class="quotes">{quotes}
+<div><a href="/customers">Check out a thousand more customer stories</a></div></div>
+<main><h2>Does this sound familiar?</h2><p>{more}</p></main>
+<footer><a href="/privacy">Privacy</a></footer></body></html>"""
+
+
+def test_a_tour_button_under_the_heading_is_the_next_step():
+    """The same shape end to end, through the extractor: the `<button>` under
+    the H1 is the page's first call to action, and the late link is not."""
+    quotes = "".join("<blockquote><q>We finish work sooner and clients are happier "
+                     "than before, number {}.</q></blockquote>".format(n) for n in range(30))
+    html = _TOUR_HOMEPAGE.format(quotes=quotes, more="Invented Planner keeps work in one place. " * 20)
+    page = dict(extract_page(HOME, HOME, 200, {}, html, [], 0, 0, "seed", HOME.rstrip("/")))
+    assert page["cta"]["kind"] == "button"
+    assert page["cta"]["text"].startswith("Take a three minute tour")
+    assert page["cta"]["within_first_1500"]
+    result = SkillResult("engagement-audit")
+    ENGAGEMENT._check_homepage_orientation(result, page)
+    assert not [f for f in result.findings if f["root_cause"] == "no-orientation"]
+
+
+def _first_cta(body):
+    soup = make_soup("<html><body>{}</body></html>".format(body))
+    return _cta(soup, " ".join(soup.get_text(" ").split()), HOME.rstrip("/"), HOME)
+
+
+@pytest.mark.parametrize("body", [
+    # The site's menu and footer are its furniture, not this page's offer.
+    "<nav><button>Sign up for a trial</button></nav><main><p>Words.</p></main>",
+    "<main><p>Words.</p></main><footer><button>Subscribe to the letter</button></footer>",
+    # A disclosure toggle says so in markup, whatever its label.
+    '<main><button aria-expanded="false">Open the filters panel</button></main>',
+    # A consent notice, by its class, in any language.
+    '<div class="cookie-banner"><button>Get the full experience</button></div><main>x</main>',
+    # A search form's own submit.
+    '<main><form role="search"><input name="q"><button>Find a branch</button></form></main>',
+    # A bare control label.
+    "<main><button>Search</button><button>Play video</button></main>",
+])
+def test_a_button_that_operates_the_site_is_not_a_call_to_action(body):
+    assert not _first_cta(body)["found"]
+
+
+def test_a_form_submit_is_a_call_to_action_with_no_known_position():
+    """An `<input>` shows its `value`, which is not body copy: found, and
+    honestly unplaced."""
+    cta = _first_cta('<main><form action="/quote"><input name="a"><input name="b">'
+                     '<input type="submit" value="Get a quote"></form></main>')
+    assert cta["found"] and cta["kind"] == "button" and not cta["offset_known"]
+
+
+def test_a_button_is_read_by_its_markup_in_any_language():
+    """The verb list is English; button markup is not. The same degree of
+    language-independence the link test has, and no more."""
+    cta = _first_cta('<main><p>Texte.</p><button class="btn btn-primary">'
+                     "Réserver une table</button></main>")
+    assert cta["found"] and cta["kind"] == "button" and cta["in_main"]
+    assert cta["offset_known"] and cta["within_first_1500"]
+
+
+def test_a_late_link_with_buttons_read_claims_no_unmeasured_buttons():
+    """Buttons are read now, so a late first call to action is a measurement
+    of links and buttons both, and the caveat belongs to older snapshots only."""
+    cta = dict(_late_link(23), kind="link", kinds_read=["link", "button"])
+    result = SkillResult("engagement-audit")
+    ENGAGEMENT._check_homepage_orientation(result, _homepage(cta))
+    finding = next(f for f in result.findings if f["root_cause"] == "no-orientation")
+    assert "first link or button worded as a call to action" in finding["evidence"]
+    assert "not measured" not in finding["evidence"]
+    assert finding["confidence"] == "high"

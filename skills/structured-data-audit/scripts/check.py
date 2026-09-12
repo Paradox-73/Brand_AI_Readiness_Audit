@@ -79,6 +79,7 @@ from audit_common import (
     claimed_by_the_site, could_be_an_account, cut_at_read_cap,
     dominant_script, example_urls,
     find_prices, is_faceted_listing, is_listing_page, is_multi_location,
+    location_pages_with_an_address,
     is_question_heading, is_search_result_page, jsonld_type_names, listing_key,
     BRANCH_PAGE_MINIMUM, fold_declared_duplicates,
     load_snapshot, name_appears_in, names_match, ORG_IDENTITY_TYPES,
@@ -331,7 +332,9 @@ def run(snapshot):
     # `Brand` node named a different string from the `Organization` on 14
     # product pages and no check in this skill read the `Brand` node at all.
     _check_declared_brand_names(result, snapshot, pages, brand, platform)
-    _check_titles_and_descriptions(result, all_pages)
+    # The crawl's own count goes with the pages, because the title may call
+    # them "crawled" only where the two agree. See the title below.
+    _check_titles_and_descriptions(result, all_pages, crawled=len(snapshot.get("pages") or []))
     # `all_pages`, because the homepage is the front door whether or not the
     # type detector called it a content page, and `_is_the_homepage` falls back
     # to the audited origin when it did not.
@@ -643,8 +646,9 @@ def _identity_type(snapshot, pages, facts):
     `LocalBusiness` is a narrowing claim that has to be earned. Three things
     earn it, any one of which is the site saying so itself rather than us
     inferring it from an address in a footer: the site already declares a
-    visitable type somewhere, it publishes opening hours, or the crawl found
-    location pages, which is what a business with premises has.
+    visitable type somewhere, it publishes opening hours, or the crawl found a
+    location page printing a street address of its own, which is what a
+    business with premises has.
     """
     # A chain is an Organization that has local businesses, not a local
     # business. A national charity with donation centres and a restaurant group
@@ -656,11 +660,15 @@ def _identity_type(snapshot, pages, facts):
     # reads these files with an AST walk and counts every `.add(` call as a
     # finding being emitted, which is the right rule for `SkillResult.add`.
     address_forms = []
-    location_pages = 0
+    # Location pages that print an address of their own, one per address - not
+    # pages whose path says `location`. The path is all `page_type` reads, and
+    # a language foundation's event calendar keeps one venue listing per
+    # meeting at `/events/<calendar>/locations/<id>/`, no street and no
+    # postcode on any of them: one such page handed that site a LocalBusiness
+    # snippet, and four would have called it a chain.
+    location_pages = len(location_pages_with_an_address(snapshot))
     declares_visitable = False
     for page in (snapshot.get("pages") or []):
-        if page.get("page_type") == "location":
-            location_pages += 1
         for node in page.get("jsonld") or []:
             if not jsonld_type_names(node.get("@type")) & VISITABLE_JSONLD_TYPES:
                 continue
@@ -8539,8 +8547,16 @@ def _title_is_a_working_label(title):
     return bool((strong and len(own) <= 1) or (weak and not own))
 
 
-def _check_titles_and_descriptions(result, pages):
+def _check_titles_and_descriptions(result, pages, crawled=None):
     result.check("title-and-description")
+    # Every page the crawl read, before the folds below take out the copies.
+    # The folds shrink the denominator, and a report whose other checks count
+    # every page read printed "54 of the 58 crawled pages share a meta
+    # description" a few lines above "10 of the 59 crawled pages have no
+    # top-level heading" - on a programming-language foundation's site, where
+    # two user-group event pages were near-identical and one was folded. Two sizes of one crawl read as a contradiction unless each
+    # says which pages it counted.
+    read = list(pages)
     # A URL and its own declared canonical target are one page, and the site is
     # the authority on that. Counting both reported two of eleven "duplicate
     # title" pairs on a broadcaster that were a URL and its canonical, and
@@ -8774,7 +8790,20 @@ def _check_titles_and_descriptions(result, pages):
         verb, _, rest = fault.partition(" ")
         fault = {"have": "has", "share": "shares", "are": "is", "publish": "publishes",
                  "carry": "carries", "need": "needs"}.get(verb, verb) + " " + rest
-    title = "{} of the {} {}".format(count, plural(len(pages), "crawled page"), fault)
+    kept = {id(p) for p in pages}
+    counted_once = [p for p in read if id(p) not in kept]
+    # "Crawled" only where the number is the crawl's. A project-management
+    # product's report said "21 of the 58 crawled pages have no meta description" beside "the
+    # 58 of 60 page(s) this audit read": the crawl fetched 60 and two of them
+    # were not pages, so 58 is what was read, and calling it what was crawled
+    # contradicted the 60 in the same report.
+    if counted_once:
+        noun = ("distinct page this audit read", "distinct pages this audit read")
+    elif crawled is not None and crawled != len(read):
+        noun = ("page this audit read", "pages this audit read")
+    else:
+        noun = ("crawled page", "crawled pages")
+    title = "{} of the {} {}".format(count, plural(len(pages), *noun), fault)
     if len(headlines) > 1:
         more = len(headlines) - 1
         title += ", and {} more title or description {}".format(
@@ -8783,8 +8812,20 @@ def _check_titles_and_descriptions(result, pages):
         id_hint="title-and-description-hygiene",
         title=title,
         severity="medium" if severe else "low", confidence="high",
-        evidence="{}. Affected pages include: {}.".format(
-            "; ".join(problems), ", ".join(example_urls(sorted(affected) or [p["url"] for p in pages]))),
+        evidence="{}. Affected pages include: {}.{}".format(
+            "; ".join(problems), ", ".join(example_urls(sorted(affected) or [p["url"] for p in pages])),
+            # The population, named, wherever it is not every page read.
+            # "Repeats", not "is": the folded page that prompted this is a
+            # second event page for one user group whose text differs by four
+            # characters.
+            " Counted over {} distinct pages: of the {} this crawl read, {} ({}) {} another "
+            "crawled page, by its text or by the canonical it declares, and {} counted once "
+            "with it.".format(
+                len(pages), len(read), len(counted_once),
+                ", ".join(example_urls(sorted(p["url"] for p in counted_once))),
+                "repeats" if len(counted_once) == 1 else "repeat",
+                "is" if len(counted_once) == 1 else "are")
+            if counted_once else ""),
         # `meta-hygiene` asserts a negative - "N pages have no meta
         # description" - so it has to name what came back empty. Both sources
         # are read above and both are read off every page: the description tag

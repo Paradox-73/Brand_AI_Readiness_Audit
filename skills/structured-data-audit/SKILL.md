@@ -53,7 +53,7 @@ severity it can reach, and the real report behind every guard.
    an identity value that is *wrong* — a `name` that is really the page's `<title>`, a `url`
    pointing at a section rather than the site root — is **high**, because a consumer treats
    that field as ground truth about the company. Earn `LocalBusiness` from a visitable type,
-   opening hours or location pages — never from the fact that an address appears somewhere,
+   opening hours or a location page printing a street address of its own — never from the fact that an address appears somewhere,
    which nearly every organisation publishes for legal reasons.
 3. **One LocalBusiness per branch**, when three or more pages each print a street address no
    other page prints. **High** at five or more, otherwise **medium**. Read the addresses off the

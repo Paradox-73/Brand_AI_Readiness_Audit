@@ -75,7 +75,7 @@ from audit_common import (  # noqa: E402
     EVIDENCE_SENTENCE_MIN, example_urls, find_prices, is_listing_page, is_search_result_page,
     jsonld_type_names, language_of, letter_runs, load_snapshot, LOCAL_BUSINESS,
     looks_like_soft_404, MAX_PAGES, name_appears_in, name_forms, names_match,
-    name_candidates, name_the_site_spells,
+    name_candidates, name_the_site_spells, location_pages_with_an_address,
     not_a_telephone_number, ONLINE_SELLER, ORGANISATION, PERSONAL_OR_ACADEMIC,
     other_language_pages, pages_in_prose_language, pages_of, pct, plural, PRICE_BEARING_TYPES,
     primary_subtag, PROJECT, prose_skip_reason, PUBLIC_BODY, PUBLICATION,
@@ -1511,7 +1511,10 @@ def run(snapshot):
                      "headings-name-their-topic", "long-sentences"):
             result.skip(name, reason)
 
-    _check_heading_hierarchy(result, pages_of(snapshot))
+    # The crawl's own count goes with the pages, because the finding may call
+    # them "crawled" only where the two agree. See `_check_heading_hierarchy`.
+    _check_heading_hierarchy(result, pages_of(snapshot),
+                             crawled=len(snapshot.get("pages") or []))
     # Every page the crawl read, not only the ones the classifier recognised.
     #
     # This check asks "does the site state its price / contact / location
@@ -1566,7 +1569,7 @@ def _definition_in_a_repeated_line(page, brand_name, brand):
     same failure `_readable_text` exists to fix one level up.
     """
     for block in _quotable_blocks(page):
-        definition = _find_definition(block, brand_name, brand)
+        definition = _find_definition(block, brand_name, brand, page=page)
         if definition:
             return block, definition
     return None, None
@@ -1620,8 +1623,22 @@ def _readable_text(page):
     for heading in sorted(values, key=len, reverse=True):
         if heading[-1:] in ".!?" or len(heading) < 3:
             continue
-        rebuilt, last = [], 0
+        rebuilt, last, previous_end = [], 0, None
         for match in re.finditer(r"{}\s+".format(re.escape(heading)), text):
+            # A copy of the heading straight after the heading itself is the
+            # paragraph beneath it opening with the same words, not a second
+            # heading. A programming language's getting-started page has
+            # "Installing" over "Installing <Language> is generally easy, and
+            # nowadays many ... distributions include a recent <Language>". A
+            # stop after both copies turned the paragraph into "<Language> is
+            # generally easy, ..." - a sentence the page does not contain - and
+            # it was quoted as the definition of the language.
+            beneath = match.start() == previous_end
+            previous_end = match.end()
+            if beneath:
+                rebuilt.append(text[last:match.end()])
+                last = match.end()
+                continue
             # Only where a new block plainly starts. A heading is very often
             # also the opening words of the sentence beneath it - "Poppy" over
             # "Poppy is a car-sharing service" - and a full stop dropped in
@@ -1653,6 +1670,55 @@ def _top_words(page, limit=DEFINITION_WINDOW_WORDS):
     return ". ".join(part for part in lead if part).strip()
 
 
+# The rest of a sentence from where a match stopped: everything up to the next
+# terminator, and the terminator. The terminators are the ones the definition
+# templates stop a predicate at.
+_REST_OF_THE_SENTENCE_RE = re.compile(r"[^.!?]*[.!?]?")
+
+
+def _read_the_opening(page, reread):
+    """`reread` over the opening of `page`, never returning a sentence the window cut.
+
+    The window is a word count, and a word count ends wherever it ends. The
+    shared matcher lets a match run to the end of the text it is handed, on
+    purpose - a definition sitting on the cut has not stopped being one - so
+    what it returned was the sentence up to the cut. A programming language's
+    about page has its 150th word fall inside "<Language> is developed under an
+    OSI-approved open source license, ...", and "<Language> is developed under
+    an OSI-approved open" was printed as the site's definition, in the verdict
+    and in a finding's evidence, and handed to the owner as the paste-ready
+    line for the homepage.
+
+    So a match that reaches the end of the window is looked up in the page's
+    whole text, finished at its own full stop, and read again on its own:
+    every test the matcher applies is applied to the sentence that will be
+    quoted, not to the part of it the window held. Where it cannot be finished
+    - no full stop within the matcher's reach, or the whole sentence fails a
+    test its first 150 words passed - nothing comes back rather than the part.
+
+    `reread` is either matcher, called with text alone. It returns the
+    sentence, a `(subject, sentence)` pair, or nothing.
+    """
+    window = _top_words(page)
+    found = reread(window)
+    if not found:
+        return found
+    sentence = found if isinstance(found, str) else found[1]
+    # The matcher shortens a long sentence with a visible "…"; what it kept is
+    # still a run of the page's words.
+    core = sentence[:-1] if sentence.endswith(u"…") else sentence
+    flat = " ".join(window.split())
+    at = flat.find(core)
+    if at < 0 or not re.match(r"[^.!?]*$", flat[at + len(core):]):
+        return found
+    text = " ".join(_readable_text(page).split())
+    start = text.find(core)
+    if start < 0:
+        return None
+    end = _REST_OF_THE_SENTENCE_RE.match(text, start + len(core)).end()
+    return reread(text[start:end]) or None
+
+
 # A translation key an i18n library printed where its text should be:
 # `Translation missing: en.general.social.share_on_facebook`, or
 # `[missing "en.cart.title" translation]`. The render skill reports these as
@@ -1671,7 +1737,110 @@ def _without_missing_translations(text):
     return " ".join(_MISSING_TRANSLATION_RE.sub(" ", text).split())
 
 
-def _find_definition(text, brand_name, brand=None):
+# A quotation: a matched pair of quotation marks and what sits between them.
+# Pairs, not a count of opening marks, so German's „...“ and a stray inch mark
+# outside any pair are not read as the start of a quotation that never closes.
+_QUOTED_SPAN_RE = re.compile(
+    u'"[^"]{1,600}"|“[^”]{1,600}”|«[^»]{1,600}»|„[^“”]{1,600}[“”]'
+    u"|「[^」]{1,600}」|『[^』]{1,600}』")
+
+# The first person, as a customer quoted on the page speaks: "in our company",
+# "makes us tighter as a group". Case is part of the test for "us", so the
+# country's abbreviation is not read as the pronoun.
+_FIRST_PERSON_RE = re.compile(r"\b(?:I|[Ww]e|[Uu]s|[Oo]urs?|[Mm]y|[Mm]e)\b")
+
+# Where a sentence ends, for finding the line after a block's last sentence.
+_BLOCK_SENTENCE_END_RE = re.compile(u"[.!?…。！？।؟]")
+
+
+def _attribution_line(text):
+    """Is `text` a person's name and where they are from - "Ada Brennan, Harbour Loom"?
+
+    The line a testimonial is signed with. Two to four capitalised words, a
+    comma, and a capitalised name after it with no sentence in it. Read by
+    case rather than by a vocabulary, so it holds for any script that has
+    capitals; a script with none gets no attribution rather than a wrong one.
+    """
+    text = (text or "").strip().lstrip(u"-–—~ ").strip()
+    name, comma, where = text.partition(",")
+    where = where.strip()
+    if not comma or not where or len(where) > 120:
+        return False
+    words = name.split()
+    if not 2 <= len(words) <= 4:
+        return False
+    if not all(word[:1].isupper() and re.sub(r"[-'’.]", "", word).isalpha() for word in words):
+        return False
+    return where[:1].isupper() and not _BLOCK_SENTENCE_END_RE.search(where.rstrip(u".…"))
+
+
+def _signed_by_someone(block):
+    """Does this block end in an attribution line after the sentences it quotes?"""
+    ends = [match.end() for match in _BLOCK_SENTENCE_END_RE.finditer(block)]
+    return bool(ends) and ends[-1] < len(block) and _attribution_line(block[ends[-1]:])
+
+
+def _inside_a_quotation(text, start):
+    """Does the sentence starting at `start` open inside a pair of quotation marks?
+
+    Where it starts, not where it ends. The matcher reads on to the next full
+    stop, and a quote that closes on a comma - `"<Brand> is fast enough for
+    our site," said <name>, <title>, <company>.` - carries the match past the
+    closing mark and into the attribution.
+    """
+    return any(span.start() < start < span.end() for span in _QUOTED_SPAN_RE.finditer(text))
+
+
+def _spoken_by_someone_else(page, sentence):
+    """Is this sentence somebody else talking about the brand, quoted on the page?
+
+    A definition is the site saying what it is. A project-management
+    product's homepage is a wall of customer quotes, each block signed with a
+    name and a company:
+
+        <Product> makes us tighter as a group. <Product> makes it easy to
+        create shared understanding in our company. <Person>, <Company>
+
+    and the second sentence was printed as the site's own one-sentence
+    definition. A programming language's page of user quotes did the same
+    with "<Language> is everywhere at <studio>", a sentence inside quotation
+    marks and followed by "said" and an engineer's name. Both sentences name
+    the brand as their subject, which is all the shared matcher asks of a
+    speaker; neither is the site speaking.
+
+    Two signs, read on the page's own blocks where the crawl kept them: the
+    sentence sits inside a pair of quotation marks, or its block is signed
+    with an attribution line - by a speaker who talks in the first person, or
+    on a page where other blocks are signed the same way, which is what a
+    wall of testimonials is. Without blocks, only the quotation marks, over
+    the page's text: with no block boundaries there is nothing to say where a
+    signature line ends.
+    """
+    core = sentence[:-1] if sentence.endswith(u"…") else sentence
+    blocks = [" ".join(str(block or "").split()) for block in (page.get("prose_blocks") or [])]
+    signed = [_signed_by_someone(block) for block in blocks]
+    held = False
+    for index, block in enumerate(blocks):
+        at = block.find(core)
+        if at < 0:
+            continue
+        held = True
+        if _inside_a_quotation(block, at):
+            return True
+        # Signed in the block itself, or by the block straight after it, where
+        # a `<cite>` or a caption under a `<blockquote>` came out on its own.
+        attributed = signed[index] or (
+            index + 1 < len(blocks) and _attribution_line(blocks[index + 1]))
+        if attributed and (_FIRST_PERSON_RE.search(block) or sum(signed) >= 2):
+            return True
+    if held:
+        return False
+    text = " ".join(_readable_text(page).split())
+    at = text.find(core)
+    return at >= 0 and _inside_a_quotation(text, at)
+
+
+def _find_definition(text, brand_name, brand=None, page=None):
     """A quotable one-line definition on this text, or None.
 
     The rule itself - the four sentence shapes, the vocabulary that judges a
@@ -1683,8 +1852,16 @@ def _find_definition(text, brand_name, brand=None):
 
     `None` rather than "", because every caller here and every test of this
     function compares the result against `None`.
+
+    One filter on top, through the `accept` the shared rule offers a caller,
+    and only where the caller says which page the text is from: a sentence
+    somebody else says about the brand - a quoted customer - is not the
+    site's definition. See `_spoken_by_someone_else`.
     """
-    return defining_sentence(text, brand_name, brand) or None
+    def accept(sentence):
+        return page is None or not _spoken_by_someone_else(page, sentence)
+
+    return defining_sentence(text, brand_name, brand, accept=accept) or None
 
 
 def _declares_a_definition(text, brand_name, brand=None):
@@ -2012,6 +2189,26 @@ def _definition_is_in_the_wrong_place(result, snapshot, pages, brand_name, brand
 
     placement, severity = _DEFINITION_PLACEMENTS[where]  # noqa: E501 - see DEFINITION_PLACEMENT_KEYS
     where_it_is = placement.format(page["url"])
+    # Only a whole sentence is offered for pasting. The matcher shortens a
+    # long one with "…", and a paste-ready line that stops mid-clause puts a
+    # broken sentence at the top of the owner's homepage - which is what a
+    # programming language's site was handed when its about page's sentence
+    # was cut. Shortened,
+    # the sentence is still quoted as evidence, and the owner is sent to the
+    # page for the rest of it.
+    whole = not definition.endswith(u"…")
+    if whole:
+        paste_step = 'Put the sentence in the first paragraph of {} as plain HTML text: "{}"'.format(
+            home["url"], definition)
+        snippet = "<h1>{brand}</h1>\n<p><strong>{sentence}</strong></p>".format(
+            brand=brand_name, sentence=definition)
+    else:
+        paste_step = ("Put the sentence in the first paragraph of {} as plain HTML text, copied "
+                      "in full from {}; it is too long to quote whole here, so the version above "
+                      "is shortened.".format(home["url"], page["url"]))
+        snippet = ("<h1>{brand}</h1>\n"
+                   "<p><strong>{brand} is a &lt;category&gt; that &lt;does what&gt; for "
+                   "&lt;whom&gt;.</strong></p>".format(brand=brand_name))
     result.signal("entity_definition_placement", where)
     result.add(
         id_hint="definition-not-on-the-homepage",
@@ -2023,9 +2220,15 @@ def _definition_is_in_the_wrong_place(result, snapshot, pages, brand_name, brand
             # "another page" was printed over a line sitting in the homepage's
             # own footer, and an instruction to look at another page for a
             # sentence on this one is one a reader checks and cannot follow.
+            # And "the about page" only for the site's about page. Every page
+            # under `/about/` is typed "about", and a programming language's
+            # title called `/about/gettingstarted/` "the about page" - a page
+            # a reader then
+            # opens and does not find the sentence on. Any other page is named
+            # by its address, which cannot be mistaken for a different page.
             "a line in the site's own furniture" if where == "in a line repeated across"
-            else "the about page" if page["page_type"] == "about"
-            else "another page"),
+            else "the about page" if _the_sites_about_page(page)
+            else page["url"]),
         severity=severity,
         # One page, read in full, twice, by two detectors that share nothing.
         # A larger crawl would not make this claim stronger and a smaller one
@@ -2057,8 +2260,7 @@ def _definition_is_in_the_wrong_place(result, snapshot, pages, brand_name, brand
         mechanism="B", root_cause="no-entity-definition",
         summary="Copy that sentence, or one like it, into the first paragraph of the homepage.",
         how_to_fix=[
-            'Put the sentence in the first paragraph of {} as plain HTML text: "{}"'.format(
-                home["url"], definition),
+            paste_step,
             "Keep the wording the same on both pages. Two different sentences describing the "
             "same brand give an assistant two answers and it will pick one at random.",
             # "Above the product grid" was delivered to a public library and a
@@ -2082,9 +2284,21 @@ def _definition_is_in_the_wrong_place(result, snapshot, pages, brand_name, brand
                   "main content is a definition it will not quote, and the brand gets "
                   "described in whatever words somebody else used instead.",
         affected_pages=[home["url"]],
-        snippet="<h1>{brand}</h1>\n<p><strong>{sentence}</strong></p>".format(
-            brand=brand_name, sentence=definition),
+        snippet=snippet,
     )
+
+
+def _the_sites_about_page(page):
+    """Is this the site's about page, rather than a page filed under it?
+
+    One path segment: `/about/`, `/about-us`, `/company`. The type detector
+    reads the first segment, so `/about/gettingstarted/` and `/about/quotes/`
+    are "about" pages to it, and to a reader they are not.
+    """
+    if page.get("page_type") != "about":
+        return False
+    segments = [s for s in urlsplit(page.get("url") or "").path.split("/") if s]
+    return len(segments) <= 1
 
 
 def _front_door_first(snapshot, identity):
@@ -2140,12 +2354,15 @@ def _check_entity_definition(result, snapshot, pages, brand_name, brand=None):
     identity = _front_door_first(snapshot, identity)
     found = None
     for page in identity:
-        definition = _find_definition(_top_words(page), brand_name, brand)
+        # Read through `_read_the_opening`, so a sentence the window ends in the
+        # middle of is quoted whole or not at all.
+        definition = _read_the_opening(
+            page, lambda text: _find_definition(text, brand_name, brand, page=page))
         if definition:
             found = (page, definition, "at the top of")
             break
         if page.get("page_type") == "home":
-            definition = _find_definition(_readable_text(page), brand_name, brand)
+            definition = _find_definition(_readable_text(page), brand_name, brand, page=page)
             if definition:
                 found = (page, definition, "further down")
                 break
@@ -2172,7 +2389,7 @@ def _check_entity_definition(result, snapshot, pages, brand_name, brand=None):
     # the whole of them rather than the opening.
     if found is None:
         for page in identity:
-            definition = _find_definition(_readable_text(page), brand_name, brand)
+            definition = _find_definition(_readable_text(page), brand_name, brand, page=page)
             if definition:
                 found = (page, definition, "further down")
                 break
@@ -2192,7 +2409,7 @@ def _check_entity_definition(result, snapshot, pages, brand_name, brand=None):
             # else it quotes a sentence back to a site.
             if is_listing_page(page):
                 continue
-            definition = _find_definition(_readable_text(page), brand_name, brand)
+            definition = _find_definition(_readable_text(page), brand_name, brand, page=page)
             if definition:
                 found = (page, definition, "on")
                 break
@@ -2301,7 +2518,7 @@ def _check_entity_definition(result, snapshot, pages, brand_name, brand=None):
     # name disagreement rather than as this site's own definition.
     if found is None and declared is None and under_another_name is None:
         for page in identity:
-            other = some_subject_is_defined(_top_words(page))
+            other = _read_the_opening(page, some_subject_is_defined)
             if (other and not names_match(brand_name, other[0])
                     and _the_site_calls_itself_this(other[0], snapshot, pages, brand)):
                 under_another_name = (page, "a sentence in the text", other, "")
@@ -2488,7 +2705,7 @@ def _check_entity_definition(result, snapshot, pages, brand_name, brand=None):
     )
 
 
-def _check_heading_hierarchy(result, pages):
+def _check_heading_hierarchy(result, pages, crawled=None):
     """Every page a machine can fetch, not only the content-typed ones.
 
     An `<h1>` is expected on any page. Read across content types only, this
@@ -2509,6 +2726,15 @@ def _check_heading_hierarchy(result, pages):
     # exactly those pages.
     unread = [p for p in pages if p.get("render_skipped")]
     pages = [p for p in pages if not p.get("render_skipped")]
+    # "Crawled" only where the number is the crawl's. A programming language's
+    # report said "10 of the 59 crawled pages have no top-level heading" and a
+    # project-management product's said "each of the 58 crawled pages carries
+    # a top-level heading", both beside a crawl of 60 in the same report: the
+    # difference is records that were not pages or were not read, and calling
+    # what was read what was crawled contradicts the crawl's own figure. The
+    # structured-data title check makes the same choice.
+    noun = (("crawled page", "crawled pages") if crawled is None or crawled == len(pages)
+            else ("page this audit read", "pages this audit read"))
     if unread:
         result.signal("pages_not_judged_as_unrendered_stubs",
                       sorted(p["url"] for p in unread)[:10])
@@ -2550,7 +2776,7 @@ def _check_heading_hierarchy(result, pages):
                     "each of the {} carries a top-level heading. Pages with more than one H1, "
                     "and heading levels skipped in sequence, are deliberately not treated as "
                     "defects here and were not counted".format(
-                        plural(len(pages), "crawled page")))
+                        plural(len(pages), *noun)))
     else:
         affected = {p["url"] for p in no_h1}
         # The title says what was counted. It read "Heading structure does not
@@ -2562,10 +2788,10 @@ def _check_heading_hierarchy(result, pages):
         share = len(no_h1) / float(len(pages))
         if homepage_bare:
             title = "{} of the {} have no top-level heading, the homepage among them".format(
-                len(no_h1), plural(len(pages), "crawled page"))
+                len(no_h1), plural(len(pages), *noun))
         else:
             title = "{} of the {} have no top-level heading".format(
-                len(no_h1), plural(len(pages), "crawled page"))
+                len(no_h1), plural(len(pages), *noun))
         result.add(
             id_hint="heading-structure-unclear",
             title=title,
@@ -2581,8 +2807,9 @@ def _check_heading_hierarchy(result, pages):
             # unquoted. The homepage, or a quarter of the site, is the line.
             severity="medium" if (homepage_bare or share >= 0.25) else "low",
             confidence="medium",
-            evidence="{} of {} crawled page(s) have no H1. Examples: {}.".format(
-                len(no_h1), len(pages), ", ".join(example_urls(sorted(affected)))),
+            evidence="{} of {} have no H1. Examples: {}.".format(
+                len(no_h1), plural(len(pages), *noun),
+                ", ".join(example_urls(sorted(affected)))),
             checked=("the h1 elements, including any alt text they carry, on every crawled "
                      "page whose own title does not say it is an error page - read twice, "
                      "once from the visible document and once from the whole markup, so an "
@@ -4127,7 +4354,12 @@ def _check_core_facts(result, snapshot, pages, brand_name, english=True):
     area_page, area_quote = (stated(SERVICE_AREA_RE, states_the_fact=_states_a_service_area,
                                     among=[p for p in pages if not _a_terms_or_programme_page(p)])
                              if english else (None, None))
-    local_signals = bool(by_type.get("location")) or any(
+    # A location page counts only where it prints an address of its own. The
+    # type comes from the path alone, and a language foundation's event
+    # calendar keeps venue listings for other people's meetups under
+    # `/locations/` - no street, no postcode - which raised "never states its
+    # location or service area" to high on a site that has no premises.
+    local_signals = bool(location_pages_with_an_address(snapshot)) or any(
         "localbusiness" in {t.lower() for t in p.get("jsonld_types") or []} for p in pages)
     location_checked = (
         "the postal addresses the extractor read from the visible text and the `<address>` "

@@ -756,11 +756,31 @@ def _check_homepage_orientation(result, home, english=True, stub_home=None,
     # is the whole of what a next step is. See `_onward_links_of_a_document`.
     onward = _onward_links_of_a_document(home, kind)
     problems = []
+    # The finding has two halves - where am I, and what do I do next - and its
+    # title used to claim both whichever one failed. A project-management
+    # product whose H1 is a full sentence naming what it is and who it suits
+    # was told its homepage "does not tell an arriving visitor where they
+    # are", on the strength of a call to action measured late. Each half is
+    # recorded separately so the title, the summary and the fix name only
+    # what failed.
+    heading_problem = False
+    next_step_problem = False
+    # That same product's next step is a `<button>` offering a three-minute
+    # video tour, directly under the H1. The extractor then read links only,
+    # so the first link worded as an action - a testimonials link 2,072
+    # characters down - was quoted as "the first call to action". It reads
+    # buttons now and lists them in `kinds_read`; on a snapshot written before
+    # that, all that is known of the buttons is how many there are, and a late
+    # link beside them is not proof of a late next step.
+    buttons_read = "button" in (cta.get("kinds_read") or ())
+    buttons_unplaced = False
 
     if not h1s:
         problems.append("the homepage has no H1")
+        heading_problem = True
     elif english and h1s[0].strip().lower() in GENERIC_H1:
         problems.append('the H1 is "{}", which says nothing about what the business does'.format(h1s[0]))
+        heading_problem = True
 
     if not english:
         if not problems:
@@ -772,6 +792,7 @@ def _check_homepage_orientation(result, home, english=True, stub_home=None,
     elif not cta.get("found") and not cta.get("button_count") and not next_step_forms \
             and not supplier and not onward:
         problems.append("no call-to-action link, button or form was found anywhere in the page")
+        next_step_problem = True
     # `cta.get("found")` guards both arms below because `within_first_1500` is
     # False when nothing was found at all, and the else arm then formatted
     # `cta["text"]`, which is "". A homepage with a good H1 and four <button>
@@ -780,9 +801,28 @@ def _check_homepage_orientation(result, home, english=True, stub_home=None,
     # specific call to action exists and is invisible, about a page where no
     # call-to-action anchor exists to be quoted.
     elif cta.get("found") and not cta.get("within_first_1500"):
+        next_step_problem = True
         if cta.get("offset_known"):
-            problems.append('the first call to action ("{}") appears {} characters into the '
-                            "body text".format(cta.get("text"), cta.get("offset")))
+            # The sentence names what was measured, and says what was not.
+            # The extractor reads button labels as well as links, and says so
+            # in `kinds_read`; a snapshot written before it did lacks the
+            # field, and all this check then knows of the buttons is how many
+            # there are.
+            if buttons_read:
+                late = ('the first link or button worded as a call to action (the {} "{}") '
+                        "appears {} characters into the body text".format(
+                            cta.get("kind") or "link", cta.get("text"), cta.get("offset")))
+            else:
+                late = ('the first link worded as a call to action ("{}") appears {} '
+                        "characters into the body text".format(
+                            cta.get("text"), cta.get("offset")))
+            if cta.get("button_count") and not buttons_read:
+                buttons_unplaced = True
+                late += ("; the page also carries {}, and this crawl records how many there "
+                         "are but not what they say or where they sit, so whether one of them "
+                         "is an earlier next step was not measured".format(
+                             plural(cta.get("button_count"), "button")))
+            problems.append(late)
         elif _is_site_chrome(home, cta.get("url")):
             # What "not in the page copy" actually means when the link is a
             # menu item. `body_text` is the main region with the site's
@@ -884,7 +924,10 @@ def _check_homepage_orientation(result, home, english=True, stub_home=None,
     # nothing.
     no_cta = (english and not cta.get("found") and not cta.get("button_count")
               and not next_step_forms and not supplier and not onward)
-    if orients_in_prose and not no_cta:
+    # The prose reading answers the heading half only. Applied when the heading
+    # was fine, it told a homepage whose only problem was a late call to action
+    # that it had "a headings and markup problem".
+    if orients_in_prose and not no_cta and heading_problem:
         severity = "low"
         problems.append("the opening text does explain what this is, so this is a headings "
                         "and markup problem rather than a visitor who cannot tell where they are")
@@ -893,39 +936,61 @@ def _check_homepage_orientation(result, home, english=True, stub_home=None,
     else:
         severity = "medium"
 
+    if severity == "low":
+        title = "The homepage explains itself in prose but not in its headings"
+    elif heading_problem and next_step_problem:
+        title = "The homepage does not tell an arriving visitor where they are or what to do next"
+    elif heading_problem:
+        title = "The homepage's heading does not tell an arriving visitor where they are"
+    elif no_cta:
+        title = "The homepage gives an arriving visitor nothing to do next"
+    else:
+        title = "The homepage does not show an arriving visitor what to do next in its own copy"
+
     result.add(
         id_hint="homepage-does-not-orient-visitors",
-        title="The homepage does not tell an arriving visitor where they are or what to do next"
-              if severity != "low" else
-              "The homepage explains itself in prose but not in its headings",
-        severity=severity, confidence="high",
+        title=title,
+        severity=severity,
+        # A late link beside buttons nobody placed is a claim about the links
+        # only; the evidence says so, and the confidence says so too.
+        confidence="medium" if buttons_unplaced else "high",
         # `str.capitalize` lower-cases everything after the first character, so
         # a homepage whose button reads "Get a quote" was quoted back as
         # 'the first call to action ("get a quote")'. The site's own words are
         # not ours to re-case; only the first letter of our sentence is.
         evidence="{}.".format(_sentence_case("; ".join(problems))),
         mechanism="G", root_cause="no-orientation",
-        summary="Lead with a specific H1 and put one obvious next step in the first screen.",
-        how_to_fix=[
+        # Same rule as the title: advice for the half that failed only. "Replace
+        # the H1" printed under a finding whose H1 was fine asks the owner to
+        # rewrite the one part of the page that works.
+        summary=("Lead with a specific H1 and put one obvious next step in the first screen."
+                 if heading_problem and next_step_problem else
+                 "Lead with a heading that names what this is and who it is for."
+                 if heading_problem else
+                 "Put one obvious next step in the first screen of the page's own copy."),
+        how_to_fix=[step for step, needed in (
             # "what the business does" was written for a company. A project, a
             # public body and a village hall are none of them a business, and
             # the sentence says the same thing without the noun.
-            "Replace the H1 with a line naming what this is and who it is for.",
+            ("Replace the H1 with a line naming what this is and who it is for.",
+             heading_problem),
             # The examples used to be "See pricing" and "Book a table", offered
             # to a free command-line tool with no purchase funnel and to a
             # charity. Naming the shape rather than the sector makes the advice
             # usable by whoever is reading it.
             # A person's or a single document's site gets the document's
             # shape of next step, not a business's.
-            "Put one link onward within the first screen - the document's source, its author, "
-            "or its other language editions - worded as what the reader gets there."
-            if kind is not None and kind.is_certainly(PERSONAL_OR_ACADEMIC) else
-            "Put one primary call to action within the first screen of content, worded as the "
-            "specific thing the visitor came to do - whatever that is on this site, whether it "
-            "is downloading, booking, donating, reading the documentation or seeing the prices "
-            "- rather than \"Learn more\".",
-            "Keep one primary action; competing buttons of equal weight split attention.",
-        ],
+            ("Put one link onward within the first screen - the document's source, its author, "
+             "or its other language editions - worded as what the reader gets there."
+             if kind is not None and kind.is_certainly(PERSONAL_OR_ACADEMIC) else
+             "Put one primary call to action within the first screen of content, worded as the "
+             "specific thing the visitor came to do - whatever that is on this site, whether it "
+             "is downloading, booking, donating, reading the documentation or seeing the prices "
+             "- rather than \"Learn more\".",
+             next_step_problem),
+            ("Keep one primary action; competing buttons of equal weight split attention.",
+             next_step_problem),
+        ) if needed],
         effort="low", owner="marketing",
         rationale="A visitor sent by an assistant already knows roughly what they "
                   "want. They are checking whether this is the right place. A generic heading "
@@ -939,10 +1004,10 @@ def _check_homepage_orientation(result, home, english=True, stub_home=None,
         # a call to action is a fixed list of opening verbs and class names,
         # and a link this audit does not recognise reads to it as no link.
         checked=("the heading the homepage leads with",
-                 "links in the first {:,} characters of copy whose first word is one of the "
+                 "{} in the first {:,} characters of copy whose first word is one of the "
                  "action verbs this audit recognises (get, book, download, contact and the "
                  "like) or whose class or id contains btn, button or cta".format(
-                     CTA_BYTE_WINDOW),
+                     "links and buttons" if buttons_read else "links", CTA_BYTE_WINDOW),
                  "buttons and non-search forms anywhere on the page",
                  "the opening screen of body text"),
     )

@@ -22,7 +22,7 @@ The **rests on an absence** column is the second gate, below.
 | `R-PRESS-PAGE` | no press page, the site could have a press office, and either a core fact is missing or the site contradicts itself about one | D | **yes** |
 | `R-DATE-SIGNALS` | article pages carry no date signals | D | **when it fires on the absence half.** A `no-date-signal` or `stale-content` finding is a date that was read; "no date signals" and a low coverage share are counts over the pages the crawl reached |
 | `R-COMPARISON-PAGES` | the site sells something, no comparison page was found, the site's own copy already compares what it sells with something else ("unlike…", "better than…"), and the site could be an online seller, local business, organisation or project | E | **yes** — the selling half and the quoted sentence are measured, the missing comparison page is not |
-| `R-USE-CASE-PAGES` | 2+ location, product or service pages, and the site could have commercial audiences | E | no — two such pages must have been read |
+| `R-USE-CASE-PAGES` | 2+ location, product or service pages sharing one H1 and opening paragraph, a location page counting only where it prints a street address of its own, and the site could have commercial audiences | E | no — two such pages must have been read |
 | `R-HTML-FOR-PDF` | a `pdf-locked-facts` finding was raised | C | no — a finding fired |
 | `R-EMAIL-TEXT-FIRST` | a newsletter signup was detected | F | no — a form was found |
 | `R-WAYFINDING` | a `dead-end` finding, or 2+ deep pages whose only onward links are the site's own menu | G | no — every branch names something read |
@@ -140,7 +140,10 @@ What changed, and what did not:
   product or service pages, not one of any of them. This entry asks somebody to split a
   template that serves several audiences at once, and a site with one such page has no
   template to split. It is also `might_be`-gated, because "the three audiences or locations
-  that matter commercially" is a sentence about a business.
+  that matter commercially" is a sentence about a business. A page typed `location` counts
+  only where it prints a street address of its own: the type is read off the URL path, and a
+  language foundation's venue listings for other groups' meetings, at `/locations/<id>`
+  with no address, met the two-page bar without being a place the site serves.
 - **`R-BRAND-TERMINOLOGY`** is now on two measurements, neither of them a page type. **Two
   pages that sell**, asking `sells_something` of one page at a time so the definition cannot
   drift from the one the pricing checks use — on a six-page crawl of an open-source project

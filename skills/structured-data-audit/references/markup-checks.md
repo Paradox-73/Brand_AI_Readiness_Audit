@@ -119,7 +119,9 @@ schema.org's type for a single-location storefront, clinic or restaurant, and ch
 address appeared anywhere on the site handed a global software foundation and an international
 relief charity paste-ready markup declaring them local businesses. Nearly every organisation
 publishes an address, for legal reasons. Earn `LocalBusiness` from the site declaring a visitable
-type itself, publishing opening hours, or having location pages.
+type itself, publishing opening hours, or having a location page printing a street address of its
+own. A page typed `location` by its path alone does not count: a venue listing for somebody else's
+event sits at `/locations/<id>` too.
 
 ### Which string is the name
 

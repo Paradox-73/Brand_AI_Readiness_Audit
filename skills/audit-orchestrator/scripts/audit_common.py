@@ -5035,61 +5035,103 @@ def pages_with_their_own_address(snapshot):
 
     Reading the addresses off the pages breaks that circle.
     """
-    seen, pages = {}, []
+    seen, pages = set(), []
     for page in snapshot.get("pages") or []:
-        # A privacy notice, a terms page and a set of search results all print
-        # an address without being a place anyone visits. On a government site
-        # three such pages - a department's profile, a privacy notice and a
-        # freedom-of-information listing - each carried a different postcode,
-        # met the three-address threshold exactly, and the report told GOV.UK
-        # it looks like "a business with separate branches" that should publish
-        # LocalBusiness markup per branch. The page types are already known;
-        # they were simply not consulted.
-        if page.get("page_type") in ("legal", "careers"):
+        key = _own_address_key(page)
+        if key is None or key in seen:
             continue
-        if is_search_result_page(page.get("url") or ""):
+        seen.add(key)
+        pages.append(page)
+    return pages
+
+
+def _own_address_key(page):
+    """What identifies the postal address this page prints of its own, or None.
+
+    One page at a time, so that a caller asking about a subset of pages - the
+    ones typed `location` - is not told a page has no address merely because
+    another page printed the same one first.
+    """
+    # A privacy notice, a terms page and a set of search results all print
+    # an address without being a place anyone visits. On a government site
+    # three such pages - a department's profile, a privacy notice and a
+    # freedom-of-information listing - each carried a different postcode,
+    # met the three-address threshold exactly, and the report told GOV.UK
+    # it looks like "a business with separate branches" that should publish
+    # LocalBusiness markup per branch. The page types are already known;
+    # they were simply not consulted.
+    if page.get("page_type") in ("legal", "careers"):
+        return None
+    if is_search_result_page(page.get("url") or ""):
+        return None
+    facts = page.get("contact_facts") or {}
+    # A street the page carries only in its own furniture is the site's
+    # address, not this page's. `street_source` records which of the five
+    # places the extractor found it, and the header and the footer are last
+    # for exactly this reason: they are the same run of characters on every
+    # page. Counting them makes one office N branches, which is the
+    # high-severity multi-location headline a single-office shop was given,
+    # and it is the error `postcode_source` already guards against a few
+    # lines below. A chain whose branch pages state nothing of their own now
+    # contributes nothing rather than collapsing onto the head office.
+    if (facts.get("street_source") or "") == CHROME_ADDRESS_SOURCE:
+        return None
+    street = (facts.get("street_hint") or "").strip().lower()
+    postcode = (facts.get("postcode_hint") or "").strip().lower()
+    if not street or not postcode:
+        return None
+    # Keyed on the postal code, and on the street too when the code did
+    # not come from beside it.
+    #
+    # The code alone was the whole key, because the street hint is a fuzzy
+    # substring match and one head-office address came out three slightly
+    # different ways across three pages of a single-site fixture, counting
+    # as three branches. That reasoning holds only while the code belongs
+    # to the page. `ADDRESS_REGION_SELECTORS` ends in `footer`, so where a
+    # page prints its own street but no code of its own, the extractor
+    # falls back to the code in the site-wide footer - and four campus
+    # pages, each with a different street, were handed one head-office
+    # code, collapsed to a single place, and a four-campus university was
+    # read as a business with one address. The whole multi-location branch
+    # of that report went dark.
+    #
+    # So: a code read from beside the street identifies the place on its
+    # own, and the fuzzy street is ignored as before. A code borrowed from
+    # the furniture identifies nothing by itself, and the street it was
+    # joined to is what tells two pages apart.
+    key = re.sub(r"[^a-z0-9]", "", postcode)
+    if (facts.get("postcode_source") or "").startswith("in an address region"):
+        key += "|" + re.sub(r"[^a-z0-9]", "", street)
+    return key
+
+
+def location_pages_with_an_address(snapshot):
+    """Pages typed `location` that print a postal address of their own.
+
+    One per distinct address, first page first. A page is typed `location` by
+    its address alone - `/locations/`, `/find-us`, `/stores` - and the path
+    says what the page is about, not whose place it is. A language foundation's
+    site keeps its event calendar at `/events/<calendar>/locations/<id>/`: four
+    of those were crawled, each a venue listing for somebody else's user-group
+    meeting with no street, no postcode and no place markup, all four under one
+    page title. The path alone made that site a local business at high
+    confidence, with the reason "the site declares a place with a postal
+    address that visitors go to" - true of nothing the crawl held - and every
+    tailored action after it was advice for a shop with premises.
+
+    A branch page of the site's own prints the branch's address; that is what
+    a visitor opens it for. So a `location` page counts as a place the site has
+    only when it does, read by the same test `pages_with_their_own_address`
+    applies to every page - not the furniture, not a legal page.
+    """
+    seen, pages = set(), []
+    for page in snapshot.get("pages") or []:
+        if page.get("page_type") != "location":
             continue
-        facts = page.get("contact_facts") or {}
-        # A street the page carries only in its own furniture is the site's
-        # address, not this page's. `street_source` records which of the five
-        # places the extractor found it, and the header and the footer are last
-        # for exactly this reason: they are the same run of characters on every
-        # page. Counting them makes one office N branches, which is the
-        # high-severity multi-location headline a single-office shop was given,
-        # and it is the error `postcode_source` already guards against a few
-        # lines below. A chain whose branch pages state nothing of their own now
-        # contributes nothing rather than collapsing onto the head office.
-        if (facts.get("street_source") or "") == CHROME_ADDRESS_SOURCE:
+        key = _own_address_key(page)
+        if key is None or key in seen:
             continue
-        street = (facts.get("street_hint") or "").strip().lower()
-        postcode = (facts.get("postcode_hint") or "").strip().lower()
-        if not street or not postcode:
-            continue
-        # Keyed on the postal code, and on the street too when the code did
-        # not come from beside it.
-        #
-        # The code alone was the whole key, because the street hint is a fuzzy
-        # substring match and one head-office address came out three slightly
-        # different ways across three pages of a single-site fixture, counting
-        # as three branches. That reasoning holds only while the code belongs
-        # to the page. `ADDRESS_REGION_SELECTORS` ends in `footer`, so where a
-        # page prints its own street but no code of its own, the extractor
-        # falls back to the code in the site-wide footer - and four campus
-        # pages, each with a different street, were handed one head-office
-        # code, collapsed to a single place, and a four-campus university was
-        # read as a business with one address. The whole multi-location branch
-        # of that report went dark.
-        #
-        # So: a code read from beside the street identifies the place on its
-        # own, and the fuzzy street is ignored as before. A code borrowed from
-        # the furniture identifies nothing by itself, and the street it was
-        # joined to is what tells two pages apart.
-        key = re.sub(r"[^a-z0-9]", "", postcode)
-        if (facts.get("postcode_source") or "").startswith("in an address region"):
-            key += "|" + re.sub(r"[^a-z0-9]", "", street)
-        if key in seen:
-            continue
-        seen[key] = page["url"]
+        seen.add(key)
         pages.append(page)
     return pages
 
@@ -5098,8 +5140,9 @@ def is_multi_location(snapshot):
     """True when the site describes more than one place you can visit."""
     if len(declared_locations(snapshot)) > 1:
         return True
-    if len([p for p in (snapshot.get("pages") or [])
-            if p.get("page_type") == "location"]) > 1:
+    # Two `location` pages each printing an address of their own, not two
+    # pages whose path says `location`. See `location_pages_with_an_address`.
+    if len(location_pages_with_an_address(snapshot)) > 1:
         return True
     return len(pages_with_their_own_address(snapshot)) >= BRANCH_PAGE_MINIMUM
 
@@ -6410,6 +6453,10 @@ def _site_kind_signals(snapshot):
         "has_basket": matched(_BASKET_PATH_RE),
         "declared_places": len(declared_locations(snapshot)),
         "own_address_pages": len(pages_with_their_own_address(snapshot)),
+        # Paths, so the reason printed can name the page that was read.
+        "location_pages_with_address": [
+            urlparse(p.get("url") or "").path or "/"
+            for p in location_pages_with_an_address(snapshot)],
         "multi_location": is_multi_location(snapshot),
         "has_team_page": matched(_TEAM_PATH_RE),
         "civic_markup": bool(jsonld & _CIVIC_JSONLD),
@@ -6894,10 +6941,24 @@ def site_kind(snapshot):
              "it also names places to visit, which a retailer with showrooms or "
              "stores does" if places else "it declares no place to visit"])
 
-    if facts["declared_places"] or "location" in facts["page_types"]:
+    # Two kinds of evidence, each reported as what it is. A page typed
+    # `location` by its path and printing no address of its own is neither:
+    # see `location_pages_with_an_address` for the venue listings that made a
+    # language foundation a local business on four such pages.
+    if facts["declared_places"]:
         return SiteKind(LOCAL_BUSINESS, "high",
                         ["the site declares a place with a postal address that "
                          "visitors go to"])
+    if facts["location_pages_with_address"]:
+        located = facts["location_pages_with_address"]
+        return SiteKind(LOCAL_BUSINESS, "high",
+                        ["{} about where to find the site ({}) print{} a street "
+                         "address and postal code of {} own".format(
+                             "a page" if len(located) == 1
+                             else "{} pages".format(len(located)),
+                             ", ".join(located[:3]),
+                             "s" if len(located) == 1 else "",
+                             "its" if len(located) == 1 else "their")])
     if facts["multi_location"] or facts["own_address_pages"] >= BRANCH_PAGE_MINIMUM:
         return SiteKind(LOCAL_BUSINESS, "medium",
                         ["separate pages print their own street address"])
@@ -10107,6 +10168,11 @@ _NAME_MARK = u"(?:\\s?[" + NAME_MARKS + u"])?"
 # A lookahead at the first letter after the verb, so `\s+` cannot give back a
 # space and let the phrase through behind it; "is a", "is the", "is one of"
 # and a bare noun phrase ("is independent software for ...") are untouched.
+# A past participle, for the passive-voice branch below: the regular "-ed"
+# form and the irregular ones a site uses of itself.
+_PASSIVE_PARTICIPLE = (r"(?:[a-z]+ed|built|made|known|run|written|held|sold|owned|grown"
+                       r"|given|taken|kept|sent|taught|brought|found|led|shown|driven|chosen)")
+
 _DEFINITION_NOT_A_CATEGORY = (
     r"(?!\s)(?!(?:(?:all|really|just|truly)\s+)?about\b"
     r"|more\s+than\b|so\s+much\s+more\b"
@@ -10123,7 +10189,31 @@ _DEFINITION_NOT_A_CATEGORY = (
     # "<Brand> is thrilled to announce ...". Each reports what the brand is
     # doing this month, and none says what kind of thing it is.
     r"|(?:now\s+)?(?:opening|launching|expanding|celebrating|returning|coming\s+to"
-    r"|thrilled|excited|delighted|pleased)\b)")
+    r"|thrilled|excited|delighted|pleased)\b"
+    # The passive voice: a past participle and the preposition that says by
+    # whom, under what or where. It reports something done to the brand, not
+    # what kind of thing it is. A programming language's about page reads
+    # "<Language> is developed under an OSI-approved open source license,
+    # making it freely usable and distributable, even for commercial use." -
+    # a sentence about the licence - and it was printed as the site's
+    # one-sentence definition and offered as the line to paste under the
+    # homepage H1. "is used in", "is based in", "is run by" and "is licensed
+    # under" are the same sentence about other things, and so is "is used
+    # successfully in", with the adverb after the participle.
+    #
+    # "for" is not among the prepositions: "Brightpath is built for retail
+    # operations teams at ..." says who the product is for, which is half a
+    # definition, and the mutation suite accepts it on purpose. Only the words
+    # straight after the copula are read, so "<Brand> is a library used by
+    # ..." - an article first - is untouched.
+    #
+    # A run of participles is the same voice. A project-management product's
+    # footer reads "<Product> is designed, built, and backed by <company>, the
+    # people behind <two other products>", which names the maker, and it was
+    # printed as what the product is.
+    r"|(?:[a-z]+ly\s+)?" + _PASSIVE_PARTICIPLE +
+    r"(?:\s*,\s*(?:and\s+)?" + _PASSIVE_PARTICIPLE + r"|\s+and\s+" + _PASSIVE_PARTICIPLE + r")*"
+    r"(?:\s+[a-z]+ly)?\s+(?:under|by|in|at|on|from)\b)")
 
 _DEFINITION_COPULAR = (
     r"\b{brand}\b" + _NAME_MARK + _DEFINITION_ALIAS +

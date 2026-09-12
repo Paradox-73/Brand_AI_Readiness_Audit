@@ -150,6 +150,58 @@ def test_a_declared_place_to_visit_is_a_local_business():
     assert kind.confidence == "high"
 
 
+def _venue_listing(origin, number):
+    """An event venue listed for somebody else's meeting: the path says
+    `locations`, the page prints no address and declares no place."""
+    return _page("{}/events/user-group/locations/{}/".format(origin, number),
+                 "location", "Monthly meetup. See the group's page for details.",
+                 jsonld_types=["WebSite", "SearchAction"],
+                 title="Our Events | Invented Foundation",
+                 contact_facts={"street_hint": "", "postcode_hint": "",
+                                "street_source": "", "has_address": False})
+
+
+def test_pages_typed_location_by_their_path_alone_are_not_premises():
+    """A language foundation's site was read as a local business at high
+    confidence, "the site declares a place with a postal address that visitors
+    go to", from four crawled event-venue listings under
+    `/events/<calendar>/locations/<id>/`. Nothing on the site declared a place
+    and none of the four printed an address. Every tailored action that
+    followed was advice for a shop with premises."""
+    from audit_common import is_multi_location
+    origin = "https://foundation.example"
+    snapshot = _snapshot(origin, [
+        _page(origin + "/", "home", "Released under an open source licence.",
+              jsonld_types=["WebSite"],
+              internal=[origin + "/about/team"],
+              external=["https://github.com/invented-owner/lang"]),
+        _page(origin + "/docs/tutorial", "documentation"),
+        _page(origin + "/jobs/", "careers"),
+    ] + [_venue_listing(origin, n) for n in (1418, 1494, 1584, 1679)])
+    kind = site_kind(snapshot)
+    assert kind.kind != LOCAL_BUSINESS, kind
+    assert "postal address" not in kind.why()
+    assert not is_multi_location(snapshot), (
+        "four pages with no address between them are not four branches")
+
+
+def test_a_location_page_printing_its_own_address_still_makes_a_local_business():
+    """The other half: a branch page is read for the address it prints, and
+    the reason says that is what was read rather than claiming markup."""
+    origin = "https://bakery.example"
+    kind = site_kind(_snapshot(origin, [
+        _page(origin + "/", "home"),
+        _page(origin + "/visit-us", "location", "12 Invented Row, ZZ1 4QQ",
+              contact_facts={"street_hint": "12 Invented Row",
+                             "postcode_hint": "ZZ1 4QQ",
+                             "street_source": "in the page body",
+                             "has_address": True}),
+    ]))
+    assert kind.kind == LOCAL_BUSINESS
+    assert kind.confidence == "high"
+    assert "/visit-us" in kind.why() and "declares" not in kind.why(), kind.why()
+
+
 def test_a_shop_with_nowhere_to_visit_is_an_online_seller():
     kind = site_kind(_snapshot("https://store.example", [
         _page("https://store.example/", "home",

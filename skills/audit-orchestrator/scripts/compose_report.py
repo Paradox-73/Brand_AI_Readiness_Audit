@@ -54,6 +54,10 @@ from audit_common import (
     # The one rule for "does this sentence say what the brand is", and the
     # forms of the brand's name it reads.
     defining_sentence, brand_forms, brand_pattern,
+    # The location pages that are places of the site's own: typed `location`
+    # and printing a postal address of their own, not merely under a path
+    # that says `location`.
+    location_pages_with_an_address,
 )
 
 # Sub-skill order. Earlier skills own overlapping observations, so when two
@@ -3716,10 +3720,20 @@ def audience_pages_running_one_template(snapshot):
     the correct answer for the site that prompted this.
 
     Returns the URLs, so the entry can name them rather than assert them.
+
+    A location page counts only where it prints an address of its own. The
+    type is read off the path, and a language foundation's event calendar
+    keeps a venue listing for each user-group meeting at
+    `/events/<calendar>/locations/<id>/` - no street, no postcode, one heading
+    shared by all four crawled. Those are somebody else's meeting places, not
+    places the site serves, and they met the two-page bar on their own.
     """
+    own_places = {id(p) for p in location_pages_with_an_address(snapshot)}
     by_text = {}
     for page in pages_of(snapshot, content_only=True):
         if page.get("page_type") not in _AUDIENCE_PAGE_TYPES:
+            continue
+        if page.get("page_type") == "location" and id(page) not in own_places:
             continue
         text = _differentiating_text(page)
         # A page with no H1 and no paragraph tells us nothing about whether it
@@ -4859,7 +4873,8 @@ def compose(snapshot, skill_results, audited_at=None):
                        origin_redirect=snapshot.get("origin_redirect"),
                        site_not_serving=snapshot.get("site_not_serving"),
                        quotable=what_an_assistant_can_repeat(signals, citations,
-                                                             brand.get("name") or ""))
+                                                             brand.get("name") or "",
+                                                             snapshot.get("pages") or ()))
     # The findings the verdict names as the cause of the rest - and only when
     # it does name them. On a storefront delivered as a JavaScript shell the
     # verdict opened on the shell, and "Start here" still held a place for the
@@ -5617,6 +5632,33 @@ def identity_markup_gap(findings):
             bool(hints & IDENTITY_MARKUP_HOMEPAGE_ONLY_HINTS))
 
 
+# The one `no-entity-definition` finding that says a definition exists. It is
+# raised when the sentence was found on another crawled page and not on the
+# homepage, so the cause is shared and the claim is the opposite of "no page".
+DEFINITION_ELSEWHERE_HINT = "definition-not-on-the-homepage"
+
+
+def definition_gap(findings, signals=None):
+    """(absent, elsewhere) - whether no page defines the brand, or only the homepage fails to.
+
+    The same split `identity_markup_gap` draws for the markup, for the same
+    reason. A programming-language foundation's verdict read "no page states in
+    one sentence what it is", and then quoted the site's own sentence; its
+    finding F-008, twenty lines below, was titled "The homepage never says what
+    the brand is, though the about page does". Both clauses were read off the root cause, which the
+    about-page finding shares with the finding that really found nothing.
+
+    `entity_definition_found` is the fact-extractability skill saying it has
+    the sentence in hand, so it overrules a hint this function does not know.
+    """
+    signals = signals or {}
+    raised = [f for f in findings if f.get("root_cause") == "no-entity-definition"]
+    elsewhere = any(f.get("id_hint") == DEFINITION_ELSEWHERE_HINT for f in raised)
+    absent = (not signals.get("entity_definition_found")
+              and any(f.get("id_hint") != DEFINITION_ELSEWHERE_HINT for f in raised))
+    return absent, elsewhere and not absent
+
+
 def verdict_diagnosis(findings, signals):
     """The id hints the verdict's identity paragraph rests on, or an empty set.
 
@@ -5638,7 +5680,7 @@ def verdict_diagnosis(findings, signals):
     causes = {f["root_cause"] for f in findings}
     breadth = signals.get("profile_breadth")
     no_org, homepage_only = identity_markup_gap(findings)
-    no_definition = "no-entity-definition" in causes
+    no_definition, definition_elsewhere = definition_gap(findings, signals)
     uncorroborated = ("weak-corroboration" in causes
                       or (breadth is not None and breadth <= THIN_PROFILE_BREADTH))
     if not ((no_org or no_definition) and uncorroborated):
@@ -5646,7 +5688,10 @@ def verdict_diagnosis(findings, signals):
     named = set()
     for finding in findings:
         cause, hint = finding["root_cause"], finding.get("id_hint")
-        if cause == "no-entity-definition" and no_definition:
+        # A definition on the about page is named where the paragraph names it,
+        # and, like the homepage-only markup below, never makes it print: the
+        # site has said what it is, one link away from the front door.
+        if cause == "no-entity-definition" and (no_definition or definition_elsewhere):
             named.add(hint)
         elif cause == "no-org-schema" and (
                 (no_org and hint in IDENTITY_MARKUP_ABSENT_HINTS)
@@ -5901,18 +5946,36 @@ def _access_verdict(blocking, readable_pages=None):
 VERDICT_QUOTE_CHARS = 180
 
 
-def what_an_assistant_can_repeat(signals, citations=(), brand_name=""):
+def _page_carrying(sentence, pages):
+    """The address of the first crawled page whose text holds `sentence`, or ""."""
+    wanted = " ".join(str(sentence or "").split())
+    if not wanted:
+        return ""
+    for page in pages or ():
+        for field in ("body_text", "text"):
+            if wanted in " ".join(str(page.get(field) or "").split()):
+                return page.get("url") or ""
+    return ""
+
+
+def what_an_assistant_can_repeat(signals, citations=(), brand_name="", pages=()):
     """`{"text", "url"}` - the sentence an assistant could lift about this site - or None.
 
     The one-sentence definition `fact-extractability-audit` found first, then
     the citation table's sentences: one naming the brand and saying what it
     is, then the homepage's, then any page's. Read by the verdict so it cannot
     say "no fact it can safely repeat" above a table quoting one.
+
+    The definition arrives as a signal without its page, so the page is looked
+    up in `pages` by its text. Without it a programming-language foundation's
+    verdict attributed the about page's sentence to "its own one-sentence definition", beside a clause
+    saying no page had one.
     """
     signals = signals or {}
     definition = signals.get("entity_definition") if signals.get("entity_definition_found") else ""
     if definition and reads_as_a_description(definition):
-        return {"text": truncate(definition.strip(), VERDICT_QUOTE_CHARS), "url": ""}
+        return {"text": truncate(definition.strip(), VERDICT_QUOTE_CHARS),
+                "url": _page_carrying(definition, pages), "from_definition": True}
     quoted = [c for c in citations or () if c.get("likely_citation")
               and not _CUT_SHORT_RE.search(c["likely_citation"])]
     # A sentence that reads as the site describing itself, and failing that the
@@ -6176,7 +6239,7 @@ def _verdict_body(counts, findings, crawl=None, signals=None, brand_label="",
     # branch pages and a complete block, and on a school carrying the block on
     # 48 of its 60 crawled pages.
     no_org, homepage_only = identity_markup_gap(findings)
-    no_definition = "no-entity-definition" in causes
+    no_definition, definition_elsewhere = definition_gap(findings, signals)
     undeclared = no_org or no_definition
     uncorroborated = ("weak-corroboration" in causes
                       or (breadth is not None and breadth <= THIN_PROFILE_BREADTH))
@@ -6203,8 +6266,20 @@ def _verdict_body(counts, findings, crawl=None, signals=None, brand_label="",
             # it to be wrong.
             missing.append("the homepage carries no Organization markup, though other "
                            "crawled pages do")
+        # Read before the missing list, which names the page the definition
+        # is on when the quotation below comes from it.
+        repeatable = quotable or what_an_assistant_can_repeat(signals, ())
         if no_definition:
             missing.append("no page states in one sentence what it is")
+        elif definition_elsewhere:
+            # The half of the subject that is true where a definition exists.
+            # "No page states" was printed over a programming-language
+            # foundation's site, whose about page
+            # opens with the sentence the same verdict then quoted.
+            defined_on = (repeatable or {}).get("url") if (repeatable or {}).get(
+                "from_definition") else ""
+            missing.append("the homepage does not state in one sentence what it is, though "
+                           "{} does".format(defined_on or "another crawled page"))
         # "only 12 off-site profiles are linked" was printed on a site with a
         # full set of claimed profiles, in a list of things that are missing,
         # one clause before being told what little is off the site is too thin.
@@ -6266,10 +6341,17 @@ def _verdict_body(counts, findings, crawl=None, signals=None, brand_label="",
         # stands only where no definition was found, no page offers a quotable
         # sentence and corroboration is weak. Otherwise the report quotes what
         # an assistant can repeat and says what is missing around it.
-        repeatable = quotable or what_an_assistant_can_repeat(signals, ())
         if repeatable and not front_door_only and not own_item and not item_linked:
-            where = (" ({})".format(repeatable["url"]) if repeatable.get("url")
-                     else ", from its own one-sentence definition")
+            # The page, where the sentence was found on one. ", from its own
+            # one-sentence definition" was printed after "no page states in one
+            # sentence what it is" in the same paragraph; where the page is not
+            # known, the fallback says only what is known about where it sits.
+            if repeatable.get("url"):
+                where = " ({})".format(repeatable["url"])
+            elif definition_elsewhere:
+                where = ", from a page other than its homepage"
+            else:
+                where = ", from its own one-sentence definition"
             lead = ("{} What it cannot do is establish who the brand is from anything a "
                     "machine can check: {}. ".format(
                         _reach_lead(findings, brand_label or "this site"),
