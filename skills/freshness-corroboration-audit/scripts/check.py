@@ -61,7 +61,9 @@ if _SHARED is None:
 sys.path.insert(0, _SHARED)
 
 from audit_common import (  # noqa: E402
-    brand_key, confirm_dead, comparison_key, counts_as_off_site_profile,
+    brand_key, brand_profiles, CITATION_MIN_PAGES, confirm_dead, comparison_key,
+    counts_as_off_site_profile, cut_at_read_cap, is_coverage_not_an_account,
+    looks_like_a_citation, MAX_RESPONSE_BYTES,
     deadline_from_budget, example_urls, Fetcher,
     FetchError, host_name_forms, is_listing_page, is_multi_location,
     jsonld_type_names, language_of,
@@ -69,8 +71,7 @@ from audit_common import (  # noqa: E402
     no_network_reason, not_a_telephone_number, ONLINE_SELLER, ORG_IDENTITY_TYPES,
     ORGANISATION, pages_of, pct, PERSONAL_OR_ACADEMIC, plural,
     primary_subtag, PROJECT, PUBLIC_BODY, PUBLICATION, site_kind,
-    PROFILE_GONE_STATUS, profile_is_opaque, profile_names_brand, profiles_naming_brand,
-    response_text, sentences, sitemap_scope, sitemap_total_phrase, SkillResult,
+    PROFILE_GONE_STATUS, response_text, sentences, sitemap_scope, sitemap_total_phrase, SkillResult,
     speaks_about_itself, strip_www, third_party_allows, truncate, VERIFIABLE_PROFILE_PLATFORMS,
     VISITABLE_JSONLD_TYPES
 )
@@ -81,9 +82,9 @@ from audit_common import (  # noqa: E402
 # is an account or the platform underneath it, and two copies of that reasoning
 # would drift the moment either was corrected.
 from page_extract import subresource_domains  # noqa: E402
-# The hosts the extractor names as profile platforms, read for the same reason:
-# an address on one of them is an account by where it lives, and an address
-# anywhere else has to say so in its path. See `_is_coverage_not_an_account`.
+# The names the extractor prints for the platforms it recognises, read for the
+# same reason: a repository the site links is reported under the platform's
+# own name. See `_own_repository`.
 from page_extract import SOCIAL_PLATFORMS  # noqa: E402
 
 SKILL = "freshness-corroboration-audit"
@@ -141,6 +142,17 @@ _ISO_RE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})")
 # a date *was* seen. Two checks, one gap, and neither said so.
 _SLASH_RE = re.compile(r"\b([0-9]{1,2})/([0-9]{1,2})/((?:19|20)[0-9]{2})\b")
 
+# Year first with a full stop or a slash, and day first with full stops, with a
+# four-digit year or a two-digit one. The extractor records `2026.09.10` and
+# `10.09.2026` as visible dates and this reader turned both into nothing, so an
+# article carrying one counted as undated. A shop in Vietnam dates its posts
+# `06.05.26`; with its newest posts unreadable, its three oldest decided that
+# its blog had stopped four years earlier.
+_YEAR_FIRST_RE = re.compile(
+    r"(?<![0-9.])((?:19|20)[0-9]{2})[./]([0-9]{1,2})[./]([0-9]{1,2})(?![0-9]|[./][0-9])")
+_DAY_FIRST_DOTTED_RE = re.compile(
+    r"(?<![0-9.])([0-9]{1,2})\.([0-9]{1,2})\.((?:19|20)?[0-9]{2})(?![0-9]|\.[0-9])")
+
 # A date outside this range is a parse artefact, not a publication date.
 _EARLIEST_PLAUSIBLE_YEAR = 1990
 _MONTHS = {m.lower(): i for i, m in enumerate(
@@ -155,7 +167,7 @@ def parse_date(value, now=None):
     2035 read as nought months old and suppressed a staleness finding, while
     the evidence line printed the 2035 date beside it.
     """
-    parsed = _parse_date_raw(value)
+    parsed = _parse_date_raw(value, now)
     if parsed is None:
         return None
     if parsed.year < _EARLIEST_PLAUSIBLE_YEAR:
@@ -166,11 +178,49 @@ def parse_date(value, now=None):
     return parsed
 
 
-def _parse_date_raw(value):
+def _full_year(digits, now=None):
+    """A year written with two digits, as the century nearest the reading date."""
+    year = int(digits)
+    if len(digits) == 4:
+        return year
+    today = now or dt.datetime.now(dt.timezone.utc).date()
+    return 2000 + year if 2000 + year <= today.year + 1 else 1900 + year
+
+
+def _slash_date(first, second, year, now=None):
+    """`first/second/year`, month first unless that cannot be the date.
+
+    Month first is the reading this has always taken, and at the month
+    granularity the thresholds here use the two readings rarely differ. They
+    do when the month-first one lands after the day the page was read: a post
+    dated `10/5/2026` in a country that writes the day first, read in
+    September 2026, is 10 May, and read month first it was 5 October - a date
+    `newest_date` sets aside as the future, so the newest post on the blog
+    went uncounted.
+    """
+    readings = []
+    for month, day in ((first, second), (second, first)):
+        try:
+            readings.append(dt.date(year, month, day))
+        except ValueError:
+            continue
+    if not readings:
+        return None
+    ceiling = (now or dt.datetime.now(dt.timezone.utc).date()) + dt.timedelta(days=1)
+    return next((d for d in readings if d <= ceiling), readings[0])
+
+
+def _parse_date_raw(value, now=None):
     if not value:
         return None
     text = str(value).strip()
     match = _ISO_RE.search(text)
+    if match:
+        try:
+            return dt.date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        except ValueError:
+            return None
+    match = _YEAR_FIRST_RE.search(text)
     if match:
         try:
             return dt.date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
@@ -191,13 +241,16 @@ def _parse_date_raw(value):
             return None
     match = _SLASH_RE.search(text)
     if match:
-        first, second = int(match.group(1)), int(match.group(2))
-        # Which number is the month is genuinely ambiguous between the two
-        # conventions, and at the month granularity every threshold here uses,
-        # it does not matter - unless one of them is over 12, which settles it.
-        month, day = (second, first) if first > 12 else (first, second)
+        # Which number is the month is ambiguous between the two conventions.
+        # One over 12 settles it, and so does a month-first reading that lands
+        # after the page was read. See `_slash_date`.
+        return _slash_date(int(match.group(1)), int(match.group(2)),
+                           int(match.group(3)), now)
+    match = _DAY_FIRST_DOTTED_RE.search(text)
+    if match:
         try:
-            return dt.date(int(match.group(3)), month, day)
+            return dt.date(_full_year(match.group(3), now), int(match.group(2)),
+                           int(match.group(1)))
         except ValueError:
             return None
     return None
@@ -511,6 +564,40 @@ def _sitemap_contradicts_sample(snapshot, sampled, now):
                 newest.isoformat(), plural(months_between(newest, now), "month")))
 
 
+def _a_recent_post_filed_elsewhere(pages, now):
+    """`(page, date)` for the newest dated post the page typer did not call an article.
+
+    A shop in Vietnam publishes its blog twice: an English edition under a
+    path the typer reads as articles, and a Vietnamese one under a path it
+    does not, so those posts are typed `other`. The English edition had
+    stopped; the Vietnamese one had posts from four months before the audit,
+    titled with the year. The report said the articles "have not been updated
+    in over a year", about a crawl that had read the new ones.
+
+    A post, not any page with a date on it: not a listing, a section index, the
+    site's own story or a form, and the date has to be the page's own rather
+    than one the template prints on every page.
+    """
+    chrome = _dates_on_most_pages(pages)
+    best = None
+    for page in pages:
+        if page.get("page_type") not in ("other", "press"):
+            continue
+        if (is_listing_page(page) or _lists_its_own_section(page)
+                or _a_page_about_the_site(page) or _a_page_for_doing_something_else(page)):
+            continue
+        if not _carries_its_own_date(page, chrome):
+            continue
+        dates = dict(page.get("dates") or {})
+        dates["visible"] = [v for v in dates.get("visible") or [] if v not in chrome]
+        when = newest_date(dict(page, dates=dates), now)
+        if when is None or months_between(when, now) > STILL_PUBLISHING_MONTHS:
+            continue
+        if best is None or when > best[1]:
+            best = (page, when)
+    return best
+
+
 def _check_article_freshness(result, snapshot, pages, now, fetcher=None):
     result.check("content-freshness")
     # An index is not an item, here either. A blog index typed as an article
@@ -579,6 +666,21 @@ def _check_article_freshness(result, snapshot, pages, now, fetcher=None):
         snapshot, [p for p, _ in dated], now, fetcher)
     if feed_reason:
         result.skip("content-freshness", feed_reason)
+        return
+    # A dated post the crawl read under another page type. See
+    # `_a_recent_post_filed_elsewhere`.
+    elsewhere = _a_recent_post_filed_elsewhere(pages, now)
+    if elsewhere:
+        post, when = elsewhere
+        age = months_between(when, now)
+        result.skip("content-freshness",
+                    "the {} this crawl filed as articles are old, but it also read {}, a post "
+                    "carrying a date of its own, {} ({}), that was filed under another page "
+                    "type. The site is still publishing, so no staleness is asserted "
+                    "here".format(plural(len(dated), "dated article"), post["url"],
+                                  when.isoformat(),
+                                  "under a month old" if age == 0
+                                  else plural(age, "month") + " old"))
         return
     result.signal("feeds_unread", unread_feeds)
 
@@ -861,6 +963,38 @@ def _carries_its_own_date(page, chrome=frozenset()):
     return not visible or bool(visible - chrome)
 
 
+def _cut_at_the_read_cap(pages):
+    """The pages the crawl stopped reading at its size limit.
+
+    Such a page was read up to a point and not past it, so a date, a footer or
+    an account below that point is not missing from it - it was never read. A
+    page cut off at five million bytes was reported as missing the words of its
+    own title, which its read text contains. See `cut_at_read_cap`, which every
+    skill reads this through.
+    """
+    return [p for p in pages or () if cut_at_read_cap(p)]
+
+
+def _not_read_in_full_note(pages, what):
+    """The sentence naming the pages an absence was not judged on, or ""."""
+    cut = _cut_at_the_read_cap(pages)
+    if not cut:
+        return ""
+    return (" {} stopped being read at the crawl's limit of {:,} bytes, so {} was not "
+            "judged there: {}.".format(
+                plural(len(cut), "page"), MAX_RESPONSE_BYTES, what,
+                ", ".join(example_urls([p.get("url") for p in cut]))))
+
+
+def _not_accounts_note(urls):
+    """The sentence naming account-shaped links that were not counted, or ""."""
+    if not urls:
+        return ""
+    return (" Not counted, because the host is not somewhere a brand keeps an account - a "
+            "tracking or checkout page, the platform a store runs on, an article about the "
+            "brand, a vendor's page: {}.".format(", ".join(example_urls(urls))))
+
+
 def _check_date_signals(result, pages, snapshot=None):
     """No date at all is a distinct problem from having an old date.
 
@@ -947,8 +1081,12 @@ def _check_date_signals(result, pages, snapshot=None):
     about_pages = [p for p in items if _a_page_about_the_site(p)]
     result.signal("about_pages_not_expected_to_carry_a_date", len(about_pages))
     about_urls = {p.get("url") for p in about_pages}
+    # Not a page the crawl stopped reading at its size limit: a date below the
+    # point it stopped at is not absent, it was never read. See
+    # `_cut_at_the_read_cap`.
+    cut_urls = {p.get("url") for p in _cut_at_the_read_cap(items)}
     expect_dates = [p for p in items
-                    if p.get("url") not in about_urls
+                    if p.get("url") not in about_urls and p.get("url") not in cut_urls
                     and (p["page_type"] in ("article", "press")
                          or (_section_of(p["url"]) in dated_sections
                              and p.get("url") not in utility_urls))]
@@ -990,6 +1128,7 @@ def _check_date_signals(result, pages, snapshot=None):
                     " {} that list other pages are not counted here: an index carries the "
                     "dates of the items on it, or none, and neither is a date of its "
                     "own.".format(plural(listing_count, "crawled page", "crawled pages")))
+    listing_note += _not_read_in_full_note(items, "a date below that point")
     if utility:
         listing_note += (" {} in dated sections {} a form, a map, directions or a sign-in "
                          "or booking page rather than something written on a date, so {} "
@@ -1665,148 +1804,12 @@ def _check_sitemap_lastmod(result, snapshot, now):
 # Corroboration
 # --------------------------------------------------------------------------
 
-# Below this many crawled pages there is no such thing as "linked from only
-# one page", so the citation test stays out of the way of a small crawl.
-CITATION_MIN_PAGES = 5
-
-
-def _site_own_profiles(pages, declared, names, host=""):
-    """({platform: url}, [urls dropped]) - the accounts the site links as its own.
-
-    `social_profiles` holds one URL per platform per page, and flattening the
-    pages with `dict.update` let whichever page came last win. On
-    a statistics charity that handed an article's citations to the brand:
-    `youtube.com/@altrufisica` and
-    `en.wikipedia.org/wiki/History_of_ethanol_fuel_in_Brazil` were recorded as
-    the brand's own profiles, and the report then certified "the site links to
-    8 distinct off-site profiles" and "all 4 verifiable profile link(s)
-    resolve" about two accounts belonging to other people.
-
-    An account is linked from the site's chrome and so appears on page after
-    page; a citation appears in the one article that cites it. Where a URL
-    appears once and neither names the brand, sits in the site's own `sameAs`,
-    nor is an opaque identifier that cannot be read either way, it is a
-    citation. That test runs for every platform, not for Wikipedia alone.
-
-    `host` is read for the same reason the declared names are: the labels of
-    the site's own address are romanised forms of its name, and on a site whose
-    name is not written in the Latin alphabet they are the only forms a handle
-    could ever carry. See `host_name_forms`.
-    """
-    # The name test is only ever an escape from the appearance test below, so
-    # widening the names it may use can keep a profile and can never drop one.
-    names = [n for n in list(names) + host_name_forms(host) if n]
-    counts = {}
-    # Where the link sits decides this better than how often it appears. A
-    # brand's own account is in the header or the footer; a citation is in the
-    # body of the one article that cites it. Counting appearances alone dropped
-    # a site's real X account, linked once from its footer and once from its
-    # `sameAs`, on a run where the `sameAs` had been broken - and a footer link
-    # is exactly the evidence that settles it.
-    in_chrome = set()
-    for page in pages:
-        links = page.get("links") or {}
-        for bucket in ("nav", "footer"):
-            for link in links.get(bucket) or []:
-                url = (link or {}).get("url")
-                if url:
-                    in_chrome.add(url)
-        for platform, url in (page.get("social_profiles") or {}).items():
-            if url:
-                counts[(platform, url)] = counts.get((platform, url), 0) + 1
-
-    by_platform = {}
-    for (platform, url), count in counts.items():
-        by_platform.setdefault(platform, []).append((count, url))
-
-    chosen, dropped = {}, []
-    total = len(pages)
-    for platform, entries in sorted(by_platform.items()):
-        claimed = declared.get(platform)
-        # The site's own `sameAs` first, then the URL the most pages link, then
-        # the shortest, then alphabetically, so two runs of one snapshot cannot
-        # pick different accounts for one platform.
-        order = sorted(entries,
-                       key=lambda e: (0 if e[1] == claimed else 1, -e[0], len(e[1]), e[1]))
-        for count, url in order:
-            if _looks_like_a_citation(url, count, total, claimed, names, in_chrome):
-                dropped.append(url)
-                continue
-            chosen[platform] = url
-            break
-    return chosen, sorted(dropped)
-
-
-# An article's address, not an account's. The last segment of the path is a
-# headline: several hyphenated words, very often ending in the publisher's
-# numeric story id. A furniture retailer's report counted
-# "<magazine>.test/<brand>-nesting-coffee-table-review-37439576" among its own
-# off-site profiles - a review, linked "Read more" from three regional press
-# pages - and it survived the citation test twice over: the address contains
-# the brand's name, and it appears on three pages. A review names the brand
-# because it is about the brand, and a press page per region links it once
-# each. Neither makes it the brand's account.
-#
-# Only on a host that is not a profile platform. On one of those, an account
-# is an account by where it lives, and a handle is allowed to be long.
-_ARTICLE_ID_RE = re.compile(r"-\d{5,}$")
-_ARTICLE_SLUG_MIN_WORDS_WITH_ID = 3
-_ARTICLE_SLUG_MIN_WORDS = 6
-_PAGE_SUFFIX_RE = re.compile(r"\.(?:html?|php|aspx?)$", re.I)
-
-
-def _on_a_profile_platform(host):
-    """Is this host, or a host it sits under, one the extractor names as a platform?"""
-    return any(host == known or host.endswith("." + known)
-               for known in SOCIAL_PLATFORMS if "/" not in known)
-
-
-def _is_coverage_not_an_account(url):
-    """Is this address an article about the brand rather than the brand's account?"""
-    parts = urlparse(url or "")
-    host = strip_www(parts.netloc.lower())
-    if not host or _on_a_profile_platform(host):
-        return False
-    segments = [s for s in parts.path.split("/") if s]
-    if not segments:
-        return False
-    slug = _PAGE_SUFFIX_RE.sub("", segments[-1].lower())
-    words = [w for w in slug.split("-") if w and not w.isdigit()]
-    if _ARTICLE_ID_RE.search(slug) and len(words) >= _ARTICLE_SLUG_MIN_WORDS_WITH_ID:
-        return True
-    return len(words) >= _ARTICLE_SLUG_MIN_WORDS
-
-
-def _looks_like_a_citation(url, pages_linking, page_count, claimed, names,
-                           in_chrome=()):
-    """Is this a link to somebody else's account rather than the brand's own?"""
-    if claimed and url == claimed:
-        return False
-    # Before the chrome, the name and the count, because none of the three can
-    # turn a headline into an account. See `_is_coverage_not_an_account`.
-    if _is_coverage_not_an_account(url):
-        return True
-    if url in in_chrome:
-        return False
-    if profile_is_opaque(url):
-        return False
-    if any(profile_names_brand(url, name) for name in names):
-        return False
-    # A test that cannot pass must not be the thing that rejects.
-    #
-    # The handle test above compares ASCII against ASCII: `brand_key` keeps
-    # letters and digits and drops everything else, so a name written in
-    # Japanese, Korean, Arabic, Greek or Cyrillic reduces to nothing and no
-    # handle on earth can match it. Where every name the crawl found does
-    # that, the only reading left is the appearance test - and the appearance
-    # test alone drops every account a site links once from the body of one
-    # page, which is what a government publishing a different official account
-    # on each of five pages looks like. A high-severity "no off-site profile is
-    # linked from the crawled pages" and a verdict reading "nothing off the
-    # site corroborates it" followed, about a city government with five.
-    if not any(brand_key(name) for name in names):
-        return False
-    return page_count >= CITATION_MIN_PAGES and pages_linking < 2
+# Which links are the brand's own accounts is read in the shared library, by
+# `brand_profiles`, so the paste-ready `sameAs` block in `structured-data-audit`
+# can declare exactly the accounts this check counts. These two names are the
+# ones this file's readers already call.
+_looks_like_a_citation = looks_like_a_citation
+_is_coverage_not_an_account = is_coverage_not_an_account
 
 
 # A URL written in a plain-text or Markdown file. Trailing punctuation is
@@ -2216,30 +2219,20 @@ def _check_authoritative_profiles(result, snapshot, pages):
     # term into an open-source project's corroboration count, while the
     # project's own org page - linked dozens of times, always as a repository
     # path - was never counted at all.
-    brand_name = ((snapshot.get("brand") or {}).get("name") or "")
     # Read once here, and used only to choose which platforms the fix names.
     # The finding fires on every kind of site: breadth separated brands
     # assistants name from brands they ignore in all six categories studied,
     # and nothing in that result is about shops.
     kind = site_kind(snapshot)
-    declared = {}
-    for page in pages:
-        declared.update(page.get("declared_profiles") or {})
     brand = snapshot.get("brand") or {}
-    names = [brand_name, brand.get("domain_token")] \
-        + list(brand.get("alternate_names") or []) \
-        + list(brand.get("authoritative_variants") or []) \
-        + list(brand.get("fallback_candidates") or [])
-    names = [n for n in names if n]
-
-    candidates, citations = _site_own_profiles(pages, declared, names,
-                                               host=brand.get("host") or "")
-    result.signal("profiles_dropped_as_citations", citations)
-
-    profiles = profiles_naming_brand(
-        candidates, brand_name, declared, name_forms=names[1:])
-    unattributed = {k: v for k, v in candidates.items() if k not in profiles}
-    result.signal("profiles_not_naming_the_brand", sorted(unattributed))
+    # The shared reading, so the `sameAs` block another skill writes declares
+    # the accounts counted here and no others. See `brand_profiles`.
+    own = brand_profiles(pages, brand)
+    names = own["names"]
+    result.signal("profiles_dropped_as_citations", own["citations"])
+    result.signal("profiles_not_on_a_profile_platform", own["not_on_a_profile_platform"])
+    profiles = dict(own["profiles"])
+    result.signal("profiles_not_naming_the_brand", own["unattributed"])
 
     # The site's own agent file, which is a declaration and not a link this
     # audit had to attribute to anybody. `setdefault`, so a platform already
@@ -2308,7 +2301,9 @@ def _check_authoritative_profiles(result, snapshot, pages):
                  "a judgement we made rather than a systematic query, so treat it as a strong "
                  "association and not a proven cause.{}".format(
                      ", ".join(sorted(profiles)) or "none",
-                     PROFILE_BREADTH_NAMED_MEAN, PROFILE_BREADTH_UNNAMED_MEAN, llms_note),
+                     PROFILE_BREADTH_NAMED_MEAN, PROFILE_BREADTH_UNNAMED_MEAN, llms_note)
+                 + _not_accounts_note(own["not_on_a_profile_platform"])
+                 + _not_read_in_full_note(pages, "an account linked only below that point"),
         mechanism="D", root_cause="weak-corroboration",
         summary="Claim more of the places that independently confirm the brand exists, and list "
                 "every one of them in Organization `sameAs`.",
@@ -2350,11 +2345,15 @@ def _check_authoritative_profiles(result, snapshot, pages):
         checked=("links on the crawled pages whose path names an account: a role "
                  "word the platform itself uses to mean an account follows, then "
                  "a handle, then optionally which view of that account was "
-                 "linked. That reading works on any host, including one this "
-                 "audit has never seen. A bare name at the root of a host is a "
-                 "section of that site rather than an account, and counts only "
-                 "where the host is one this audit can name or where the name is "
-                 "the audited site's own. A link in a page's header or "
+                 "linked. Such a link counts only on a host where brands keep "
+                 "accounts - a social network or messaging channel, a video or "
+                 "podcast host, a code or package host, a professional network, a "
+                 "review or business-listing site, a marketplace, an app store or "
+                 "an encyclopaedia - unless the site's own sameAs or rel=\"me\" "
+                 "claims it. A tracking or checkout page, the platform a store "
+                 "runs on, an article about the brand and a vendor's page are not "
+                 "accounts whatever name they carry, and a social page's messaging "
+                 "address is the same account as the page. A link in a page's header or "
                  "footer is the site's own. A link that appears in the body of "
                  "one page only, on a crawl of {} pages or more, is read as a "
                  "citation of somebody else's account unless the site's sameAs "

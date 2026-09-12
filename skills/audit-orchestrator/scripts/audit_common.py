@@ -2156,6 +2156,112 @@ def hijri_dates(text):
     return found
 
 
+# --------------------------------------------------------------------------
+# A numeric date, read in the order the page's language writes it
+#
+# A Vietnamese cosmetics shop dates every post "06.05.26" and one post
+# "09.05.26"; a Vietnamese date can also be written "ngày 6 tháng 5 năm 2026".
+# Neither shape was read, so the site's 2026 posts carried no date and its
+# three English-language posts from 2022 were the newest it had: "3 of 3 dated
+# articles are older than 18 months, and the newest is 2022-11-01". The same
+# shop's product pages print "03/09/2026" for the third of September, which a
+# reader that assumes month first turns into the ninth of March.
+#
+# Which number is the day is a fact about the language, not the string, and
+# that is what this reads: day first where the number over 12 says so, or
+# where the page's declared language writes dates day first; month first on a
+# slash date otherwise, which is the convention the Americas write and the one
+# every earlier reader assumed; and nothing at all for an ambiguous dotted
+# date on a page that does not say, because nobody writes month first with
+# dots and a wrong date is worse than an unread one.
+# --------------------------------------------------------------------------
+
+# The languages that write a numeric date day first. English is decided by
+# its region (see `_DAY_FIRST_ENGLISH_REGIONS`), so a US page is untouched.
+DAY_FIRST_LANGUAGES = frozenset({
+    "vi", "id", "ms", "th", "fr", "de", "es", "it", "pt", "nl", "ru", "pl", "tr",
+    "cs", "sk", "ro", "el", "da", "nb", "nn", "no", "fi", "uk", "bg", "hr", "sr",
+    "sl", "et", "lv", "lt", "he", "ar", "fa", "ur", "hi", "bn", "ta", "te", "mr",
+    "gu", "kn", "ml", "ca", "gl", "eu", "is", "ga", "cy", "sq", "mk", "be", "ka",
+    "az", "kk", "sw", "af",
+})
+_DAY_FIRST_ENGLISH_REGIONS = frozenset({
+    "gb", "uk", "ie", "au", "nz", "in", "za", "sg", "my", "pk", "ng", "ke", "hk",
+    "mt", "cy", "ae", "sa", "eg", "gh", "lk", "bd", "np", "jm",
+})
+
+
+def writes_day_first(lang):
+    """Does a page declaring this language write a numeric date day first?"""
+    code = str(lang or "").strip().lower().replace("_", "-")
+    if not code:
+        return False
+    primary, _, rest = code.partition("-")
+    if primary == "en":
+        return rest[:2] in _DAY_FIRST_ENGLISH_REGIONS
+    return primary in DAY_FIRST_LANGUAGES
+
+
+# Day, month and year separated by one dot or one slash, the year in two
+# digits or four. Nothing may run into it on either side, so a version number
+# `1.10.20.4` and a dotted IP address are not dates.
+NUMERIC_DATE_RE = re.compile(
+    r"(?<![0-9.,/])([0-9]{1,2})([./])([0-9]{1,2})\2((?:19|20)?[0-9]{2})"
+    r"(?![0-9]|[.,/][0-9])")
+# "ngày 6 tháng 5 năm 2026" (the sixth day of the fifth month of 2026) and
+# "tháng 5 năm 2026" (May 2026), with the words written out.
+VIETNAMESE_DATE_RE = re.compile(
+    u"(?:ngày\\s+([0-9]{1,2})\\s+)?tháng\\s+([0-9]{1,2})\\s*(?:năm|,|/)\\s*"
+    u"((?:19|20)[0-9]{2})\\b", re.I)
+
+
+def read_printed_date(printed, lang="", today=None):
+    """The calendar date a numeric or Vietnamese date on a page states, or None.
+
+    `lang` is the page's declared language, and settles which number is the
+    day wherever the numbers themselves do not. A two-digit year is this
+    century's unless that would put it more than a year ahead of `today`.
+    A month with no day is read as its first day, the earliest the page can
+    be, so the reading can never make a page look fresher than it is.
+    """
+    import datetime as _datetime
+    text = str(printed or "")
+
+    def made(year, month, day):
+        try:
+            return _datetime.date(year, month, day)
+        except ValueError:
+            return None
+
+    match = VIETNAMESE_DATE_RE.search(text)
+    if match:
+        return made(int(match.group(3)), int(match.group(2)), int(match.group(1) or 1))
+    match = NUMERIC_DATE_RE.search(text)
+    if not match:
+        return None
+    first, separator, second, year_text = (
+        int(match.group(1)), match.group(2), int(match.group(3)), match.group(4))
+    year = int(year_text)
+    if len(year_text) == 2:
+        today = today or _datetime.date.today()
+        year += 2000
+        if year > today.year + 1:
+            year -= 100
+    if first > 12 and second > 12:
+        return None
+    if first > 12:
+        day, month = first, second
+    elif second > 12:
+        month, day = first, second
+    elif writes_day_first(lang):
+        day, month = first, second
+    elif separator == "/":
+        month, day = first, second
+    else:
+        return None
+    return made(year, month, day)
+
+
 def non_gregorian_dates(text, script="", language=""):
     """Every date in this text written in a calendar that is not the Gregorian.
 
@@ -4078,6 +4184,25 @@ def sentences(text):
 # and "alternative" appeared somewhere in the path. A slug only counts when it
 # is a segment, or the start of a hyphenated segment ("about" matches
 # "about-us" but not "roundabout").
+#
+# The item and the article words in the languages the shops and publishers
+# this audit meets actually write their addresses in. A Vietnamese cosmetics
+# shop keeps every product at `/san-pham/<slug>` and every post at
+# `/bai-viet/<slug>`; neither word was in any list, so fourteen product pages
+# were typed `other`, the shop was told no product detail page was crawled,
+# and its articles were graded as documents. One tuple each, read by the
+# page-type patterns, the listing test and the section-root test alike, so the
+# three cannot disagree about which word means "a post".
+PRODUCT_SLUGS_ELSEWHERE = ("san-pham", "sanpham", "produk", "producto", "productos",
+                           "produto", "produtos", "produit", "produits", "produkt",
+                           "produkte", "prodotto", "prodotti", "urun", "urunler")
+ARTICLE_SLUGS_ELSEWHERE = ("bai-viet", "baiviet", "tin-tuc", "tintuc", "artikel",
+                           "berita", "noticias", "noticia", "articulos", "articulo",
+                           "artigos", "actualites", "actualite", "notizie",
+                           "nieuws", "haberler", "blogg", "blogue",
+                           u"блог", u"بلاگ", u"مدونة", u"ブログ", u"博客",
+                           u"블로그", u"บล็อก")
+
 _URL_TYPE_SLUGS = (
     # The named forms as well as the bare words. `_DERIVED_SUFFIX` covers
     # `-policy` and not `-notice` or `-statement`, so `/help/privacy-notice`
@@ -4127,8 +4252,8 @@ _URL_TYPE_SLUGS = (
     ("article", ("blog", "news", "article", "articles", "post", "posts", "insight",
                  "insights", "stories", "story", "guides", "resources", "journal",
                  "episode", "episodes", "podcast", "podcasts", "transcript",
-                 "transcripts")),
-    ("product", ("product", "products", "item", "p", "sku")),
+                 "transcripts") + ARTICLE_SLUGS_ELSEWHERE),
+    ("product", ("product", "products", "item", "p", "sku") + PRODUCT_SLUGS_ELSEWHERE),
     # "explore" and "shelf" are here because of a measured storefront
     # whose listing pages are `/explore/<shelf>`: no word in that address was
     # recognised, so all of them were typed `other` - the type that is in the
@@ -4305,7 +4430,7 @@ def is_faceted_listing(url):
 # "which of these segments is the grouping word" is not one a slug regex over
 # the whole path can answer.
 _ITEM_ADDRESS_SLUGS = frozenset({"product", "products", "item", "items",
-                                 "p", "sku", "skus"})
+                                 "p", "sku", "skus"}) | frozenset(PRODUCT_SLUGS_ELSEWHERE)
 
 
 def the_address_names_one_item(url):
@@ -4335,7 +4460,7 @@ def the_item_grouping_word(url):
     "the address looks like a product page".
     """
     try:
-        path = (urlparse(url or "").path or "/").rstrip("/").lower()
+        path = unquote(urlparse(url or "").path or "/").rstrip("/").lower()
     except ValueError:
         return ""
     if is_faceted_listing(url) or is_search_result_page(url):
@@ -4349,6 +4474,54 @@ def the_item_grouping_word(url):
         if segment in _ITEM_ADDRESS_SLUGS:
             return segment
     return ""
+
+
+# The schema.org types that name one thing for sale. `ProductGroup` is one
+# item in several sizes or colours, and its sizes arrive as `Product` nodes
+# nested under `hasVariant` - variants of the one thing, not other things.
+_ONE_ITEM_JSONLD = frozenset({"product", "productgroup", "individualproduct",
+                              "productmodel"})
+
+
+def declares_one_product(page):
+    """Does this page's own markup name one product, at an item's address?
+
+    The price count is the measured separator between an item and a shelf, and
+    it is the right test where the page says nothing else. It is the wrong one
+    where the page does: an Indian clothing shop's `/products/<slug>` declares a
+    `ProductGroup` for the one blouse on it, with its five sizes as variants,
+    and prints 32 different prices - every one of them from the cross-sell
+    carousels under the blouse. The page was set aside as "a grid of things for
+    sale", and the report said no product detail page was crawled, beside two
+    findings counting "11 product pages this crawl read".
+
+    True where the address names one item (`the_address_names_one_item`) and
+    the page's top-level product nodes carry one name between them. A node
+    nested under another - a variant, a related item, a list entry - is not a
+    second declaration of what this page is. A shelf that declares a Product
+    per tile carries many names, and a shelf's address is not an item's, so
+    this cannot promote one.
+    """
+    page = page or {}
+    if not the_address_names_one_item(page.get("url") or ""):
+        return False
+    names, groups = set(), 0
+    for node in page.get("jsonld") or []:
+        if not isinstance(node, dict) or node.get("_nested_in"):
+            continue
+        declared = node.get("@type")
+        declared = declared if isinstance(declared, list) else [declared]
+        types = {str(t).split("/")[-1].lower() for t in declared if t}
+        if not types & _ONE_ITEM_JSONLD:
+            continue
+        if "productgroup" in types:
+            groups += 1
+        name = " ".join(str(node.get("name") or "").split()).lower()
+        if name:
+            names.add(name)
+    if groups == 1:
+        return True
+    return len(names) == 1
 
 # Buying affordances that only appear on a real product detail page. Generic
 # commerce words ("quantity", "sku") are deliberately excluded: they show up in
@@ -4416,7 +4589,16 @@ _CURRENCY_WORDS = (r"USD|EUR|GBP|INR|AUD|CAD|SGD|AED|JPY|KRW|CNY|CHF|SEK|NOK|DKK
                    r"\u0930\u0941\u092a\u092f\u0947|\u0e1a\u0e32\u0e17|"
                    # Unit names that are not English words. "Won", "crown" and
                    # "pound" are, so they are not here.
-                   r"rupees?|rupiah|ringgit|baht|taka|dirhams?|riyals?")
+                   r"rupees?|rupiah|ringgit|baht|taka|dirhams?|riyals?|"
+                   # The dong as Vietnam prints it: "339.000 đ", "339,000đ",
+                   # "99.000 VNĐ". The letter is a Latin letter and not a
+                   # currency sign, so the Unicode rule below never saw it,
+                   # and a cosmetics shop printing a price on every product
+                   # page was told "0 pages that publish a price". It is
+                   # never a word on its own in Vietnamese - every word it
+                   # starts carries a vowel after it - so the `\b` the
+                   # branches put after a unit keeps it to the price.
+                   u"vnđ|đ")
 # The everyday abbreviations, which are not ISO codes and are what these
 # markets actually print: Rs. and Rs across South Asia, Rp in Indonesia, RM in
 # Malaysia, RMB alongside the yuan sign.
@@ -4498,6 +4680,43 @@ def _figure_is_a_threshold(text, start):
     before = text[max(0, start - THRESHOLD_WINDOW):start]
     return bool(_THRESHOLD_WORD_RE.search(before)
                 and _THRESHOLD_SUBJECT_RE.search(before))
+
+
+# A currency figure that reports a company's results rather than a price.
+#
+# A holding company's shareholder letter opens "Operating earnings in 1977 of
+# $21,904,000, or $22.54 per share, were moderately better than anticipated",
+# and its press-release list reads "... to Acquire <a house builder> for $8.5
+# Billion". Both were read as the site stating what it charges: the site was
+# typed an online shop, told "the site sells something", and its pricing fact
+# was an earnings figure. Nothing is for sale on it.
+#
+# Three readings, each one a figure no shop prints as its price: an amount per
+# share; an amount in billions or trillions; and an amount whose sentence, just
+# in front of it, names a line of a financial statement - earnings, revenue,
+# net income, assets, dividends, book or market value. "Revenue share from $10
+# a month" is the case the last one has to leave alone, which is why it reads
+# only the few words straight in front of the figure and only the nouns an
+# accounts page is made of.
+_PER_SHARE_AFTER_RE = re.compile(
+    r"^\s*(?:(?:billion|bn|million|mn|thousand)\s+)?(?:per|a|each)\s+"
+    r"(?:class\s+[a-z]\s+|diluted\s+|basic\s+|common\s+|ordinary\s+)?shares?\b", re.I)
+_VERY_LARGE_AFTER_RE = re.compile(r"^\s*(?:billion|bn|trillion|tn)\b", re.I)
+_FINANCIAL_LINE_BEFORE_RE = re.compile(
+    r"\b(?:earnings|net\s+income|income\s+from|revenues?|turnover|profits?|losses|"
+    r"ebitda|assets|liabilities|shareholders'?\s+equity|net\s+worth|book\s+value|"
+    r"market\s+(?:value|capitali[sz]ation)|dividends?|cash\s+flows?|operating\s+"
+    r"(?:income|profit|result))\b[^.!?]{0,40}$", re.I)
+FINANCIAL_LINE_WINDOW = 60
+
+
+def _figure_is_a_financial_result(text, start, end):
+    """Does this figure report a result, a share value or a deal size?"""
+    after = text[end:end + 40]
+    if _PER_SHARE_AFTER_RE.match(after) or _VERY_LARGE_AFTER_RE.match(after):
+        return True
+    before = text[max(0, start - FINANCIAL_LINE_WINDOW):start]
+    return bool(_FINANCIAL_LINE_BEFORE_RE.search(before))
 
 
 # A question is a heading that ends in a question mark. The English opener
@@ -5095,7 +5314,7 @@ LISTING_SEGMENTS = frozenset({
     "podcast", "podcasts", "transcripts", "archive", "archives", "index", "all",
     "latest", "browse", "overview", "list", "listing", "category", "categories",
     "tag", "tags", "author", "authors", "events", "library", "case-studies",
-})
+}) | frozenset(ARTICLE_SLUGS_ELSEWHERE)
 
 # Half the subheadings on the page also appearing as link labels on it. Below
 # that, a page that happens to link to a few of its own sections is not an
@@ -5111,7 +5330,8 @@ LISTING_OWN_PROSE_WORDS = 10
 
 _LISTING_PATH_RE = re.compile(
     r"/(?:blog|news|posts?|articles?|stories|archives?|category|categories"
-    r"|tags?|topics?|latest|browse|search|collections?|index)"
+    r"|tags?|topics?|latest|browse|search|collections?|index|"
+    + "|".join(re.escape(slug) for slug in ARTICLE_SLUGS_ELSEWHERE) + r")"
     r"(?:/page/[0-9]+)?/?$", re.I)
 
 _LISTING_JSONLD_TYPES = frozenset({
@@ -5219,6 +5439,52 @@ PRICE_BEARING_TYPES = frozenset({
 })
 
 
+# The sections a site files its writing under, and the words a page reporting
+# to shareholders is titled with. A page in one of them may print a figure; it
+# is reporting one, not charging it.
+#
+# A holding company's press releases sit one year to a page at
+# `/news/<year>news.html`, and a list of links is a listing, which is a type
+# that bears prices - so the one release headline reading "... to Acquire <a
+# house builder> for $8.5 Billion" made the company a seller, and the report
+# read it as an online shop. A Vietnamese cosmetics shop's article index at
+# `/en/articles` mentions a 10,000 VND voucher, and the report named that index
+# as the first of the pages that "sell something".
+_WRITING_SECTION_SEGMENTS = frozenset(
+    slug for page_type, slugs in _URL_TYPE_SLUGS
+    if page_type in ("article", "press") for slug in slugs) | frozenset({
+        "releases", "press-releases", "news-releases", "pressreleases", "letters",
+        "shareholder-letters", "annual-report", "annual-reports", "investors",
+        "investor-relations"})
+_REPORT_TO_SHAREHOLDERS_RE = re.compile(
+    r"\b(?:share|stock)holders?\b|\bannual\s+reports?\b|\b(?:press|news)\s+releases?\b"
+    r"|\binvestor\s+relations\b|\bquarterly\s+(?:reports?|results|earnings)\b"
+    r"|\b(?:chairman|chairwoman|ceo)'?s?\s+letter\b", re.I)
+
+
+def a_page_of_writing(page):
+    """Is this page filed with the site's writing, or a report to its owners?
+
+    Read from the address and from the page's own title and H1 - never from
+    its prose, where every shop mentions its investors somewhere. A faceted
+    shop address is never one: `/collections/<handle>` is a shelf whatever the
+    handle says.
+    """
+    page = page or {}
+    url = page.get("url") or ""
+    if is_faceted_listing(url):
+        return False
+    try:
+        path = unquote(urlparse(url).path or "/").lower()
+    except ValueError:
+        path = "/"
+    if any(segment in _WRITING_SECTION_SEGMENTS for segment in path.split("/") if segment):
+        return True
+    names = [str(page.get("title") or "")] + [
+        str(h) for h in ((page.get("headings") or {}).get("h1") or [])]
+    return any(_REPORT_TO_SHAREHOLDERS_RE.search(name) for name in names)
+
+
 def sells_something(snapshot, pages=None):
     """Does this site sell anything, or take a booking?
 
@@ -5274,7 +5540,9 @@ def sells_something(snapshot, pages=None):
         # that matters. `shell_state_text` is recorded only for thin pages and
         # is used only for questions about which facts the site holds, never
         # for how its prose reads.
-        if page.get("page_type") in PRICE_BEARING_TYPES and (
+        # A list of posts or press releases, or a letter to shareholders, is
+        # not a page whose job is prices. See `a_page_of_writing`.
+        if page.get("page_type") in PRICE_BEARING_TYPES and not a_page_of_writing(page) and (
                 quotes_its_own_price(page.get("body_text") or "")
                 or quotes_its_own_price(page.get("shell_state_text") or "")):
             return True
@@ -5643,6 +5911,241 @@ def names_a_civic_institution(value):
     return bool(match) and _reads_as_a_proper_name(match.group(0))
 
 
+# --------------------------------------------------------------------------
+# A national institution, named in its own language
+#
+# A national library and archive writes its name in Persian - "the Documents
+# and National Library Organisation of <country>" - in its title and its
+# Organization markup, and links from its homepage to the head of state's
+# site, the supreme leader's site and the culture ministry's. The report
+# called it "a company or non-profit that does not sell online" and told it
+# to claim a business database entry and an employer profile. Every pattern
+# above reads English words, and `.ir` is not a suffix a registry reserves.
+#
+# Two readings, both from what the site says about itself:
+#
+#   its name   the national library, archive, museum or a ministry, in the
+#              site's own language - read from the same strings the civic
+#              reading reads, and never from prose. A bare "library" or
+#              "museum" is not enough on its own in any language, because
+#              "Biblioteca" is a café and "bibliothèque" is a JavaScript
+#              package; the national form, or a ministry, is.
+#   its links  government sites the homepage links: addresses under a
+#              suffix a registry reserves for government, and a head of
+#              state's, parliament's or ministry's own two-part address under
+#              a country code. Two or more of them corroborate the name, and
+#              they let the bare institution noun count.
+#
+# Nothing for sale and no basket, exactly as for the civic reading. A
+# university is not read here: the academic rules decide it, and decide it
+# `organisation` on purpose - see the block above `_INSTITUTION_NAME_RE`.
+# --------------------------------------------------------------------------
+
+_NATIONAL_INSTITUTION_NAME_RE = re.compile(
+    # English, Spanish, Portuguese, Italian, French, German, Indonesian and
+    # Vietnamese: the national library, archive and museum, and a ministry.
+    r"\b(?:national|state)\s+(?:library|archives?|museum)\b|\bministry\s+of\b"
+    r"|\bbiblioteca\s+(?:nacional|nazionale)\b|\bbiblioth[eè]que\s+nationale\b"
+    r"|\b(?:national|staats|landes)bibliothek\b|\bperpustakaan\s+nasional\b"
+    r"|\barchivo\s+(?:general\s+de\s+la\s+naci[oó]n|nacional|hist[oó]rico\s+nacional)\b"
+    r"|\barquivo\s+nacional\b|\barchivio\s+(?:centrale\s+dello\s+stato|di\s+stato)\b"
+    r"|\barchives\s+(?:nationales|d[ée]partementales|municipales)\b"
+    r"|\b(?:bundes|staats|landes|stadt)archiv\b|\barsip\s+nasional\b"
+    r"|\bmuseo\s+(?:nacional|nazionale)\b|\bmuseu\s+nacional\b|\bmus[ée]e\s+national\b"
+    r"|\b(?:national|landes)museum\b|\bmuseum\s+nasional\b"
+    r"|\bministerio\s+de\b|\bminist[ée]rio\s+d[aoe]s?\b|\bministero\s+d|\bminist[èe]re\s+(?:de|des|du)\b"
+    r"|\b(?:bundes)?ministerium\b|\bkementerian\s+\w"
+    u"|thư\\s+viện\\s+quốc\\s+gia|lưu\\s+trữ\\s+quốc\\s+gia"
+    u"|bảo\\s+tàng\\s+quốc\\s+gia"
+    u"|\\bbộ\\s+(?:văn\\s+hóa|giáo\\s+dục|y\\s+tế|tài\\s+chính"
+    u"|ngoại\\s+giao|nội\\s+vụ|quốc\\s+phòng|tư\\s+pháp"
+    u"|khoa\\s+học|thông\\s+tin)"
+    # Persian: the national library ("ketabkhane-ye melli"), the national
+    # documents or archive, the national museum, and "vezarat" (ministry).
+    u"|کتابخانه[\\s\u200c]*(?:ی[\\s\u200c]*)?ملی"
+    u"|اسناد\\s+(?:و\\s+\\S+\\s+)?ملی"
+    u"|آرشیو\\s+ملی"
+    u"|موزه[\\s\u200c]*(?:ی[\\s\u200c]*)?ملی"
+    u"|وزارت\\s+\\S"
+    # Arabic: the national library, "dar al-kutub", the national archive,
+    # "dar al-watha'iq", the national museum, and "wizarat" (ministry).
+    u"|المكتبة\\s+الوطنية"
+    u"|دار\\s+الكتب"
+    u"|الأرشيف\\s+الوطني"
+    u"|دار\\s+الوثائق"
+    u"|المتحف\\s+الوطني"
+    u"|وزارة\\s+\\S"
+    # Hebrew: the national library, the national or state archive, the
+    # national museum. "Misrad" is also a firm's office, so a ministry is read
+    # only with the portfolio after it.
+    u"|הספרייה\\s+הלאומית"
+    u"|הארכיון\\s+(?:הלאומי|הממלכתי)"
+    u"|המוזיאון\\s+הלאומי"
+    u"|משרד\\s+ה(?:חינוך|בריאות"
+    u"|תרבות|חוץ|פנים|אוצר"
+    u"|משפטים|ביטחון)"
+    # Thai: the national library, national archives, national museum, and
+    # "krasuang" (ministry).
+    u"|หอสมุดแห่งชาติ"
+    u"|หอจดหมายเหตุแห่งชาติ"
+    u"|พิพิธภัณฑ(?:์|สถาน)แห่งชาติ"
+    u"|กระทรวง"
+    # Japanese and Chinese: a national ("kokuritsu", "guojia") library,
+    # museum or archive, and a public records office.
+    u"|国立[\u4e00-\u9fff]{0,4}(?:図書館|博物館|美術館"
+    u"|圖書館|图书馆|博物馆)"
+    u"|公文書館"
+    u"|[国國][家](?:图书馆|圖書館|档案馆|檔案館"
+    u"|博物馆|博物館)"
+    # Korean: a national ("gungnip") library, museum or gallery, and the
+    # national records service.
+    u"|국립[\uac00-\ud7a3]{0,6}(?:도서관|박물관|미술관)"
+    u"|국가기록원"
+    # Hindi: the national ("rashtriya") library, museum or archive, and
+    # "mantralaya" (ministry).
+    u"|राष्ट्रीय\\s+(?:पुस्तकालय"
+    u"|संग्रहालय|अभिलेखागार)"
+    u"|मंत्रालय",
+    re.I)
+
+# A ministry written the way Chinese, Japanese and Korean write one: a short
+# name that is the portfolio followed by the character for ministry. Read
+# only as the whole of a name, because the same character ends a club, a
+# headquarters and a sales department, which the veto below names.
+_CJK_MINISTRY_NAME_RE = re.compile(
+    u"[\u4e00-\u9fff]{1,6}[省部]|[\uac00-\ud7a3]{1,8}부")
+_CJK_MINISTRY_VETO_RE = re.compile(
+    u"俱乐部|倶楽部|本部|事業部|営業部"
+    u"|支部|全部|본부|사업부|지부")
+
+# The institution nouns on their own, in the same languages. Counted only
+# where the homepage's government links corroborate them.
+_INSTITUTION_NOUN_RE = re.compile(
+    r"\b(?:librar(?:y|ies)|archives?|museum|biblioteca|biblioth[eè]que|bibliothek"
+    r"|museo|museu|mus[ée]e|archivo|arquivo|archivio|perpustakaan|arsip)\b"
+    u"|thư\\s+viện|bảo\\s+tàng|lưu\\s+trữ"
+    u"|کتابخانه|موزه|آرشیو"
+    u"|مكتبة|متحف|أرشيف"
+    u"|ספרי|מוזיאון|ארכיון"
+    u"|ห้องสมุด|หอสมุด"
+    u"|พิพิธภัณฑ"
+    u"|図書館|博物館|美術館|文書館|图书馆"
+    u"|圖書館|博物馆|档案馆|檔案館"
+    u"|도서관|박물관|기록원"
+    u"|पुस्तकालय|संग्रहालय"
+    u"|अभिलेखागार",
+    re.I)
+
+# A trading word in the languages above, read beside `_TRADING_NAME_RE`: a
+# company, a shop, a store. "Shop" in Persian and Arabic, "company" in
+# Chinese, Japanese, Thai, Hindi and Vietnamese, and so on.
+_TRADING_NAME_ELSEWHERE_RE = re.compile(
+    u"有限公司|株式会社|公司|集团|集團"
+    u"|商店|ショップ|شرکت|فروشگاه"
+    u"|شركة|متجر|חנות"
+    u"|บริษัท|ร้าน|कंपनी"
+    u"|công\\s+ty|cửa\\s+hàng|\\btoko\\b|\\btienda\\b|\\bboutique\\b|\\bladen\\b",
+    re.I)
+
+
+def names_a_public_institution(value):
+    """"national", "institution" or "": how plainly this name is a public
+    institution's, in any of the languages above.
+
+    "national" is the national library, archive or museum, or a ministry - a
+    name nothing else is called. "institution" is the bare noun, which the
+    caller counts only beside government links.
+    """
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text or _TRADING_NAME_RE.search(text) or _TRADING_NAME_ELSEWHERE_RE.search(text):
+        return ""
+    if _COLLECTION_NOUN_RE.search(text):
+        return ""
+    if _NATIONAL_INSTITUTION_NAME_RE.search(text):
+        return "national"
+    if _CJK_MINISTRY_NAME_RE.fullmatch(text) and not _CJK_MINISTRY_VETO_RE.search(text):
+        return "national"
+    if _INSTITUTION_NOUN_RE.search(text):
+        return "institution"
+    return ""
+
+
+# The first label of a head of state's, a parliament's or a government's own
+# address under a country code - `<word>.<cc>`, two labels and no more. A
+# country's ministries mostly sit under its reserved suffix, which
+# `_registry_suffix_kind` already reads; its president and its parliament
+# often do not.
+_GOVERNMENT_HOST_LABELS = frozenset({
+    "president", "presidency", "presidencia", "presidence", "presidenza",
+    "praesident", "leader", "primeminister", "parliament", "parlament",
+    "majlis", "ministry", "ministerio", "ministere", "ministero", "ministerie",
+    "ministerium", "government", "gobierno", "governo", "gouvernement",
+    "regierung", "bundesregierung", "kerajaan", "chinhphu",
+})
+
+# How many government sites a homepage has to link before they count as the
+# site placing itself inside the state rather than citing it once.
+GOVERNMENT_LINKS_MINIMUM = 2
+
+
+def is_a_government_host(host):
+    """Is this address a government's own: a reserved suffix, or a head of
+    state's, parliament's or ministry's two-part address under a country code?"""
+    host = strip_www((host or "").lower().strip("."))
+    if not host:
+        return False
+    if _registry_suffix_kind(host) == PUBLIC_BODY:
+        return True
+    labels = [label for label in host.split(".") if label]
+    return (len(labels) == 2 and len(labels[-1]) == 2
+            and labels[0] in _GOVERNMENT_HOST_LABELS)
+
+
+def government_sites_linked(snapshot):
+    """The government hosts the site's homepage links, sorted.
+
+    The homepage, because that is where a body places itself; every page when
+    the crawl typed none as the homepage. The site's own host and its
+    subdomains are never counted.
+    """
+    pages = snapshot.get("pages") or []
+    own = strip_www((urlparse(snapshot.get("origin") or "").hostname or "").lower())
+    homes = [p for p in pages if p.get("page_type") == "home"] or pages
+    found = set()
+    for page in homes:
+        for link in ((page.get("links") or {}).get("external") or []):
+            try:
+                host = strip_www((urlparse((link or {}).get("url") or "").hostname or "").lower())
+            except ValueError:
+                continue
+            if not host or (own and (host == own or host.endswith("." + own))):
+                continue
+            if is_a_government_host(host):
+                found.add(host)
+    return sorted(found)
+
+
+def _public_institution_name(snapshot):
+    """`(name, strength)` for the strongest public-institution name the site
+    calls itself by, or `("", "")`."""
+    names = list(_site_identity_strings(snapshot))
+    for page in snapshot.get("pages") or []:
+        if page.get("page_type") != "home":
+            continue
+        og = page.get("og") or {}
+        for key in ("og:site_name", "site_name"):
+            if og.get(key):
+                names.append(str(og.get(key)))
+    best = ("", "")
+    for name in names:
+        strength = names_a_public_institution(name)
+        if strength == "national":
+            return name.strip(), strength
+        if strength and not best[0]:
+            best = (name.strip(), strength)
+    return best
+
+
 # A public body saying what it is, in its own words.
 #
 # The registry suffix is the strongest reading this classifier has, and it is
@@ -5912,6 +6415,9 @@ def _site_kind_signals(snapshot):
         "civic_markup": bool(jsonld & _CIVIC_JSONLD),
         "civic_name": next((name for name in _site_identity_strings(snapshot)
                             if names_a_civic_institution(name)), ""),
+        # See `names_a_public_institution` and `government_sites_linked`.
+        "public_institution": _public_institution_name(snapshot),
+        "government_links": government_sites_linked(snapshot),
         "public_self_description": public_body_self_description(snapshot, pages),
         # `None` where no page recorded its nodes, which the rule below reads
         # as "no evidence" and not as "no".
@@ -6250,6 +6756,25 @@ def site_kind(snapshot):
                         ['the site calls itself "{}", which is the name of a '
                          "public institution".format(facts["civic_name"]),
                          "nothing is for sale"])
+    # A national library, archive, museum or ministry named in the site's own
+    # language, corroborated by the government sites its homepage links. See
+    # `names_a_public_institution`.
+    name, strength = facts["public_institution"]
+    governments = facts["government_links"]
+    corroborated = len(governments) >= GOVERNMENT_LINKS_MINIMUM
+    if (name and (strength == "national" or corroborated)
+            and not (facts["sells"] or facts["has_basket"])):
+        signals = ['the site calls itself "{}", which is the name of {}'.format(
+            truncate(name, 100),
+            "a national library, archive or museum, or a ministry"
+            if strength == "national" else "a library, archive or museum")]
+        if corroborated:
+            signals.append("its homepage links {} government sites ({})".format(
+                len(governments), ", ".join(governments[:4])))
+        signals.append("nothing is for sale")
+        return SiteKind(PUBLIC_BODY,
+                        "high" if strength == "national" and corroborated else "medium",
+                        signals)
     # See `public_body_self_description`: the site's own sentence about what
     # it is, where no suffix and no markup says it.
     if facts["public_self_description"] and not (facts["sells"] or facts["has_basket"]):
@@ -7295,7 +7820,10 @@ def detect_page_type(url, html_meta):
     without saying so in the URL).
     """
     parsed = urlparse(url)
-    path = (parsed.path or "/").rstrip("/").lower() or "/"
+    # Decoded, so a slug written in its own script - a Persian or a Japanese
+    # blog section - is compared as the word it is rather than as the
+    # percent-escapes it travels in.
+    path = unquote(parsed.path or "/").rstrip("/").lower() or "/"
     text = (html_meta.get("text") or "")
     lower_text = text[:6000].lower()
     jsonld_types = {t.lower() for t in html_meta.get("jsonld_types") or []}
@@ -7554,7 +8082,7 @@ _SECTION_ROOTS = frozenset({
     "blog", "news", "articles", "article", "posts", "post", "insights",
     "stories", "resources", "guides", "press", "updates", "journal",
     "episodes", "podcast", "podcasts", "transcripts",
-})
+}) | frozenset(ARTICLE_SLUGS_ELSEWHERE)
 
 
 # A year, then optionally a month, then optionally a day, and nothing after
@@ -7825,6 +8353,8 @@ def find_prices(text, limit=PRICES_READ_PER_PAGE):
     found = []
     for match in _PRICE_RE.finditer(text):
         if _figure_is_a_threshold(text, match.start()):
+            continue
+        if _figure_is_a_financial_result(text, match.start(), match.end()):
             continue
         found.append(match.group(0).strip())
         if len(found) >= limit:
@@ -8767,6 +9297,380 @@ def profiles_naming_brand(profiles, brand_name, declared=None, name_forms=()):
             out[platform] = url
     return out
 
+
+# --------------------------------------------------------------------------
+# Somewhere a brand keeps an account
+#
+# An account-shaped link is a profile only on a host where brands keep
+# accounts. Four sites had hosts of other kinds counted, and every one of them
+# spelled the brand's name, which is how it got in:
+#
+#   a shipping service's tracking page      `<shop>.<tracking vendor>/`, linked
+#                                           "Track Order", was a clothing
+#                                           shop's one off-site profile, and a
+#                                           site with no account at all was
+#                                           told it had one, at medium
+#   the store's own platform subdomain and  two of a craft label's six, which
+#   a fashion magazine's article about it   passed it on the strongest measure
+#                                           here with four real accounts - and
+#                                           the article went into its `sameAs`
+#   a certification vendor's course page    one of a documentation site's own
+#   a social page's messaging address       counted beside that same page as a
+#                                           second account
+#
+# A name says whose page something is. It says nothing about whether the host
+# is somewhere a brand keeps an account: a checkout, a tracking page, a press
+# article, a vendor's catalogue entry and a partner's page all carry the
+# brand's name for reasons of their own.
+#
+# So the host decides, from the kinds of place that hold accounts: social
+# networks and messaging channels, video and podcast hosts, code and package
+# hosts, professional networks and company records, review and
+# business-listing sites, the marketplaces a brand keeps a storefront on, app
+# stores, and encyclopaedias and knowledge bases. A list of them cannot be
+# finished, and the cost of that is bounded: the site's own `sameAs` or
+# `rel="me"` still counts on any host at all, because a site saying "this
+# account is me" needs no list - which is how a self-hosted Mastodon account
+# is found.
+# --------------------------------------------------------------------------
+
+# Hosts, or a host and the path its accounts live under. A host matches itself
+# and every host beneath it, so `open.<music service>` and `<name>.substack.com`
+# are both found. Every address the page extractor names in `SOCIAL_PLATFORMS`
+# is recognised here too, and a test holds the two together.
+_PROFILE_PLATFORM_HOSTS = (
+    # Social networks and messaging channels.
+    "facebook.com", "fb.com", "instagram.com", "x.com", "twitter.com", "threads.net",
+    "bsky.app", "tiktok.com", "pinterest.com", "reddit.com", "vk.com", "weibo.com",
+    "xiaohongshu.com", "douyin.com", "line.me", "t.me", "telegram.me", "whatsapp.com",
+    "wa.me", "kakao.com", "naver.com", "discord.gg", "discord.com", "mastodon.social",
+    "linktr.ee",
+    # Video, music and podcasts.
+    "youtube.com", "youtu.be", "vimeo.com", "twitch.tv", "bilibili.com", "soundcloud.com",
+    "spotify.com", "podcasts.apple.com", "music.apple.com", "podcasts.google.com",
+    "podbean.com", "anchor.fm",
+    # Writing, creators and funding.
+    "medium.com", "substack.com", "patreon.com", "opencollective.com", "dev.to",
+    # Code and packages.
+    "github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "sourceforge.net",
+    "gitea.com", "hub.docker.com", "readthedocs.io", "stackoverflow.com", "pkg.go.dev",
+    "pub.dev", "hex.pm", "scholar.google.com",
+    # Professional networks and company records.
+    "linkedin.com", "crunchbase.com", "glassdoor.com",
+    # Review and business-listing sites, and the map entries a business claims.
+    "yelp.com", "trustpilot.com", "g.page", "maps.google.com", "google.com/maps",
+    "goo.gl/maps", "maps.app.goo.gl", "business.site", "bcorporation.net",
+    # Marketplaces a brand keeps a storefront on.
+    "shopee.com", "lazada.com", "rakuten.com", "rakuten.co.jp", "zozo.jp",
+    "shopping.yahoo.co.jp", "tiki.vn", "sendo.vn",
+    # App stores.
+    "apps.apple.com", "itunes.apple.com", "play.google.com", "chromewebstore.google.com",
+    # Encyclopaedias and knowledge bases.
+    "wikipedia.org", "wikidata.org", "namu.wiki",
+)
+
+# The same kinds of place, held by the label each platform chooses rather than
+# by a whole address - the way the publishing platforms are held - so one entry
+# covers every country a platform keeps an address in: `<platform>.co.uk`,
+# `<platform>.com.vn`, `<platform>.co.id`. Matched against the label a registry
+# sold, never against any label of the host, so `<platform>.<somebody>.test`
+# is somebody else's host.
+_PROFILE_PLATFORM_LABELS = frozenset({
+    # Social networks, video and creators.
+    "snapchat", "tumblr", "zhihu", "douban", "dailymotion", "deezer", "pocketcasts",
+    "castbox", "behance", "dribbble", "flickr", "producthunt", "ko-fi", "buymeacoffee",
+    # Code, packages and research records.
+    "huggingface", "npmjs", "pypi", "crates", "rubygems", "packagist", "nuget", "metacpan",
+    "anaconda", "readthedocs", "stackexchange", "orcid", "researchgate", "zenodo",
+    "figshare", "osf", "doi",
+    # Professional networks and company records.
+    "xing", "wellfound", "indeed",
+    # Review and business-listing sites.
+    "tripadvisor", "trustpilot", "foursquare", "bbb", "capterra", "sitejabber", "houzz",
+    "zomato", "opentable", "tabelog", "dianping", "justdial", "yell",
+    # Marketplaces.
+    "amazon", "ebay", "etsy", "rakuten", "shopee", "lazada", "zalora", "tokopedia",
+    "bukalapak", "blibli", "flipkart", "myntra", "nykaa", "ajio", "tmall", "taobao",
+    "coupang", "mercadolibre", "mercadolivre", "allegro",
+    # Encyclopaedias and knowledge bases.
+    "britannica", "wikimedia",
+})
+
+
+def _registered_label(host):
+    """The label a registry sold: `shop.<name>.co.uk` -> `<name>`."""
+    labels = [label for label in strip_www(host or "").lower().split(".") if label]
+    if len(labels) < 2:
+        return ""
+    labels = labels[:-1]
+    while len(labels) > 1 and labels[-1] in _REGISTRY_HOST_LABELS:
+        labels = labels[:-1]
+    return labels[-1]
+
+
+def on_a_profile_platform(url):
+    """Is this address on a host where brands keep accounts?
+
+    A bare host is accepted as well as a URL, because the article-address test
+    below holds a host and nothing else.
+    """
+    text = str(url or "")
+    try:
+        parts = urlparse(text if "://" in text else "https://" + text)
+    except ValueError:
+        return False
+    host = strip_www((parts.hostname or "").lower())
+    if not host:
+        return False
+    path = (parts.path or "").lstrip("/").lower()
+    for entry in _PROFILE_PLATFORM_HOSTS:
+        entry_host, _, prefix = entry.partition("/")
+        if (host == entry_host or host.endswith("." + entry_host)) and path.startswith(prefix):
+            return True
+    return _registered_label(host) in _PROFILE_PLATFORM_LABELS
+
+
+def claimed_by_the_site(declared_urls):
+    """The addresses the site's own `sameAs` or `rel="me"` claims, in every spelling."""
+    claimed = {url for url in declared_urls or () if url}
+    return claimed | {one_account("", url)[1] for url in claimed}
+
+
+def could_be_an_account(url, claimed=frozenset()):
+    """May this address be listed as one of the brand's own accounts at all?
+
+    Only on a host where brands keep accounts, or where the site's own `sameAs`
+    or `rel="me"` claims the address, on any host. The one rule for both places
+    a report names the brand's accounts - the corroboration count and the
+    paste-ready `sameAs` block - so neither lists an address the other left out.
+    `claimed` is what `claimed_by_the_site` returns.
+    """
+    account = one_account("", url)[1]
+    return url in claimed or account in claimed or on_a_profile_platform(account)
+
+
+# A social page's messaging address. `m.me/<handle>` opens a conversation with
+# the page at `facebook.com/<handle>`: one account, reached two ways, and a
+# cosmetics shop linking both on every page was counted as having two.
+_MESSAGING_ADDRESS_HOSTS = frozenset({"m.me"})
+
+
+def one_account(platform, url):
+    """`(platform, url)`, with a messaging address folded into the page it opens."""
+    try:
+        parts = urlparse(str(url or ""))
+    except ValueError:
+        return platform, url
+    if strip_www((parts.hostname or "").lower()) in _MESSAGING_ADDRESS_HOSTS:
+        handle = next((s for s in (parts.path or "").split("/") if s), "")
+        if handle:
+            return "Facebook", "https://www.facebook.com/" + handle
+    return platform, url
+
+
+# Below this many crawled pages there is no such thing as "linked from only
+# one page", so the citation test stays out of the way of a small crawl.
+CITATION_MIN_PAGES = 5
+
+
+def site_own_profiles(pages, declared, names, host=""):
+    """({platform: url}, [dropped as citations], [not on a profile platform]).
+
+    The accounts the site links as its own.
+
+    `social_profiles` holds one URL per platform per page, and flattening the
+    pages with `dict.update` let whichever page came last win. On
+    a statistics charity that handed an article's citations to the brand:
+    `youtube.com/@altrufisica` and
+    `en.wikipedia.org/wiki/History_of_ethanol_fuel_in_Brazil` were recorded as
+    the brand's own profiles, and the report then certified "the site links to
+    8 distinct off-site profiles" and "all 4 verifiable profile link(s)
+    resolve" about two accounts belonging to other people.
+
+    An account is linked from the site's chrome and so appears on page after
+    page; a citation appears in the one article that cites it. Where a URL
+    appears once and neither names the brand, sits in the site's own `sameAs`,
+    nor is an opaque identifier that cannot be read either way, it is a
+    citation. That test runs for every platform, not for Wikipedia alone.
+
+    And before any of that, the host has to be somewhere a brand keeps an
+    account, unless the site's own `sameAs` or `rel="me"` claims the address.
+    See `on_a_profile_platform`.
+
+    `host` is read for the same reason the declared names are: the labels of
+    the site's own address are romanised forms of its name, and on a site whose
+    name is not written in the Latin alphabet they are the only forms a handle
+    could ever carry. See `host_name_forms`.
+    """
+    declared = declared or {}
+    # The name test is only ever an escape from the appearance test below, so
+    # widening the names it may use can keep a profile and can never drop one.
+    names = [n for n in list(names) + host_name_forms(host) if n]
+    claimed = claimed_by_the_site(declared.values())
+    counts = {}
+    elsewhere = set()
+    # Where the link sits decides this better than how often it appears. A
+    # brand's own account is in the header or the footer; a citation is in the
+    # body of the one article that cites it. Counting appearances alone dropped
+    # a site's real X account, linked once from its footer and once from its
+    # `sameAs`, on a run where the `sameAs` had been broken - and a footer link
+    # is exactly the evidence that settles it.
+    in_chrome = set()
+    for page in pages:
+        links = page.get("links") or {}
+        for bucket in ("nav", "footer"):
+            for link in links.get(bucket) or []:
+                url = (link or {}).get("url") if isinstance(link, dict) else None
+                if url:
+                    in_chrome.add(url)
+                    in_chrome.add(one_account("", url)[1])
+        for platform, url in (page.get("social_profiles") or {}).items():
+            if not url:
+                continue
+            platform, account = one_account(platform, url)
+            if not could_be_an_account(url, claimed):
+                elsewhere.add(url)
+                continue
+            counts[(platform, account)] = counts.get((platform, account), 0) + 1
+
+    by_platform = {}
+    for (platform, url), count in counts.items():
+        by_platform.setdefault(platform, []).append((count, url))
+
+    chosen, dropped = {}, []
+    total = len(pages)
+    for platform, entries in sorted(by_platform.items()):
+        claimed_here = declared.get(platform)
+        # The site's own `sameAs` first, then the URL the most pages link, then
+        # the shortest, then alphabetically, so two runs of one snapshot cannot
+        # pick different accounts for one platform.
+        order = sorted(entries,
+                       key=lambda e: (0 if e[1] == claimed_here else 1, -e[0], len(e[1]), e[1]))
+        for count, url in order:
+            if looks_like_a_citation(url, count, total, claimed_here, names, in_chrome):
+                dropped.append(url)
+                continue
+            chosen[platform] = url
+            break
+    return chosen, sorted(dropped), sorted(elsewhere)
+
+
+# An article's address, not an account's. The last segment of the path is a
+# headline: several hyphenated words, very often ending in the publisher's
+# numeric story id. A furniture retailer's report counted
+# "<magazine>.test/<brand>-nesting-coffee-table-review-37439576" among its own
+# off-site profiles - a review, linked "Read more" from three regional press
+# pages - and it survived the citation test twice over: the address contains
+# the brand's name, and it appears on three pages. A review names the brand
+# because it is about the brand, and a press page per region links it once
+# each. Neither makes it the brand's account.
+#
+# Only on a host that is not a profile platform. On one of those, an account
+# is an account by where it lives, and a handle is allowed to be long.
+_ARTICLE_ID_RE = re.compile(r"-\d{5,}$")
+_ARTICLE_SLUG_MIN_WORDS_WITH_ID = 3
+_ARTICLE_SLUG_MIN_WORDS = 6
+_PAGE_SUFFIX_RE = re.compile(r"\.(?:html?|php|aspx?)$", re.I)
+
+
+def is_coverage_not_an_account(url):
+    """Is this address an article about the brand rather than the brand's account?"""
+    parts = urlparse(url or "")
+    host = strip_www(parts.netloc.lower())
+    if not host or on_a_profile_platform(host):
+        return False
+    segments = [s for s in parts.path.split("/") if s]
+    if not segments:
+        return False
+    slug = _PAGE_SUFFIX_RE.sub("", segments[-1].lower())
+    words = [w for w in slug.split("-") if w and not w.isdigit()]
+    if _ARTICLE_ID_RE.search(slug) and len(words) >= _ARTICLE_SLUG_MIN_WORDS_WITH_ID:
+        return True
+    return len(words) >= _ARTICLE_SLUG_MIN_WORDS
+
+
+def looks_like_a_citation(url, pages_linking, page_count, claimed, names, in_chrome=()):
+    """Is this a link to somebody else's account rather than the brand's own?"""
+    if claimed and url == claimed:
+        return False
+    # Before the chrome, the name and the count, because none of the three can
+    # turn a headline into an account. See `is_coverage_not_an_account`.
+    if is_coverage_not_an_account(url):
+        return True
+    if url in in_chrome:
+        return False
+    if profile_is_opaque(url):
+        return False
+    if any(profile_names_brand(url, name) for name in names):
+        return False
+    # A test that cannot pass must not be the thing that rejects.
+    #
+    # The handle test above compares ASCII against ASCII: `brand_key` keeps
+    # letters and digits and drops everything else, so a name written in
+    # Japanese, Korean, Arabic, Greek or Cyrillic reduces to nothing and no
+    # handle on earth can match it. Where every name the crawl found does
+    # that, the only reading left is the appearance test - and the appearance
+    # test alone drops every account a site links once from the body of one
+    # page, which is what a government publishing a different official account
+    # on each of five pages looks like. A high-severity "no off-site profile is
+    # linked from the crawled pages" and a verdict reading "nothing off the
+    # site corroborates it" followed, about a city government with five.
+    if not any(brand_key(name) for name in names):
+        return False
+    return page_count >= CITATION_MIN_PAGES and pages_linking < 2
+
+
+def brand_profiles(pages, brand=None):
+    """The off-site accounts that are this brand's own, read off the crawled pages.
+
+    One reading for every place a report names the brand's accounts. The
+    corroboration count read one list and the paste-ready `sameAs` block read
+    another, so a magazine article about a craft label was kept out of neither
+    and printed in both - once as a profile the label keeps, once as an address
+    the label should declare as itself.
+
+    `pages` are the pages to read, and `brand` is the snapshot's `brand`
+    record. Returns a dict:
+
+      profiles                   {platform: url} - what to count and to declare
+      citations                  somebody else's accounts, linked from one body
+      unattributed               platforms whose URL states a subject that is
+                                 not this brand
+      not_on_a_profile_platform  account-shaped links on hosts where nobody keeps
+                                 an account
+      names                      the names the handles were compared against
+      declared                   {platform: url} the site claims in `sameAs`
+    """
+    brand = brand or {}
+    brand_name = brand.get("name") or ""
+    declared = {}
+    for page in pages or ():
+        declared.update(page.get("declared_profiles") or {})
+    names = [brand_name, brand.get("domain_token")] \
+        + list(brand.get("alternate_names") or []) \
+        + list(brand.get("authoritative_variants") or []) \
+        + list(brand.get("fallback_candidates") or [])
+    names = [n for n in names if n]
+    candidates, citations, elsewhere = site_own_profiles(
+        list(pages or ()), declared, names, host=brand.get("host") or "")
+    profiles = profiles_naming_brand(candidates, brand_name, declared, name_forms=names[1:])
+    return {"profiles": profiles, "citations": citations,
+            "unattributed": sorted(k for k in candidates if k not in profiles),
+            "not_on_a_profile_platform": elsewhere, "names": names, "declared": declared}
+
+
+def cut_at_read_cap(page):
+    """Did the crawl stop reading this page at MAX_RESPONSE_BYTES?
+
+    Such a page was read up to a point and not past it, so anything below that
+    point is not missing from it - it was never read. `truncated_at_read_cap`
+    is what the crawl writes now; `truncated` is the same fact on a page record
+    written before that field existed. A snapshot older than both has neither,
+    and its pages are taken as read in full, as they always were.
+    """
+    return bool(page.get("truncated_at_read_cap") or page.get("truncated") is True)
+
+
 def example_urls(urls, limit=5):
     """The URLs a finding quotes, matching the ones it lists as affected.
 
@@ -8892,6 +9796,49 @@ def _vendor_from_headers(headers):
     return "the site's edge"
 
 
+# A script standing in front of the page, recognised by its shape.
+#
+# A museum answered every request with HTTP 200 and 101,079 bytes of
+# obfuscated script - one inline `<script>`, no title, no visible word, no
+# link - under a `Server` header naming a product in no table here. Nothing
+# above could know it, so the report said the homepage "answered 200 with an
+# empty body" and that "no page answered with a bot-manager verification
+# page", and missed the one fact that mattered: nothing that does not run
+# JavaScript ever receives the museum's pages.
+#
+# The shape is what a browser check looks like whoever sells it: nearly every
+# byte is script, nothing is shown and nothing is linked. A JavaScript
+# application shell is not this - a shell carries a title and a mount point
+# (`<div id="app">`), and it is `render-readability-audit`'s finding. A
+# redirect stub is not this either: it is a few hundred bytes, under the floor.
+SCRIPT_WALL_MIN_BYTES = 5000
+SCRIPT_WALL_SCRIPT_SHARE = 0.9
+SCRIPT_WALL_TEXT_MAX = 20
+
+_SCRIPT_BLOCK_RE = re.compile(r"<script\b[^>]*>(.*?)</script\s*>", re.I | re.S)
+_ANCHOR_WITH_HREF_RE = re.compile(r"<a\b[^>]*\bhref\s*=", re.I)
+_TITLE_WITH_TEXT_RE = re.compile(r"<title\b[^>]*>\s*[^<\s][^<]*</title", re.I)
+_APP_MOUNT_RE = re.compile(
+    r"""\bid\s*=\s*["']?(?:app|root|__next|__nuxt|svelte|q-app)["'\s>]""", re.I)
+
+
+def is_script_wall(html, page_text, status=None):
+    """Is this 2xx body a script and nothing else - a check the browser must run?"""
+    try:
+        if status is not None and not 200 <= int(status) < 300:
+            return False
+    except (TypeError, ValueError):
+        return False
+    html = html or ""
+    if len(html) < SCRIPT_WALL_MIN_BYTES or len((page_text or "").strip()) > SCRIPT_WALL_TEXT_MAX:
+        return False
+    if (_ANCHOR_WITH_HREF_RE.search(html) or _TITLE_WITH_TEXT_RE.search(html)
+            or _APP_MOUNT_RE.search(html)):
+        return False
+    script = sum(len(match.group(1)) for match in _SCRIPT_BLOCK_RE.finditer(html))
+    return script >= SCRIPT_WALL_SCRIPT_SHARE * len(html)
+
+
 def detect_challenge(html, page_text, status=None, headers=None):
     """Which bot manager served a verification page here, if any.
 
@@ -8925,6 +9872,9 @@ def detect_challenge(html, page_text, status=None, headers=None):
     for widget, markers in sorted(_CAPTCHA_WIDGET_MARKERS.items()):
         if any(marker in low for marker in markers):
             return widget
+    # Last, because it names nobody: see `is_script_wall`.
+    if is_script_wall(html, page_text, status):
+        return _vendor_from_headers(headers)
     return None
 
 
@@ -9210,9 +10160,46 @@ _DEFINITION_NOT_AN_EVENT = (
     r"appearance|entrance|arrival|bow|premiere|milestone)\b)"
     r"(?!(?:history|headlines|waves|news)\b)")
 
+# What may not be the object of a defining verb either: a policy or a service
+# procedure. An Indian clothing shop's FAQ answers "<Brand> provides refunds in
+# 2 different forms: Online Payment: For Orders placed through Online
+# Payment, refunds will be done through ..." and that answer was quoted as the
+# sentence in which the shop says what it is. It says how a refund is paid.
+#
+# The noun is refused only as the head of the object - followed by a
+# preposition, a conjunction, the end of the clause, or a word such as
+# "policy" or "options" - so "<Brand> provides delivery services to small
+# shops" and "<Brand> builds shipping containers", which are a courier and a
+# maker saying what they are, still pass. The words allowed in front of it are
+# a closed list of the modifiers a policy line uses ("free", "easy",
+# "30-day"), so "<Brand> sells shoes with free returns" is still read on its
+# first three words. Cookies, the reader's data and access to the site are
+# read only in the shapes a consent banner uses, because a bakery offers
+# cookies and a clinic provides access to care.
+_DEFINITION_POLICY_MODIFIERS = (
+    r"(?:(?:an?|the|free|full|partial|easy|fast|quick|express|standard|secure|safe|"
+    r"simple|hassle-free|same-day|next-day|international|worldwide|domestic|"
+    r"nationwide|instant|prompt|complete|extended|limited|lifetime|different|"
+    r"various|several|[0-9]+[\w%-]*|\w+-day|\w+-free)\s+){{0,3}}")
+_DEFINITION_POLICY_NOUNS = (
+    r"refunds?|returns?|exchanges?|replacements?|cancellations?|shipping|"
+    r"delivery|deliveries|cash\s+on\s+delivery|cod|warrant(?:y|ies)|"
+    r"guarantees?|order\s+tracking")
+_DEFINITION_NOT_A_POLICY = (
+    r"(?!" + _DEFINITION_POLICY_MODIFIERS + r"(?:" + _DEFINITION_POLICY_NOUNS + r")\b"
+    r"(?:\s*(?:[,.;:!?(]|$)|\s+(?:in|on|for|within|to|of|at|through|via|if|when|"
+    r"only|and|or|with|from|under|upon|after|before|as|by|is|are|will|can|may|"
+    r"options?|polic(?:y|ies)|facilit(?:y|ies)|terms|process|requests?)\b))"
+    r"(?!(?:\w+\s+){{0,2}}?cookies\s+(?:to|that|which|so|on|in\s+order)\b)"
+    r"(?!(?:access\s+to\s+)?(?:your|the\s+user'?s?)\s+(?:personal\s+)?"
+    r"(?:data|information|details)\b)"
+    r"(?!(?:\w+\s+){{0,2}}?access\s+to\s+(?:your|our|this|these|the\s+(?:site|website|"
+    r"store|shop|account|app|services?|platform))\b)")
+
 _DEFINITION_VERB = (
     r"\b{brand}\b" + _NAME_MARK + _DEFINITION_ALIAS +
     r"\s+(?:" + "|".join(DEFINING_VERBS) + r")\s+" + _DEFINITION_NOT_AN_EVENT +
+    _DEFINITION_NOT_A_POLICY +
     r"(?P<rest>[^.!?]{{{minlen},400}})")
 
 # The other shape a definition comes in. A tagline set off from the name by a
@@ -9595,7 +10582,78 @@ def _usable_definition(text, match):
     return truncate(match.group(0), 300)
 
 
-def defining_sentence(text, brand_name, brand=None, accept=None):
+# The pages on which a sentence in the first person is the site speaking. On
+# every other page it is somebody the site quotes: an Indonesian shop's blog
+# interviews an artist, whose answer "I am a woman who cares deeply about
+# starting conversations with women about bodies ..." was quoted as the
+# sentence in which the shop says what it is. A caller that knows the page is
+# the one document of a single-document site says so with `single_document`.
+FIRST_PERSON_PAGE_TYPES = frozenset({"home", "about"})
+
+# A second separator inside a separator-shape description: two blocks of a
+# page run together, not one tagline. See `_separator_shape_runs_on`.
+_SECOND_SEPARATOR_RE = re.compile(r"\S\s*[:|–—]\s|\s-\s")
+
+
+def _folded(value):
+    return " ".join(str(value or "").split()).lower()
+
+
+def _first_person_counts_on(page):
+    """May a first-person sentence on this page be the site speaking?"""
+    return (page.get("page_type") in FIRST_PERSON_PAGE_TYPES
+            or bool(page.get("single_document")))
+
+
+def _runs_on_from_the_title(match, page, brand_name):
+    """Does this match begin with the page's own `<title>` and carry on past it?
+
+    A Vietnamese fashion shop's delivered text opens with its title, "<Brand>
+    | Fashion From the Ground Up", and then its first heading, "Our Latest:
+    <collection>", with nothing between them. The separator shape read the
+    two as one tagline, and "<Brand> | Fashion From the Ground Up Our Latest:
+    <collection>" was quoted as what the brand is. A title the site wrote as
+    one line is still read - only a match that runs past its end is refused.
+    """
+    title = _folded(page.get("title"))
+    if not title or len(title) <= len(_folded(brand_name)) + 2:
+        return False
+    whole = _folded(match.group(0))
+    return whole.startswith(title) and len(whole) > len(title) + 1
+
+
+def _page_headings(page):
+    headings = page.get("headings") or {}
+    return [h for level in ("h1", "h2", "h3") for h in (headings.get(level) or [])
+            if str(h or "").strip()]
+
+
+def _separator_shape_runs_on(match, page):
+    """Does a dash, colon or pipe description run into another block?
+
+    Two ways it shows: a second separator inside the description ("... Up Our
+    Latest: <collection>"), and - where the caller says which page the text is
+    from - one of the page's own headings starting part-way through it.
+    """
+    groups = match.groupdict()
+    description = groups.get("rest") or groups.get("dashrest") or ""
+    if not description:
+        return False
+    if _SECOND_SEPARATOR_RE.search(description):
+        return True
+    if page is None:
+        return False
+    whole, folded = _folded(match.group(0)), _folded(description)
+    for heading in _page_headings(page):
+        folded_heading = _folded(heading)
+        if len(folded_heading) < 4 or whole in folded_heading:
+            continue
+        if folded.find(folded_heading) > 0:
+            return True
+    return False
+
+
+def defining_sentence(text, brand_name, brand=None, accept=None, page=None):
     """A quotable one-line definition in `text`, or "".
 
     The question is whether any sentence here says what this is, not whether
@@ -9622,11 +10680,30 @@ def defining_sentence(text, brand_name, brand=None, accept=None):
     instead of ending it, so one unusable sentence near the top of a page does
     not hide the usable one below it.
 
+    `page` says which page the text is from, for a caller that knows: the
+    snapshot page record, of which `page_type`, `title` and `headings` are
+    read, plus `single_document` (True) where the caller has established with
+    `single_document_site` that the page is the one document of such a site.
+    With it, a first-person sentence counts only on the homepage, an about or
+    team page, or a single-document site (`FIRST_PERSON_PAGE_TYPES`); a match
+    that begins with the page's `<title>` and runs past it is refused; and so
+    is a separator-shape match whose description runs into one of the page's
+    headings. Without it every shape is read as before, less the one test that
+    needs no page: a separator-shape description holding a second separator.
+
     English only, by construction; see the block comment above.
     """
+    page = page if isinstance(page, dict) else None
+
     def usable(match):
         definition = _usable_definition(text, match)
-        if definition and (accept is None or accept(definition)):
+        if not definition:
+            return ""
+        if page is not None and _runs_on_from_the_title(match, page, brand_name):
+            return ""
+        if _separator_shape_runs_on(match, page):
+            return ""
+        if accept is None or accept(definition):
             return definition
         return ""
 
@@ -9645,6 +10722,8 @@ def defining_sentence(text, brand_name, brand=None, accept=None):
                 if definition:
                     return definition
 
+    if page is not None and not _first_person_counts_on(page):
+        return ""
     regex = re.compile(
         _DEFINITION_SELF.format(minlen=DEFINITION_MIN_PREDICATE), re.I)
     for match in regex.finditer(text):

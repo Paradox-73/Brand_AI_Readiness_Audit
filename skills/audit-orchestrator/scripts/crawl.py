@@ -64,7 +64,7 @@ from audit_common import (  # noqa: E402
 
 from page_extract import extract_page, recount_readability  # noqa: E402
 from robots_parser import (  # noqa: E402
-    group_for, is_disallowed, parse_robots, path_of,
+    group_for, is_disallowed, parse_robots, path_of, paths_under_route_words,
 )
 
 # How much of an agent-readable file is kept in the snapshot. Enough to read
@@ -557,6 +557,28 @@ def fetch_robots(fetcher, origin):
     record["sitemaps"] = [normalise_url(s, origin) or s for s in parsed["sitemaps"]]
     record["errors"] = parsed["errors"]
     return record
+
+
+def _robots_with_paths_seen(robots, sitemaps, pages, skipped):
+    """The robots record, carrying the addresses a route-word rule reaches past.
+
+    `Disallow: /home` is excused as the front page's second address, and a
+    robots.txt rule is a prefix, so it also closes `/home-decor`. Only the
+    crawl knows whether the site has such an address - in its sitemap, in a
+    link, among the addresses skipped because robots.txt closes them - so it
+    is written here and read by `substantive_disallows`. See
+    `paths_under_route_words`.
+    """
+    if not isinstance(robots, dict) or not robots.get("groups"):
+        return robots
+    urls = [entry.get("url") for entry in skipped or () if entry.get("url")]
+    for record in sitemaps or ():
+        urls.extend(u.get("loc") for u in record.get("urls") or () if u.get("loc"))
+    for page in pages or ():
+        urls.append(page.get("url"))
+        urls.extend(l.get("url") for l in (page.get("links") or {}).get("internal") or ())
+    return dict(robots, paths_under_route_words=paths_under_route_words(
+        robots, [u for u in urls if u]))
 
 
 def _tag(element):
@@ -1356,6 +1378,14 @@ def fetch_page(fetcher, url, depth, source, origin):
     # here so the crawl notes can say so, rather than letting a half-read
     # document look like a site that omitted the second half.
     record["truncated"] = bool(getattr(response, "truncated", False))
+    # The same fact under a name no check can misread. On a Vietnamese shop a
+    # guide page ran past the cap, the crawl's own note said so, and checks
+    # still reported what the page lacked - its missing site chrome, its title
+    # words absent from the text - about a document read only as far as
+    # 5,000,000 bytes. `truncated` is also a word sitemaps and other records
+    # use, so the page-level flag checks skip on is spelt out.
+    if record["truncated"]:
+        record["truncated_at_read_cap"] = True
     # What the server actually sent, in bytes. `html_len` counts characters of
     # the decoded string, and the page-weight check compares it against a
     # constant named in bytes - so a 2.4 MB page in Japanese, Hindi or Arabic
@@ -2763,7 +2793,7 @@ def crawl(target, out_path, max_pages=MAX_PAGES, budget_s=WALL_CLOCK_BUDGET,
                 "notes": notes + ([CHECKPOINT_NOTE] if checkpoint else []),
                 "skipped": skipped[:30],
             },
-            "robots": robots,
+            "robots": _robots_with_paths_seen(robots, sitemaps, pages, skipped),
             "sitemaps": sitemaps,
             "sitemap_referenced_in_robots": sitemap_in_robots,
             "llms_txt": llms_txt,
@@ -3716,7 +3746,8 @@ def _adopt_rendered_dom(page_record, tab, origin):
         "content_from": "rendered",
     }
     # Crawl bookkeeping belongs to the fetch, not to the document.
-    for key in ("truncated", "html_bytes", "edge_refusal", "meta_refresh_from",
+    for key in ("truncated", "truncated_at_read_cap", "html_bytes", "edge_refusal",
+                "meta_refresh_from",
                 "rendered_text_len", "render_settle_ms", "error", "skipped",
                 "_raw_blocks"):
         if key in page_record:

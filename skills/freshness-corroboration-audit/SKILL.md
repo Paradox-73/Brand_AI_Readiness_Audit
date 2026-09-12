@@ -2,7 +2,7 @@
 name: freshness-corroboration-audit
 description: Check whether a brand's facts are current, agreed upon across independent sources, and distinguishable from other things sharing its name. Audits content staleness and missing date signals, counts how many authoritative off-site profiles corroborate the brand and confirms those profile links still resolve, queries Wikidata for name collisions, and detects where the site contradicts itself on telephone, address or boilerplate. Use when an AI assistant describes a brand with outdated prices, an old logo or a discontinued product, when it confuses the brand with a different company of the same name, or when a rebrand has not been picked up anywhere.
 license: MIT
-compatibility: Requires Python 3.10+ with requests. Makes up to 16 extra read-only requests, each only where that host's own robots.txt allows it - Wikidata's API included: robots.txt per host, up to 3 Wikidata lookups, one HEAD per off-site profile link and a GET to confirm any 404 or 410. A host whose robots.txt disallows the request is recorded unchecked, never probed. Pass --no-network for none.
+compatibility: Requires Python 3.10+ with requests. Makes up to 16 extra read-only requests, each only where that host's own robots.txt allows it (Wikidata's API included) - robots.txt per host, up to 3 Wikidata lookups, one HEAD per off-site profile link and a GET to confirm any 404 or 410. A host whose robots.txt disallows the request is recorded unchecked, never probed. Pass --no-network for none.
 allowed-tools: Bash(python3:*) Bash(python:*) Read WebSearch
 metadata:
   author: brand-ai-readiness-audit

@@ -508,13 +508,17 @@ def test_naming_your_components_is_gated_on_a_measurement_not_a_page_type():
     own. A site whose products already carry a named property has taken this
     advice and stops being told to take it.
     """
+    # The copy names a component of its own, so there is a name for the markup
+    # to carry. A shop whose copy names nothing is not told to name things.
+    copy = "Each one is woven from AeroWeave™ and ships in a week."
+
     def selling(jsonld):
         return _kinded_snapshot([
             _typed("https://example.test/", "home"),
             _typed("https://example.test/shop/a", "product", jsonld=jsonld,
-                   jsonld_types=["product"]),
+                   jsonld_types=["product"], body_text=copy),
             _typed("https://example.test/shop/b", "product", jsonld=jsonld,
-                   jsonld_types=["product"]),
+                   jsonld_types=["product"], body_text=copy),
         ])
 
     bare = [{"@type": "Product", "name": "A thing",

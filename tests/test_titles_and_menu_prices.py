@@ -452,7 +452,10 @@ def test_the_same_as_step_names_the_profiles_the_site_already_links_to():
     repository, twenty lines above the same report's own advice naming the
     marketplaces it already sells on."""
     profile = "https://social-elsewhere.test/inventedbootmakers"
-    pages = [{"url": SITE + "/", "social_profiles": {"elsewhere": profile}}]
+    # Claimed with `rel="me"`: an invented host is not somewhere brands keep
+    # accounts, so only the site's own claim makes an address there one.
+    pages = [{"url": SITE + "/", "social_profiles": {"elsewhere": profile},
+              "declared_profiles": {"elsewhere": profile}}]
     step = SD._same_as_fix_step(pages, {"name": "Invented Bootmakers"},
                                 {"site": SITE, "origin": SITE, "pages": pages})
     assert profile in step
@@ -469,7 +472,10 @@ def test_the_same_as_step_does_not_claim_the_profiles_were_followed():
     reader meets two opposite instructions for one property with nothing to
     choose between them."""
     profile = "https://social-elsewhere.test/inventedbootmakers"
-    pages = [{"url": SITE + "/", "social_profiles": {"elsewhere": profile}}]
+    # Claimed with `rel="me"`: an invented host is not somewhere brands keep
+    # accounts, so only the site's own claim makes an address there one.
+    pages = [{"url": SITE + "/", "social_profiles": {"elsewhere": profile},
+              "declared_profiles": {"elsewhere": profile}}]
     step = SD._same_as_fix_step(pages, {"name": "Invented Bootmakers"},
                                 {"site": SITE, "origin": SITE, "pages": pages})
     assert "not followed" in step

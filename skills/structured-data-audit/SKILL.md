@@ -122,9 +122,11 @@ Standard skill JSON: `findings[]`, `checks_run[]`, `not_applicable[]` (each with
 `page_types_seen`, `article_pages`, `articles_without_author`, `pages_with_unmarked_qa`,
 `index_pages_not_graded_as_articles`, `pages_not_graded_as_product_pages` and
 `search_result_pages_not_graded` (the three ways a page fails to earn the type it was given,
-each naming the pages and the test that turned them away) and
+each naming the pages and the test that turned them away),
 `search_box_queries_another_site` (the page whose search form submits to another host, which
-is the site saying it has no search index of its own).
+is the site saying it has no search index of its own) and
+`pages_not_judged_as_truncated_at_the_read_cap` (up to ten pages the crawl stopped reading at
+its size cap, set aside from every check because their markup may sit past the cut).
 
 Findings carry mechanism `C` (or `D` for date and corroboration properties, `B` for metadata
 that gets quoted) and a `root_cause` of `invalid-jsonld`, `no-org-schema`,

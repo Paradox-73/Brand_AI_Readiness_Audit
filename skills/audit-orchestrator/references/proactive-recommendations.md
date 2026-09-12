@@ -21,13 +21,13 @@ The **rests on an absence** column is the second gate, below.
 | `R-BOILERPLATE` | always | D | no — there is no absence in it to be wrong about |
 | `R-PRESS-PAGE` | no press page, the site could have a press office, and either a core fact is missing or the site contradicts itself about one | D | **yes** |
 | `R-DATE-SIGNALS` | article pages carry no date signals | D | **when it fires on the absence half.** A `no-date-signal` or `stale-content` finding is a date that was read; "no date signals" and a low coverage share are counts over the pages the crawl reached |
-| `R-COMPARISON-PAGES` | the site sells something and no comparison page was found | E | **yes** — the selling half is measured, the half that fires it is not |
+| `R-COMPARISON-PAGES` | the site sells something, no comparison page was found, the site's own copy already compares what it sells with something else ("unlike…", "better than…"), and the site could be an online seller, local business, organisation or project | E | **yes** — the selling half and the quoted sentence are measured, the missing comparison page is not |
 | `R-USE-CASE-PAGES` | 2+ location, product or service pages, and the site could have commercial audiences | E | no — two such pages must have been read |
 | `R-HTML-FOR-PDF` | a `pdf-locked-facts` finding was raised | C | no — a finding fired |
 | `R-EMAIL-TEXT-FIRST` | a newsletter signup was detected | F | no — a form was found |
-| `R-WAYFINDING` | any dead-end, orphan, breadcrumb or broken-link finding, an on-site search box that queries somebody else's index, or 2+ deep pages whose only onward links are the site's own menu | G | no — every branch names something read |
+| `R-WAYFINDING` | a `dead-end` finding, or 2+ deep pages whose only onward links are the site's own menu | G | no — every branch names something read |
 | `R-LANDING-PAGE-ANSWERS-FIRST` | 2+ landing pages state a price and answer nothing else a buyer needs, or bury the price below the fold | G | no — both signals name measured URLs |
-| `R-BRAND-TERMINOLOGY` | 2+ pages that sell, and nothing the site marks up names a property of its own | B | **yes** — the second half is an absence over whatever was crawled |
+| `R-BRAND-TERMINOLOGY` | 2+ pages that sell, nothing the site marks up names a property of its own, and the selling pages' copy marks at least one term other than the brand name with ™ or ® | B | **yes** — the markup half is an absence over whatever was crawled |
 
 **Thirteen entries, and two were deleted rather than fixed.** `R-ANSWER-FIRST` and
 `R-AUTHOR-PAGES` were retired under the rule at the foot of this file — a finding may
@@ -121,7 +121,10 @@ What changed, and what did not:
 - **`R-COMPARISON-PAGES`** now also requires `sells_something` — a product page, a pricing
   page, commerce markup, or a price on a page whose job is prices. It was telling a national
   weather service and a computing history archive to write "X vs Y" pages. Four of the six
-  sites in that sample sell nothing.
+  sites in that sample sell nothing. It then fired on five shops in one graded pass, word for
+  word, because selling with no comparison page is every shop. So it now also needs a sentence
+  in the site's own copy that already compares — `compose_report.comparative_claims` — and the
+  entry quotes that sentence: a comparison that concedes nothing is the thing its steps fix.
 - **`R-SAMEAS-WIKIDATA`** dropped its `or no Wikidata/Wikipedia anchor` clause. That clause
   is contradicted by [the study](cited-vs-uncited-study.md) two sections of this repository
   cite: the gap between brands assistants name and brands they ignore is *spread across
@@ -146,7 +149,16 @@ What changed, and what did not:
   declared `PropertyValue`, matched on the JSON-LD keys rather than on the string appearing
   anywhere, so a product described as "made of recycled material" is prose and not a
   property. That second half is exactly what the entry's own third step asks for, so a site
-  that has already taken this advice stops being told to take it.
+  that has already taken this advice stops being told to take it. A third measurement came
+  after five shops in one graded pass were told to "name your own components" whether or not
+  their copy named one: **a term the selling pages mark with ™ or ®**, other than the brand
+  itself (`compose_report.terms_the_copy_names`). That is a name the site has already chosen,
+  and the entry quotes it.
+- **`R-WAYFINDING`** now fires only on a `dead-end` finding or on 2+ deep pages whose only
+  onward links are the site's own menu. A broken link, an orphan page, a missing breadcrumb
+  and an off-site search box used to trigger it too; on a national library it rested on one
+  dead `.opml` link while every one of its 24 deep pages carried a link of its own. A broken
+  link is a link to fix and an orphan is a page nothing links to — neither is a page that ends.
 
 Measured on thirteen real crawls, `R-PRESS-PAGE` went from 12 sites to 10 and
 `R-USE-CASE-PAGES` from 7 to 6. `R-BRAND-TERMINOLOGY` stayed at 7 and changed which 7: off a

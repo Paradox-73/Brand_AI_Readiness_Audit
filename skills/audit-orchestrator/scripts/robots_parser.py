@@ -10,6 +10,7 @@ matched.
 from __future__ import annotations
 
 import re
+import unicodedata
 from urllib.parse import unquote, urlparse
 
 
@@ -448,6 +449,310 @@ _BENIGN_COMMERCE_DISALLOW = re.compile(
     re.I)
 
 
+# The same routes in the language the site is written in.
+#
+# Everything above is English, and a Vietnamese cosmetics shop's robots.txt
+# closes `/checkout`, `/profile`, `/thanh-toan`, `/tai-khoan` and `/homepage`.
+# The first two were excused; the report's single worst thing was then
+# "robots.txt disallows 3 paths that look like real content: /homepage,
+# /tai-khoan, /thanh-toan" - the shop's checkout and account pages in
+# Vietnamese, and a second address for its own front page.
+#
+# One class - account, sign-in, registration, cart, checkout, order, payment,
+# search, administration and wishlist - in the languages this audit meets,
+# compared after the rule is percent-decoded, lower-cased, stripped of its
+# accents and written with hyphens. `tài-khoản`, `tai-khoan` and
+# `t%C3%A0i-kho%E1%BA%A3n` are one rule; a Thai path arrives percent-encoded
+# and is decoded before it is read.
+#
+# Whole segment only - the strict boundary of the commerce group above - so
+# `/daftar-harga` (a price list) and `/cuenta-corriente` (a bank's current
+# account product page) stay reportable while `/daftar` and `/cuenta` do not.
+# Words whose first meaning is content are deliberately absent: French
+# `recherche` and Italian `ricerca` are a university's research section,
+# `administration` is a school's governance page, German `Anmeldung` is an
+# event's booking information, Turkish `yonetim` is a company's board.
+_OTHER_LANGUAGE_PLUMBING_WORDS = (
+    # Vietnamese
+    "tai-khoan", "taikhoan", "tai-khoan-cua-toi", "thong-tin-tai-khoan", "dang-nhap",
+    "dangnhap", "dang-ky", "dangky", "dang-ki", "dang-xuat", "gio-hang", "giohang",
+    "thanh-toan", "thanhtoan", "don-hang", "donhang", "don-hang-cua-toi",
+    "tra-cuu-don-hang", "kiem-tra-don-hang", "tim-kiem", "timkiem", "quan-tri",
+    "yeu-thich", "san-pham-yeu-thich", "danh-sach-yeu-thich", "mat-khau",
+    "quen-mat-khau", "doi-mat-khau",
+    # Indonesian and Malay
+    "akun", "akun-saya", "akaun", "akaun-saya", "masuk", "log-masuk", "daftar",
+    "daftar-akun", "keluar", "keranjang", "keranjang-belanja", "troli", "bayar",
+    "pembayaran", "bayaran", "pesanan", "pesanan-saya", "lacak-pesanan", "cari",
+    "pencarian", "carian", "daftar-keinginan", "senarai-hajat", "kata-sandi",
+    "lupa-kata-sandi",
+    # Thai, in its own script
+    "บัญชี", "บัญชีของฉัน", "เข้าสู่ระบบ", "ออกจากระบบ", "สมัครสมาชิก", "ลงทะเบียน",
+    "ตะกร้า", "ตะกร้าสินค้า", "ชำระเงิน", "คำสั่งซื้อ", "คำสั่งซื้อของฉัน", "ค้นหา",
+    "ผู้ดูแลระบบ", "รายการโปรด",
+    # Spanish
+    "cuenta", "mi-cuenta", "iniciar-sesion", "cerrar-sesion", "registro", "registrarse",
+    "carrito", "cesta", "pago", "pagar", "finalizar-compra", "tramitar-pedido", "pedido",
+    "pedidos", "mis-pedidos", "buscar", "busqueda", "buscador", "administrador",
+    "lista-de-deseos", "favoritos", "contrasena", "recuperar-contrasena",
+    # Portuguese
+    "conta", "minha-conta", "entrar", "sair", "cadastro", "cadastre-se", "registrar",
+    "registo", "carrinho", "pagamento", "meus-pedidos", "busca", "pesquisa",
+    "lista-de-desejos", "senha", "esqueci-senha", "esqueci-minha-senha",
+    # French
+    "compte", "mon-compte", "connexion", "deconnexion", "s-inscrire", "identification",
+    "panier", "commande", "commandes", "mes-commandes", "paiement", "liste-de-souhaits",
+    "liste-d-envies", "favoris", "mot-de-passe", "mot-de-passe-oublie",
+    # German
+    "konto", "mein-konto", "kundenkonto", "anmelden", "abmelden", "registrieren",
+    "registrierung", "warenkorb", "kasse", "bestellung", "bestellungen",
+    "meine-bestellungen", "zahlung", "bezahlung", "suche", "merkliste", "wunschliste",
+    "passwort", "passwort-vergessen",
+    # Italian
+    "il-mio-account", "mio-account", "accedi", "registrati", "registrazione", "esci",
+    "carrello", "cassa", "ordine", "ordini", "i-miei-ordini", "cerca",
+    "lista-dei-desideri", "preferiti", "password-dimenticata",
+    # Turkish
+    "hesap", "hesabim", "uyelik", "giris", "giris-yap", "uye-girisi", "uye-ol", "kayit",
+    "kayit-ol", "cikis", "sepet", "sepetim", "alisveris-sepeti", "odeme", "siparis",
+    "siparislerim", "siparis-takibi", "siparis-takip", "arama", "yonetici", "favoriler",
+    "favorilerim", "istek-listesi", "sifre", "sifremi-unuttum",
+)
+
+# A second address for the front page. The same shop's `/homepage` is the
+# page `/` already serves, and a site closing the duplicate is keeping one
+# page from being indexed twice. The words a front page is called by, and
+# nothing longer: `/home-decor` and `/homepage-builder` are somebody's pages.
+_FRONT_PAGE_WORDS = (
+    "home", "homepage", "home-page", "trang-chu", "trangchu", "inicio",
+    "pagina-inicial", "accueil", "startseite", "beranda", "halaman-utama",
+    "anasayfa", "ana-sayfa", "หน้าแรก",
+)
+
+# Letters the accent fold does not reach: Vietnamese `đ` and Turkish dotless
+# `ı` are letters of their own rather than a base letter with a mark.
+_FOLD_LETTERS = str.maketrans({"đ": "d", "Đ": "d", "ı": "i", "ł": "l", "ø": "o", "ß": "ss"})
+
+
+def _fold(text):
+    """`/Tài_Khoản` -> `/tai-khoan`: decoded, lower case, no accents, hyphens.
+
+    Thai carries its vowels and tone marks as combining characters, and
+    stripping them would turn one word into another, so text in Thai script
+    keeps its marks; the vocabulary is folded by this same function, so the
+    two sides always agree.
+    """
+    text = unquote(text or "").translate(_FOLD_LETTERS).lower()
+    if not re.search("[฀-๿]", text):
+        text = "".join(ch for ch in unicodedata.normalize("NFKD", text)
+                       if not unicodedata.combining(ch))
+    return text.replace("_", "-")
+
+
+_OTHER_LANGUAGE_PLUMBING = frozenset(_fold(w) for w in _OTHER_LANGUAGE_PLUMBING_WORDS)
+_FRONT_PAGE = frozenset(_fold(w) for w in _FRONT_PAGE_WORDS)
+
+# A leading language segment a site files its routes under: `/vi/tai-khoan`.
+_LANGUAGE_PREFIX_RE = re.compile(r"^[a-z]{2}(?:-[a-z]{2})?$")
+
+
+def _first_route_segment(rule):
+    """The segment naming the route, after any language prefix, folded."""
+    path = _fold(rule).split("?")[0].rstrip("$")
+    segments = [s for s in path.split("/") if s]
+    if len(segments) > 1 and _LANGUAGE_PREFIX_RE.match(segments[0]):
+        segments = segments[1:]
+    if not segments:
+        return ""
+    return segments[0].rstrip("*").split(".")[0]
+
+
+def _is_a_route_word(path):
+    """Is the route this path names one of the plumbing words above?"""
+    return _first_route_segment(path) in _OTHER_LANGUAGE_PLUMBING
+
+
+def _is_the_front_page(path):
+    """Is this path one of the front page's other addresses, and nothing deeper?
+
+    `/home/garden` is a section filed under a word, not the front page.
+    """
+    path = _fold(path).split("?")[0].rstrip("$*").strip("/")
+    return "/" not in path and path.split(".")[0] in _FRONT_PAGE
+
+
+def _stops_at_its_route(rule, seen_paths, same_kind):
+    """Can this rule close nothing beyond the route its word names?
+
+    A robots.txt rule is a prefix. `Disallow: /home` closes the front page's
+    second address and also `/home-decor` and `/home/garden`; `Disallow:
+    /daftar` closes the sign-up form and also `/daftar-harga`, the price list.
+    Excusing the rule for its word excused all of them.
+
+    A rule ending in `$` closes its own path and nothing longer, so it stops
+    there. Otherwise the addresses this crawl saw decide: a rule that covers
+    one of them which is not the same kind of route - not a second front page,
+    not another account or checkout address - reaches past its word and is
+    reported like any other rule. With no addresses to hand the word is all
+    there is to read, and the rule is read by it.
+    """
+    rule = (rule or "").strip()
+    if rule.endswith("$"):
+        return True
+    return not any(rule_matches_path(rule, path) and not same_kind(path)
+                   for path in seen_paths or ())
+
+
+def _names_a_route_in_another_language(rule, seen_paths=None):
+    """True for `/tai-khoan`, `/warenkorb`, `/carrito`, `/%E0%B8%95%E0%B8%B0...`."""
+    return (_is_a_route_word(rule)
+            and _stops_at_its_route(rule, seen_paths, _is_a_route_word))
+
+
+def _names_the_front_page_again(rule, seen_paths=None):
+    """True for `/homepage`, `/home/`, `/trang-chu`: the front page's other address.
+
+    Only a rule that stops there. See `_is_the_front_page` and
+    `_stops_at_its_route`.
+    """
+    return (_is_the_front_page(rule)
+            and _stops_at_its_route(rule, seen_paths, _is_the_front_page))
+
+
+def paths_under_route_words(parsed, urls, limit=200):
+    """The paths among `urls` that a rule excused for its word would reach past it.
+
+    Written by the crawl onto the robots record as `paths_under_route_words`,
+    and read back by `substantive_disallows`, so the question `_stops_at_its_route`
+    asks is answered from the addresses the site itself publishes - its
+    sitemap, its links - rather than from the rule's spelling alone. Only rules
+    that name a route word are tested, so a file with none of them costs
+    nothing. Paths of the same kind as the rule are left out: an account's
+    sub-pages are the account.
+    """
+    rules = []
+    for grp in (parsed or {}).get("groups", []):
+        for rule in grp.get("disallow", []):
+            rule = (rule or "").strip()
+            if not rule or rule.endswith("$"):
+                continue
+            if _is_the_front_page(rule):
+                rules.append((rule, _is_the_front_page))
+            elif _is_a_route_word(rule):
+                rules.append((rule, _is_a_route_word))
+    if not rules:
+        return []
+    found = set()
+    for url in urls or ():
+        path = path_of(url) if "://" in (url or "") else (url or "")
+        if not path or path in found:
+            continue
+        if any(rule_matches_path(rule, path) and not same_kind(path)
+               for rule, same_kind in rules):
+            found.add(path)
+            if len(found) >= limit:
+                break
+    return sorted(found)
+
+
+# The robots.txt a publishing platform ships, recognised as a file.
+#
+# A museum's site on Drupal serves Drupal's own default robots.txt, word for
+# word, and the report's confident first item was "robots.txt disallows 4
+# paths that look like real content ... /includes/, /misc/, /modules/,
+# /themes/" - the platform's code directories, which hold no page. WordPress's
+# `wp-` paths were already excused because the prefix names the platform; these
+# directory names do not, and `/modules/` or `/components/` on their own are a
+# training company's course list or an electronics shop's catalogue.
+#
+# So the directories are excused only where the file carries that platform's
+# stock set: at least STOCK_FILE_MIN_MATCHES of the entries in `signature`
+# closed by the same group. A site that wrote `/modules/` for its own courses
+# does not also close `/misc/`, `/profiles/`, `/cron.php` and
+# `/filter/tips/`. `/sites/` is deliberately not excused even on Drupal:
+# `/sites/<site>/files/` is where a Drupal site's uploaded documents live.
+STOCK_FILE_MIN_MATCHES = 4
+
+_STOCK_ROBOTS_FILES = {
+    "Drupal": {
+        "signature": frozenset({
+            "includes", "misc", "modules", "profiles", "scripts", "themes", "core",
+            "changelog.txt", "cron.php", "install.php", "update.php", "xmlrpc.php",
+            "install.txt", "upgrade.txt", "maintainers.txt", "install.mysql.txt",
+            "install.pgsql.txt", "install.sqlite.txt", "comment/reply", "filter/tips",
+            "node/add", "user/register", "user/password", "user/login", "user/logout",
+            "index.php/admin", "index.php/comment/reply", "index.php/filter/tips",
+            "index.php/node/add", "index.php/user/login"}),
+        "directories": frozenset({
+            "includes", "misc", "modules", "profiles", "scripts", "themes", "core"}),
+    },
+    "Joomla": {
+        "signature": frozenset({
+            "administrator", "cli", "components", "includes", "installation", "language",
+            "layouts", "libraries", "modules", "plugins"}),
+        "directories": frozenset({
+            "administrator", "bin", "cache", "cli", "components", "includes",
+            "installation", "language", "layouts", "libraries", "logs", "modules",
+            "plugins", "tmp"}),
+    },
+    "Magento": {
+        "signature": frozenset({
+            "app", "downloader", "errors", "includes", "lib", "pkginfo", "shell", "var",
+            "catalogsearch", "sendfriend", "catalog/product_compare", "customer/account",
+            "checkout/cart", "dev", "generated", "setup", "phpserver", "skin"}),
+        "directories": frozenset({
+            "app", "downloader", "errors", "includes", "lib", "pkginfo", "shell", "var",
+            "catalogsearch", "sendfriend", "dev", "generated", "setup", "update",
+            "phpserver", "js", "skin"}),
+    },
+    "PrestaShop": {
+        "signature": frozenset({
+            "classes", "config", "controllers", "download", "mails", "modules", "override",
+            "tools", "translations", "webservice"}),
+        "directories": frozenset({
+            "app", "cache", "classes", "config", "controllers", "download", "localization",
+            "log", "mails", "modules", "override", "tools", "translations", "upload",
+            "vendor", "webservice"}),
+    },
+}
+
+
+def _stock_entry(rule):
+    """`/INSTALL.txt` -> `install.txt`, `/user/login/` -> `user/login`."""
+    return (rule or "").strip().rstrip("$").rstrip("*").strip("/").lower()
+
+
+def stock_robots_platform(rules):
+    """The platform whose stock robots.txt these `Disallow` rules are, or "".
+
+    Read from the rules alone, never from anything else the crawl saw: the
+    question is whether this file is the one the software wrote.
+    """
+    entries = {_stock_entry(rule) for rule in rules or ()}
+    best, best_count = "", 0
+    for platform, stock in sorted(_STOCK_ROBOTS_FILES.items()):
+        count = len(entries & stock["signature"])
+        if count >= STOCK_FILE_MIN_MATCHES and count > best_count:
+            best, best_count = platform, count
+    return best
+
+
+def _closes_a_stock_directory(rule, siblings):
+    """Is this one of the entries the platform's own robots.txt closes?
+
+    The directories, and the handlers the same file names beside them -
+    Drupal's `/comment/reply/`, `/filter/tips/` and `/node/add/` are forms, not
+    pages - because once the file is recognised as the stock file, every line
+    of it is the software's and none is the site's.
+    """
+    platform = stock_robots_platform(siblings)
+    if not platform:
+        return False
+    entry = _stock_entry(rule)
+    stock = _STOCK_ROBOTS_FILES[platform]
+    return entry in stock["directories"] or entry in stock["signature"]
+
+
 # A rule naming a file a program reads rather than a page a person does.
 #
 # The extension is the class. Two sites' reports listed `/me.json`,
@@ -511,12 +816,15 @@ def _closes_a_code_browser(siblings):
     return any(_CODE_BROWSER_RE.match((rule or "").strip()) for rule in siblings or ())
 
 
-def benign_disallow(rule, siblings=None):
+def benign_disallow(rule, siblings=None, seen_paths=None):
     """True for the admin/cart/search/parameter paths every site blocks on purpose.
 
     `siblings` is the rest of the group's `Disallow` list, for the few names
     that are plumbing only in the company of others - see
     `_CODE_BROWSER_CONTEXT_RE`. Without it those names are read as content.
+
+    `seen_paths` is the crawl's `paths_under_route_words`: addresses on the
+    site that a route-word rule would also close. See `_stops_at_its_route`.
     """
     rule = (rule or "").strip()
     if not rule or rule in ("/", "/*"):
@@ -532,6 +840,11 @@ def benign_disallow(rule, siblings=None):
     if _CODE_BROWSER_RE.match(rule):
         return True
     if _CODE_BROWSER_CONTEXT_RE.match(rule) and _closes_a_code_browser(siblings):
+        return True
+    if (_names_a_route_in_another_language(rule, seen_paths)
+            or _names_the_front_page_again(rule, seen_paths)):
+        return True
+    if siblings and _closes_a_stock_directory(rule, siblings):
         return True
     # A rule that is only a parameter or wildcard filter blocks duplicates,
     # not content.
@@ -564,8 +877,9 @@ def substantive_disallows(parsed, agent):
     if grp is None:
         return []
     rules = grp.get("disallow", [])
+    seen = parsed.get("paths_under_route_words") or ()
     return sorted({r.strip() for r in rules
-                   if r.strip() and not benign_disallow(r, rules)
+                   if r.strip() and not benign_disallow(r, rules, seen)
                    and is_disallowed(parsed, agent, _sample_path(r.strip()))})
 
 

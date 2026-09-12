@@ -348,13 +348,19 @@ def test_the_sheet_names_the_demotion_rather_than_calling_it_a_tie():
     """Where the verdict's exception holds the last slot over a more severe
     finding, the reader is told which finding and why - the one case this
     report already handled well. What it may not do is print
-    "of equal rank" over an omission that is not of equal rank."""
+    "of equal rank" over an omission that is not of equal rank.
+
+    Two more identity findings, low, so identity is most of the report and
+    the verdict is entitled to call it the cause. Without them it is two of
+    five, the verdict says it opens with the gap, and so must the sheet."""
     report = _verdict_led_report(
         _finding("a", severity="critical", mechanism="A", root_cause="robots-block",
                  checked=()),
         _finding("b", severity="critical", mechanism="A", root_cause="noindex",
                  checked=()),
-        _finding("c", severity="high", root_cause="heading-structure"))
+        _finding("c", severity="high", root_cause="heading-structure"),
+        _finding("d", severity="low", root_cause="name-inconsistency"),
+        _finding("e", severity="low", root_cause="missing-core-fact"))
     markdown = compose.render_markdown(report)
     section = markdown[markdown.index("## Start here"):]
     section = section[:section.index("\n## ")]

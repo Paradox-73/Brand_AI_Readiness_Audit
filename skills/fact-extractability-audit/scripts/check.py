@@ -1572,6 +1572,31 @@ def _definition_in_a_repeated_line(page, brand_name, brand):
     return None, None
 
 
+def _the_pages_own_copy(page):
+    """`body_text` without the `<title>` the extractor puts in front of it.
+
+    The title is what the tab says, not a line of the page. Run into the
+    page's first words it made a fashion label's homepage read "<Brand> |
+    Fashion From the Ground Up Our Latest: <collection>" - one sentence with
+    the brand as its subject - and that was quoted as the definition of a
+    brand that states what it is on no page at all.
+
+    Only where a new block follows the title. Where the words after it carry
+    on in lower case, the title and the page's first sentence are the same
+    words, and cutting the title would take the subject out of the sentence.
+    """
+    body = page.get("body_text") or ""
+    title = (page.get("title") or "").strip()
+    if not title or not body.startswith(title):
+        return body
+    rest = body[len(title):]
+    if rest[:1] and not rest[:1].isspace():
+        return body
+    if rest.lstrip()[:1].islower():
+        return body
+    return rest.strip()
+
+
 def _readable_text(page):
     """The page's own text with a full stop after each of its own headings.
 
@@ -1584,8 +1609,11 @@ def _readable_text(page):
     Read as one sentence, the brand name sits mid-clause and the definition
     under it is invisible. The page states where its headings end, so the
     boundary is taken from the page rather than guessed at.
+
+    And without the page's `<title>`, which is not part of the page's copy.
+    See `_the_pages_own_copy`.
     """
-    text = page.get("body_text") or ""
+    text = _the_pages_own_copy(page)
     headings = page.get("headings") or {}
     values = {h.strip() for level in ("h1", "h2", "h3")
               for h in (headings.get(level) or []) if h and h.strip()}

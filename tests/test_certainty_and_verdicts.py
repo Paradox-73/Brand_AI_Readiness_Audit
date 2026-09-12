@@ -779,7 +779,11 @@ def test_comparison_pages_are_not_suggested_to_a_site_that_sells_nothing():
     for page in reference["pages"]:
         page["page_type"] = "article"
     assert "R-COMPARISON-PAGES" not in _recommendations(reference)
-    assert "R-COMPARISON-PAGES" in _recommendations(_shop())
+    # A shop whose own copy already compares, because that sentence is what
+    # the entry rests on: selling alone is every shop.
+    shop = _shop()
+    shop["pages"][1]["body_text"] += " Unlike ordinary chairs, every one is caned by hand."
+    assert "R-COMPARISON-PAGES" in _recommendations(shop)
 
 
 def test_corroboration_is_suggested_on_measured_breadth_alone():

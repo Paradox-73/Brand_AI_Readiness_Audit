@@ -130,8 +130,8 @@ is missing, not only on what is broken.
 
 > **There is nothing to install.** `marketplace.json` at the root is the contest's own manifest
 > convention, not a package format — the brief notes that agentskills.io defines the single-skill
-> `SKILL.md` format and does not define a multi-skill one. So there is no `/plugin marketplace
-> add` step and no `.claude-plugin/` directory. Each of the seven folders is independently valid
+> `SKILL.md` format and does not define a multi-skill one. So there is no install step and no
+> vendor-specific plugin directory. Each of the seven folders is independently valid
 > against the agentskills.io spec; the manifest names which one is the entrypoint. Run it as
 > below, or point an agent at `skills/audit-orchestrator/SKILL.md` and follow the procedure there.
 

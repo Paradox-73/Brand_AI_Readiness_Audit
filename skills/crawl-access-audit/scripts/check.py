@@ -68,7 +68,7 @@ sys.path.insert(0, _SHARED)
 from audit_common import (  # noqa: E402
     CHALLENGE_TEXT_CEILING, confirm_dead, DATED_ARCHIVE_RE,
     deadline_from_budget, detect_challenge,
-    cart_path_word, CART_WORDS, is_listing_page,
+    cart_path_word, CART_WORDS, cut_at_read_cap, is_listing_page,
     example_urls, explain_fetch_error, Fetcher, FetchError, is_faceted_listing,
     incomplete_certificate_chain,
     is_search_result_page, link_verdict,
@@ -76,7 +76,7 @@ from audit_common import (  # noqa: E402
     load_snapshot, looks_like_soft_404, make_soup, no_network_reason, page_identity,
     pages_of, pct, primary_subtag, publishing_platform, template_change_steps,
     plural, REFUSED_STATUS, response_is_an_html_page, response_text, response_timing,
-    same_site, sample,
+    same_site, sample, SCRIPT_WALL_MIN_BYTES, SCRIPT_WALL_SCRIPT_SHARE, SCRIPT_WALL_TEXT_MAX,
     sitemap_scope, sitemap_total_phrase, SkillResult,
     SLOW_ORIGIN_MEDIAN_MS, slow_origin_note, strip_default_port, strip_www, USER_AGENT,
     VERY_SLOW_ORIGIN_MEDIAN_MS,
@@ -601,11 +601,17 @@ def run(snapshot, allow_network=True, time_budget=None):
     # Last, because it is the only check here that spends a request on a
     # question no other check needs answered, and because it spends nothing at
     # all on a site with one language edition - which is nearly every site.
-    _check_hreflang(result, snapshot, ok_pages, fetcher, robots)
+    #
+    # Neither reads a page the crawl stopped reading at the size cap: a
+    # document cut at 5,000,000 bytes is missing whatever came after, and
+    # "declares no hreflang" or "links nothing" about it would be a statement
+    # about the cut. See `cut_at_read_cap`.
+    whole_pages = [p for p in ok_pages if not cut_at_read_cap(p)]
+    _check_hreflang(result, snapshot, whole_pages, fetcher, robots)
     # After that, because the one request it may spend - the homepage under
     # the site's other hostname - answers a question no other check asks, so
     # it takes only what every check above has left of the budget.
-    _check_transport_and_hosts(result, snapshot, ok_pages, fetcher, robots)
+    _check_transport_and_hosts(result, snapshot, whole_pages, fetcher, robots)
     # A robots.txt that answered 200 with an HTML page is not a robots.txt. The
     # signal said `True` for it, which is the same wrong answer this file
     # corrects in four other places.
@@ -873,6 +879,61 @@ def _challenge_stands(page):
         status if status is not None else "no status", links)
 
 
+def _is_a_script_wall_record(page):
+    """The shape `audit_common.is_script_wall` reads, read off a crawl record.
+
+    Records written before the crawl knew the shape carry `challenge: null`
+    on a museum homepage that is 101,000 bytes of inline script in a
+    101,079-byte response, with no title, no visible text and no link, so the
+    same reading is made here from the counts the record does keep.
+    """
+    try:
+        if not 200 <= int(page.get("status")) < 300:
+            return False
+    except (TypeError, ValueError):
+        return False
+    size = page.get("html_len") or page.get("html_bytes") or 0
+    if size < SCRIPT_WALL_MIN_BYTES:
+        return False
+    if (page.get("text_len") or 0) > SCRIPT_WALL_TEXT_MAX or (page.get("title") or "").strip():
+        return False
+    links = page.get("links") or {}
+    if (links.get("internal_count") or links.get("external_count")
+            or links.get("internal") or links.get("external")):
+        return False
+    shell = page.get("spa_shell") or {}
+    if shell.get("root_selector") or shell.get("state_blobs"):
+        return False
+    inline = (page.get("scripts") or {}).get("inline_bytes") or 0
+    return inline >= SCRIPT_WALL_SCRIPT_SHARE * size
+
+
+def _script_wall_urls(snapshot):
+    """URLs whose record has the script-wall shape and no vendor name on it."""
+    return {p.get("url") for p in snapshot.get("pages") or []
+            if not p.get("challenge") and _is_a_script_wall_record(p)}
+
+
+def _same_bytes_elsewhere(snapshot, page):
+    """Other addresses in this snapshot that answered with exactly as many bytes.
+
+    A script check stands in front of every address, so the museum's homepage
+    and its `/sitemap.xml` both answered 101,079 bytes. One page's own
+    content is not repeated at an address that is meant to be XML.
+    """
+    size = page.get("html_bytes") or page.get("html_len")
+    if not size:
+        return []
+    same = [p.get("url") for p in snapshot.get("pages") or []
+            if p is not page and p.get("status") == page.get("status")
+            and (p.get("html_bytes") or p.get("html_len")) == size]
+    same += [s.get("url") for s in snapshot.get("sitemaps") or []
+             if s.get("body_bytes") == size]
+    same += [(snapshot.get(key) or {}).get("url") for key in ("llms_txt", "llms_full_txt")
+             if (snapshot.get(key) or {}).get("body_bytes") == size]
+    return sorted(u for u in same if u)
+
+
 def _sentence_case(text):
     """Upper-case the first letter and leave every other one alone.
 
@@ -955,15 +1016,19 @@ def _who_runs_the_wall(vendors, challenged=0, fetched=0):
     return WALL_UNIDENTIFIED
 
 
-def _what_was_carried_instead(vendors):
+def _what_was_carried_instead(vendors, script_wall=False):
     """Where no product named itself, what the pages did carry.
 
     Two different readings arrive at the same "nothing named itself", and a
     sentence that describes one of them on a run that saw the other is a
     fabrication: a CAPTCHA widget is markup this audit found in the body, and
     `the site's edge` means the only thing identifying the page was the wording
-    it shows a visitor.
+    it shows a visitor - or, for a script wall, that it shows nothing at all.
     """
+    if script_wall:
+        return ("what identifies these as a challenge is their shape: a body that is almost "
+                "entirely one script, with no visible text and no link, which is what a check "
+                "the browser must run before it is let through looks like")
     if any(_is_widget_name(v) for v in vendors):
         return ("what the pages carried is a CAPTCHA widget, which is embedded by whatever "
                 "served them")
@@ -971,7 +1036,8 @@ def _what_was_carried_instead(vendors):
             "visitor, which names no product")
 
 
-def _host_ticket_steps(vendors, wall, ua_verdict, named, challenged, fetched):
+def _host_ticket_steps(vendors, wall, ua_verdict, named, challenged, fetched,
+                       script_wall=False):
     """The fix where no console can be named: prove it, then ask the host.
 
     The loop is the same measurement the undetermined branch below prints, and
@@ -989,7 +1055,8 @@ def _host_ticket_steps(vendors, wall, ua_verdict, named, challenged, fetched):
             "were intercepted while the rest came back with content. The question that "
             "settles it: does anyone here have a login to a CDN or WAF account for this "
             "site? If not, there is no rule here for you to open and the steps below are "
-            "the whole fix.".format(_what_was_carried_instead(vendors), challenged, fetched))
+            "the whole fix.".format(_what_was_carried_instead(vendors, script_wall),
+                                    challenged, fetched))
     else:
         opening = (
             "Which side of this you are on was not established, so here it is both ways. No "
@@ -999,7 +1066,7 @@ def _host_ticket_steps(vendors, wall, ua_verdict, named, challenged, fetched):
             "or WAF account for this site, the rule serving this challenge is in it. If you "
             "do not, because the site is on a hosted platform, this is that platform's own "
             "protection: you cannot see it or change it, and the steps below are the whole "
-            "fix.".format(_what_was_carried_instead(vendors)))
+            "fix.".format(_what_was_carried_instead(vendors, script_wall)))
     steps = [opening, _name_by_name_probe_step()]
     if named is not None and ua_verdict == UA_NAMES_DIFFER:
         # Already measured, so the ticket carries names rather than a request
@@ -1025,7 +1092,8 @@ def _host_ticket_steps(vendors, wall, ua_verdict, named, challenged, fetched):
     return steps
 
 
-def _challenge_steps(vendors, ua_verdict, named=None, challenged=0, fetched=0):
+def _challenge_steps(vendors, ua_verdict, named=None, challenged=0, fetched=0,
+                     script_wall=False):
     """What to do about a verification page, given what was actually measured.
 
     Two fixes, not one. Where a bot-management product named itself there is a
@@ -1048,7 +1116,8 @@ def _challenge_steps(vendors, ua_verdict, named=None, challenged=0, fetched=0):
     """
     wall = _who_runs_the_wall(vendors, challenged, fetched)
     if wall != WALL_NAMED_CONSOLE:
-        steps = _host_ticket_steps(vendors, wall, ua_verdict, named, challenged, fetched)
+        steps = _host_ticket_steps(vendors, wall, ua_verdict, named, challenged, fetched,
+                                   script_wall)
         steps.append(
             "Leave the training crawlers where they are. They are separate user agents, "
             "they do not produce citations, and allowing them here buys you nothing.")
@@ -1121,7 +1190,16 @@ def _check_challenge_pages(result, snapshot, ua_verdict=None, recheck=None):
     content - four confident findings about a site that is fine.
     """
     result.check("bot-manager-challenge-page")
-    marked = [p for p in snapshot.get("pages") or [] if p.get("challenge")]
+    # A script wall is marked here as well as wherever the crawl marked one:
+    # a record written before the crawl knew the shape still says
+    # `challenge: null` about it. See `_is_a_script_wall_record`.
+    walls = _script_wall_urls(snapshot)
+
+    def vendor_of(page):
+        return page.get("challenge") or UNNAMED_EDGE
+
+    marked = [p for p in snapshot.get("pages") or []
+              if p.get("challenge") or p.get("url") in walls]
     if not marked:
         result.skip("bot-manager-challenge-page",
                     "no page answered with a bot-manager verification page in place of its "
@@ -1160,14 +1238,18 @@ def _check_challenge_pages(result, snapshot, ua_verdict=None, recheck=None):
             "still marks these URLs, so content checks elsewhere in this report did not read "
             "them: {}".format(
                 len(embedded), len(fetched),
-                ", ".join(sorted({p["challenge"] for p, _ in embedded})),
+                ", ".join(sorted({vendor_of(p) for p, _ in embedded})),
                 "; ".join(why for _, why in embedded[:3]),
                 "; ".join(embedded_urls[:3])))
         result.signal("challenge_pages", 0)
         return
 
     challenged = [p for p, _ in challenged]
-    vendors = sorted({p["challenge"] for p in challenged})
+    vendors = sorted({vendor_of(p) for p in challenged})
+    # Every refused URL a script and nothing else: the wording below says what
+    # was measured - the shape - rather than a vendor's scaffolding or the
+    # words a verification screen shows, neither of which such a page has.
+    script_wall = all(_is_a_script_wall_record(p) for p in challenged)
     share = pct(len(challenged), len(fetched)) if fetched else 100
     result.signal("challenge_pages", len(challenged))
     result.signal("challenge_vendors", vendors)
@@ -1245,7 +1327,8 @@ def _check_challenge_pages(result, snapshot, ua_verdict=None, recheck=None):
     # clock left - nothing settled it, and the finding says so rather than
     # claiming a standing rule at high confidence.
     served_normally = [p for p in fetched
-                       if p.get("status") == 200 and not p.get("challenge")]
+                       if p.get("status") == 200 and not p.get("challenge")
+                       and p.get("url") not in walls]
     mostly_served = bool(served_normally) and share < SITE_WIDE_CHALLENGE_SHARE
     unconfirmed = mostly_served and recheck is None
     # Two levers, because they answer two questions and the report reads only
@@ -1292,6 +1375,32 @@ def _check_challenge_pages(result, snapshot, ua_verdict=None, recheck=None):
     # as though it were.
     wall = _who_runs_the_wall(vendors, len(challenged), len(fetched))
     page_phrase = _challenge_page_phrase(vendors)
+    statuses = ", ".join(str(s) for s in sorted(
+        {p.get("status") for p in challenged if p.get("status")})) or "no status"
+
+    # What a script wall was measured to be, said as the measurement: the byte
+    # counts, the other addresses that answered the same bytes, and the
+    # `Server` header as the site sent it - quoted, not looked up.
+    wall_lead, wall_repeated = "", False
+    if script_wall:
+        first = sorted(challenged, key=lambda x: x["url"])[0]
+        size = first.get("html_len") or first.get("html_bytes") or 0
+        inline = (first.get("scripts") or {}).get("inline_bytes") or 0
+        same = [u for u in _same_bytes_elsewhere(snapshot, first) if u != first["url"]]
+        same_size = {p.get("html_len") or p.get("html_bytes") for p in challenged}
+        wall_repeated = bool(same) or (len(challenged) > 1 and len(same_size) == 1)
+        server = (first.get("headers") or {}).get("server")
+        wall_lead = (
+            "{} of {} fetched URLs ({}%) answered HTTP {} with a script in place of the page. "
+            "{} returned {:,} bytes, {:,} of them inline script, with no title, no visible "
+            "text and no link.{}{} A client that does not run JavaScript cannot pass a check "
+            "that has to run in the browser, so unless this edge lets a crawler's name "
+            "through without it, that client receives this script and never the page."
+            .format(len(challenged), len(fetched), share, statuses, first["url"], size, inline,
+                    " {} answered with the same {:,} bytes, so the script stands in front of "
+                    "every address rather than being one page's own content.".format(
+                        ", ".join(same[:3]), size) if same else "",
+                    " The `Server` response header reads `{}`.".format(server) if server else ""))
     consoles = [v for v in vendors if _names_a_console(v)]
     # What was, and was not, established about who put the wall there. Silent
     # where a product named itself: the fix step names that console and says
@@ -1299,7 +1408,7 @@ def _check_challenge_pages(result, snapshot, ua_verdict=None, recheck=None):
     wall_note = "" if wall == WALL_NAMED_CONSOLE else (
         " No bot-management product named itself in these responses - neither its own "
         "challenge scaffolding nor a mitigation response header - and {}.{}".format(
-            _what_was_carried_instead(vendors),
+            _what_was_carried_instead(vendors, script_wall),
             " With {} of {} fetched URLs intercepted while the rest came back with content, "
             "that reads as protection applied by whoever hosts this site rather than a rule "
             "written for it; no request this audit can send sees the hosting account, so it "
@@ -1322,10 +1431,20 @@ def _check_challenge_pages(result, snapshot, ua_verdict=None, recheck=None):
         # and a CAPTCHA widget does not serve anything: "a CAPTCHA widget
         # (hCaptcha) serves a verification page" says the embedded thing is
         # the thing that decided to embed it.
-        title=_sentence_case(
-            "{} is served to crawlers instead of the page itself".format(page_phrase)
-            if ua_verdict in (UA_KEYED, UA_NAMES_DIFFER) else
-            "{} is returned to this crawler instead of the page itself".format(page_phrase)),
+        # A script wall is titled by what it does to every client that runs
+        # no script, which is the fact this audit measured: it is one.
+        title=(
+            ("Every fetched URL answers with a script challenge instead of the page, so a "
+             "client that does not run JavaScript gets no page"
+             if len(challenged) >= len(fetched) else
+             "{} of {} fetched URLs answer with a script challenge instead of the page, so a "
+             "client that does not run JavaScript gets none of them".format(
+                 len(challenged), len(fetched)))
+            if script_wall else _sentence_case(
+                "{} is served to crawlers instead of the page itself".format(page_phrase)
+                if ua_verdict in (UA_KEYED, UA_NAMES_DIFFER) else
+                "{} is returned to this crawler instead of the page itself".format(
+                    page_phrase))),
         # A wall across the whole site makes every other check meaningless; a
         # wall on part of it hides that part and no more. And a wall that took
         # part of one crawl while the same host served the rest, with no
@@ -1334,7 +1453,9 @@ def _check_challenge_pages(result, snapshot, ua_verdict=None, recheck=None):
         # the report.
         severity=("critical" if share >= SITE_WIDE_CHALLENGE_SHARE else
                   "medium" if too_few_to_lead else "high"),
-        confidence="medium" if unconfirmed else "high",
+        # A script wall on one URL whose bytes no other address repeated is
+        # a shape seen once; the same bytes at a second address is the wall.
+        confidence="medium" if unconfirmed or (script_wall and not wall_repeated) else "high",
         # The status is read from the records, not asserted. It said "a 2xx
         # response" whatever the pages actually returned, and a bank's report
         # then described its 403s as 2xx - contradicted by the next finding in
@@ -1347,16 +1468,17 @@ def _check_challenge_pages(result, snapshot, ua_verdict=None, recheck=None):
         # 200 through curl and through urllib and 403 through the client this
         # audit uses, so "unrecognised user agent" is one explanation of a
         # challenge and the client's TLS and header fingerprint is another.
-        evidence="{} of {} fetched URLs ({}%) returned a verification page rather than "
-                 "content: HTTP {} carrying {} and under {} "
-                 "characters of readable text. Examples: {}. Those pages are excluded from "
+        evidence=(wall_lead if script_wall else
+                  "{} of {} fetched URLs ({}%) returned a verification page rather than "
+                  "content: HTTP {} carrying {} and under {} "
+                  "characters of readable text. Examples: {}.".format(
+                      len(challenged), len(fetched), share, statuses,
+                      _challenge_scaffolding_phrase(vendors), CHALLENGE_TEXT_CEILING,
+                      "; ".join(p["url"] for p in sorted(challenged,
+                                                         key=lambda x: x["url"])[:3])))
+                 + " Those pages are excluded from "
                  "every content check in this report, because they describe the crawler's "
                  "reception and not the site.{}{}{}{}".format(
-                     len(challenged), len(fetched), share,
-                     ", ".join(str(s) for s in sorted(
-                         {p.get("status") for p in challenged if p.get("status")})) or "no status",
-                     _challenge_scaffolding_phrase(vendors), CHALLENGE_TEXT_CEILING,
-                     "; ".join(p["url"] for p in sorted(challenged, key=lambda x: x["url"])[:3]),
                      " The same request was refused under AI crawler names as well, from two "
                      "different HTTP clients, so this is not a property of one HTTP library "
                      "- but which crawler names this edge refuses was still not established, "
@@ -1391,7 +1513,7 @@ def _check_challenge_pages(result, snapshot, ua_verdict=None, recheck=None):
                 "Prove the block with one curl loop, then ask whoever hosts this site to let "
                 "the AI answer crawlers through the bot protection.",
         how_to_fix=_challenge_steps(vendors, ua_verdict, _named_probe_from_signals(result),
-                                    len(challenged), len(fetched)),
+                                    len(challenged), len(fetched), script_wall),
         # Priced from the steps this finding actually prints. Where no console
         # was identified they are a curl loop and a support ticket - under an
         # hour, and nobody's developer - and "half a day to a day" of developer
@@ -1612,7 +1734,11 @@ BENIGN_CATEGORIES = (
     "directory of a version-control working copy, and the machinery a site runs on - "
     "password-reset, login, registration and newsletter-subscription handlers, "
     "WordPress's own `wp-` endpoints, trackbacks, cron, feeds and Windows web server system "
-    "handlers")
+    "handlers, the same account, cart, checkout, order, payment, search and wishlist routes "
+    "written in the site's own language (`/tai-khoan`, `/warenkorb`, `/carrito`), a second "
+    "address for the front page (`/home`, `/homepage`), and the code directories a "
+    "publishing platform's own stock robots.txt closes (Drupal's `/modules/` and "
+    "`/themes/`, Joomla's `/administrator/`) where the file is that stock file")
 
 # The machinery a site runs on, recognised by the words in the rule rather than
 # by a list of sites. Two robots.txt files were reported at confident tier,
@@ -5637,7 +5763,7 @@ def _check_canonicals(result, snapshot, ok_pages, fetcher=None, robots=None):
     known_status = {p["url"]: p.get("status") for p in snapshot.get("pages") or []}
     off_domain, broken = [], []
 
-    with_canonical = [p for p in ok_pages if p.get("canonical")]
+    with_canonical = [p for p in ok_pages if p.get("canonical") and not cut_at_read_cap(p)]
     if not with_canonical:
         # Not "nothing to see". Declaring no canonical is only harmless while
         # a URL nobody published fails to resolve, and the missing-page check
@@ -6325,19 +6451,45 @@ def _check_transport_and_hosts(result, snapshot, ok_pages, fetcher=None, robots=
             if host:
                 hosts[host] += 1
     if len(hosts) > 1:
+        # A canonical written as plain http:// on a page served over https is
+        # a fact of its own, not a detail of the split. A national library's
+        # homepage is served at https://www.<host>/ and declares its canonical
+        # as http://<host>/, and the report said only that the hostnames were
+        # split - leaving out that the address it names as the real one is an
+        # unencrypted address.
+        plain_http = sorted(
+            (page.get("final_url") or page.get("url"), page.get("canonical"))
+            for page in ok_pages
+            if str(page.get("canonical") or "").lower().startswith("http://")
+            and str(page.get("final_url") or page.get("url") or "").lower().startswith(
+                "https://"))
+        home_key = _page_key(snapshot["origin"].rstrip("/") + "/")
+        http_note = "" if not plain_http else (
+            " {} served over HTTPS and {} its canonical as a plain-HTTP address: {}.".format(
+                plural(len(plain_http), "page is", "pages are"),
+                "declares" if len(plain_http) == 1 else "each declares",
+                "; ".join("{}{} -> {}".format(
+                    "the homepage, " if _page_key(page) == home_key else "", page, canonical)
+                    for page, canonical in plain_http[:3])))
         result.add(
             id_hint="mixed-canonical-hosts",
-            title="Canonical URLs are split across more than one hostname",
+            title="Canonical URLs are split across more than one hostname{}".format(
+                ", and {} a plain-http:// address".format(
+                    plural(len(plain_http), "page names", "pages name")) if plain_http else ""),
             severity="medium", confidence="high",
-            evidence="Canonical hostnames seen: {}.".format(
-                ", ".join("{} ({} pages)".format(h, n) for h, n in sorted(hosts.items()))),
+            evidence="Canonical hostnames seen: {}.{}".format(
+                ", ".join("{} ({} pages)".format(h, n) for h, n in sorted(hosts.items())),
+                http_note),
             mechanism="A", root_cause="host-inconsistency",
             summary="Pick one hostname (www or bare) and use it in every canonical tag.",
             how_to_fix=[
                 "Choose the hostname you want to be the real one.",
                 "Redirect the other permanently to it at the server or CDN level.",
                 "Regenerate canonical tags, internal links and the sitemap using that hostname.",
-            ],
+            ] + ([
+                "Write every canonical with https://. {} names {}, an address a crawler "
+                "following it reaches over an unencrypted connection first.".format(
+                    plain_http[0][0], plain_http[0][1])] if plain_http else []),
             effort="low", owner="developer",
             rationale="Two hostnames serving the same content look like two sources "
                       "that half-agree, splitting the signals that would otherwise reinforce one "
@@ -6909,19 +7061,230 @@ def _x_default_is_empty(result, snapshot, ok_pages, editions, declaring):
     return False
 
 
+def _editions_linked_by_ordinary_links(edition_pages, editions, codes):
+    """How many edition pages link at least one other edition with a plain `<a>`."""
+    code_set = {c.lower() for c in codes}
+    linked = 0
+    for page in edition_pages:
+        own = (editions.get(page.get("url")) or "").lower()
+        for link in (page.get("links") or {}).get("internal") or []:
+            url = link.get("url") if isinstance(link, dict) else link
+            path = urlparse(url or "").path.strip("/")
+            first = path.split("/")[0].lower() if path else ""
+            if first in code_set and first != own:
+                linked += 1
+                break
+    return linked
+
+
+# --------------------------------------------------------------------------
+# Language editions on hostnames of their own
+#
+# A Chinese documentation site links every page to its English, Japanese,
+# French and Korean twins at `ja.<domain>`, `fr.<domain>` and the rest - one
+# language picker, on every page - with no `hreflang` and no canonical
+# anywhere. This check read editions only as path prefixes, and declined with
+# "no crawled address begins with a path segment the site's own `lang`
+# attributes confirm is a language".
+#
+# A hostname edition is recognised from the site's own pages, never from a
+# host name alone: the host shares this site's registered domain, its first
+# label is a language code, and the crawled pages link it the way a language
+# picker does - from at least half of them. Two such hosts at least, because
+# one `fr.` subdomain is as likely a regional office as an edition.
+# --------------------------------------------------------------------------
+
+HOST_EDITION_MIN_HOSTS = 2
+HOST_EDITION_PAGE_SHARE = 0.5
+_HOST_EDITION_LABEL_RE = re.compile(r"^[a-z]{2}(?:-[a-z]{2,4})?$")
+# Two-letter host labels that name a service before a language: an account
+# portal, a link shortener, a test copy, an interface kit.
+_NOT_AN_EDITION_LABEL = frozenset({
+    "my", "go", "qa", "ui", "js", "db", "tv", "hr", "pr", "ci", "cd", "ad", "ai", "ok",
+    "ww"})
+
+
+def _registered_name(host):
+    """`ja.docs-site.test` -> `docs-site.test`, keeping a `co.<cc>` style suffix whole."""
+    labels = (host or "").lower().rstrip(".").split(".")
+    if len(labels) >= 3 and labels[-2] in _REGISTRY_GROUPING_LABELS and len(labels[-1]) == 2:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def _hostname_editions(snapshot, pages):
+    """`{host: {"code", "pages", "url"}}` for language editions on sibling hosts.
+
+    Empty unless at least HOST_EDITION_MIN_HOSTS of them are each linked from
+    at least HOST_EDITION_PAGE_SHARE of the crawled pages. See above.
+    """
+    own = (urlparse(snapshot.get("origin") or "").hostname or "").lower()
+    if not own or "." not in own or re.match(r"^\d+(?:\.\d+){3}$", own):
+        return {}
+    registered = _registered_name(own)
+    reading = [p for p in pages or [] if p.get("links")]
+    if not reading:
+        return {}
+    linked_from, example = Counter(), {}
+    for page in reading:
+        seen = set()
+        links = page.get("links") or {}
+        for link in (links.get("external") or []) + (links.get("internal") or []):
+            url = link.get("url") if isinstance(link, dict) else link
+            try:
+                host = (urlparse(url or "").hostname or "").lower()
+            except ValueError:
+                continue
+            if not host or host == own or host in seen or not host.endswith("." + registered):
+                continue
+            label = host[:-len(registered) - 1]
+            if ("." in label or label in _NOT_AN_EDITION_LABEL
+                    or not _HOST_EDITION_LABEL_RE.match(label)):
+                continue
+            seen.add(host)
+            linked_from[host] += 1
+            example.setdefault(host, url)
+    found = {host: {"code": host.split(".")[0], "pages": count, "url": example[host]}
+             for host, count in linked_from.items()
+             if count >= HOST_EDITION_PAGE_SHARE * len(reading)}
+    return found if len(found) >= HOST_EDITION_MIN_HOSTS else {}
+
+
+def _check_hostname_editions(result, snapshot, pages, host_editions, fetcher, robots):
+    """The hreflang question for editions that live on hostnames of their own.
+
+    Settled the way the path-prefix editions are: the crawl's own record of
+    each page's `<link rel="alternate" hreflang>` first, the sitemap second,
+    and one re-read of the front page - the only page of this hostname every
+    edition's picker is certain to be on - for the anchors and the `Link:`
+    header the record does not keep.
+    """
+    result.check("hreflang-between-language-editions")
+    own = (urlparse(snapshot.get("origin") or "").hostname or "").lower()
+    hosts = sorted(host_editions)
+    named = "{} ({})".format(
+        plural(len(hosts), "language hostname"),
+        ", ".join(hosts[:6]) + (" and {} more".format(len(hosts) - 6) if len(hosts) > 6 else ""))
+    reading = [p for p in pages if p.get("links")]
+    declaring = [p for p in pages if p.get("hreflang")]
+    if declaring:
+        result.skip("hreflang-between-language-editions",
+                    "the crawled pages link {}, and {} of the {} crawled page(s) on {} declare "
+                    "`hreflang`, so the editions are declared to each other".format(
+                        named, len(declaring), len(pages), own))
+        return
+    read_sitemaps = [s for s in snapshot.get("sitemaps") or []
+                     if s.get("status") == 200 and s.get("urls")]
+    in_sitemap = [s for s in read_sitemaps if s.get("hreflang_url_count")]
+    if in_sitemap:
+        result.skip("hreflang-between-language-editions",
+                    "the crawled pages link {}, and the sitemap {} declares `hreflang` "
+                    "alternates for {} of its entries".format(
+                        named, in_sitemap[0].get("url"), in_sitemap[0].get("hreflang_url_count")))
+        return
+
+    front = sorted(pages, key=lambda p: (p.get("depth") or 0, len(p.get("url") or "")))[:1]
+    read, carries = [], []
+    for page in front:
+        url = page.get("final_url") or page.get("url") or ""
+        if fetcher is None or not fetcher.budget_left or not fetcher.time_left:
+            break
+        if is_disallowed(robots or {}, USER_AGENT, path_of(url)):
+            continue
+        response = fetcher.try_get(url)
+        if response is None or response.status_code != 200:
+            continue
+        read.append(url)
+        header = str((response.headers or {}).get("link") or "")
+        if _HREFLANG_RE.search(response_text(response)) or _HREFLANG_RE.search(header):
+            carries.append(url)
+    if not read:
+        result.skip(
+            "hreflang-between-language-editions",
+            "the crawled pages link {} - the same registered domain, a language code as the "
+            "first label, linked from at least half of the {} crawled pages - and no crawled "
+            "page on {} carries a `<link rel=\"alternate\" hreflang>`, but no page could be "
+            "read again to check its anchors and `Link:` header for one: {}".format(
+                named, len(reading), own,
+                no_network_reason(
+                    snapshot, None,
+                    flag_reason="extra network requests were disabled for this run",
+                    exhausted_reason="the request budget for this skill was spent on earlier "
+                                     "checks")))
+        return
+    if carries:
+        result.skip("hreflang-between-language-editions",
+                    "the crawled pages link {}, and {} carries `hreflang`".format(
+                        named, carries[0]))
+        return
+
+    listed = "; ".join("{} (linked from {} of the {} pages)".format(
+        host, host_editions[host]["pages"], len(reading)) for host in hosts[:8])
+    example = host_editions[hosts[0]]["url"]
+    result.add(
+        id_hint="no-hreflang-between-language-editions",
+        title="This site links {} language editions on other hostnames and declares none of "
+              "them with `hreflang`".format(len(hosts)),
+        severity="medium", confidence="high",
+        evidence="The crawled pages on {} link {} hostnames that share its registered domain, "
+                 "{}, and whose first label is a language code: {}. Linked from page after "
+                 "page like that, they are a language picker - this site's pages in other "
+                 "languages, each edition on a hostname of its own. None of the {} crawled "
+                 "pages carries a `<link rel=\"alternate\" hreflang>`, and {} was re-read in "
+                 "full and carries the attribute nowhere - not in its head, not on an anchor, "
+                 "not in a `Link:` response header. {}".format(
+                     own, len(hosts), _registered_name(own), listed, len(pages),
+                     ", ".join(read),
+                     "The {} this crawl read carry no `<xhtml:link rel=\"alternate\">` "
+                     "either.".format(plural(len(read_sitemaps), "sitemap file",
+                                             "sitemap files"))
+                     if read_sitemaps else
+                     "This crawl found no sitemap to carry `<xhtml:link rel=\"alternate\">` "
+                     "entries either."),
+        mechanism="A", root_cause="canonical-broken",
+        summary="Declare `hreflang` on every page, naming its twin on each language hostname.",
+        how_to_fix=[
+            "On every page, emit one `<link rel=\"alternate\" hreflang=\"...\" href=\"...\">` "
+            "per language edition, each with the full address of the same page on that "
+            "edition's hostname (for example {}), plus one for the page itself on {}.".format(
+                example, own),
+            *template_change_steps(publishing_platform(snapshot),
+                                   "that set of `<link rel=\"alternate\">` tags"),
+            "Every hostname must carry the same set pointing back. An alternate the other "
+            "hostname does not return is ignored.",
+            "Use the language each edition is written in, which is not always its hostname "
+            "label: a hostname labelled with a country rather than a language - `ua.` for "
+            "Ukrainian - is `hreflang=\"uk\"`, and this hostname needs its own code too.",
+            "Confirm by requesting the same page on two of the hostnames and checking that the "
+            "head of each lists all of them.",
+        ],
+        effort="medium", owner="developer",
+        rationale="The pages on those hostnames are translations of these. Without `hreflang` "
+                  "nothing says so: a consumer sees unrelated documents on unrelated hosts, "
+                  "cannot hand a reader the edition in their language, and the editions "
+                  "compete with each other for the same content.",
+        affected_pages=read,
+    )
+
+
 def _check_hreflang(result, snapshot, ok_pages, fetcher, robots=None):
     """Does a site serving several language editions link them to each other?"""
     result.check("hreflang-between-language-editions")
     editions = locale_editions(ok_pages)
     codes = sorted(set(editions.values()))
     if len(codes) < 2:
+        host_editions = _hostname_editions(snapshot, ok_pages)
+        if host_editions:
+            _check_hostname_editions(result, snapshot, ok_pages, host_editions, fetcher, robots)
+            return
         result.skip(
             "hreflang-between-language-editions",
             "this crawl found {}, so there is no second edition for an `hreflang` link to "
             "point at".format(
                 "one language edition on this site (/{}/)".format(codes[0]) if codes
                 else "no language edition on this site: no crawled address begins with a "
-                     "path segment the site's own `lang` attributes confirm is a language"))
+                     "path segment the site's own `lang` attributes confirm is a language, "
+                     "and the crawled pages link no language edition on a hostname of its own"))
         return
 
     # The record first: the crawl keeps every page's own `<link rel="alternate"
@@ -7025,10 +7388,26 @@ def _check_hreflang(result, snapshot, ok_pages, fetcher, robots=None):
         "name the others and itself.".format(
             one_way[0].get("final_url") or one_way[0].get("url"))
         if one_way else "")
+    # What connects the editions for a person, counted so the title can say
+    # what is missing rather than deny what is there. A one-page site in 29
+    # languages was told "none links to the others" while every edition links
+    # all 28 others through its language picker; the `hreflang` tags were the
+    # only thing absent.
+    linked = _editions_linked_by_ordinary_links(edition_pages, editions, codes)
+    linked_note = (
+        " {} of the {} crawled edition pages link to at least one other edition with an "
+        "ordinary link - a language picker a reader can use - so the editions are "
+        "connected for a person; what is missing is the `hreflang` declaration that tells a "
+        "machine those pages are one page in several languages.".format(
+            linked, len(edition_pages))
+        if linked else "")
     result.add(
         id_hint="no-hreflang-between-language-editions",
-        title="This site publishes {} language editions and none links to the others".format(
-            len(codes)),
+        title=("This site's {} language editions link to each other only through ordinary "
+               "links, with no `hreflang` between them".format(len(codes))
+               if linked and linked == len(edition_pages) else
+               "This site publishes {} language editions and none declares the others with "
+               "`hreflang`".format(len(codes))),
         severity="medium", confidence="high",
         # No `checked=(...)`: `canonical-broken` reports something observed,
         # and `make_finding` refuses the field on a cause that is not an
@@ -7039,10 +7418,10 @@ def _check_hreflang(result, snapshot, ok_pages, fetcher, robots=None):
                  "agrees with it, or where the crawl met more than one such prefix. {} "
                  "re-read in full and searched for the attribute name `hreflang` wherever it "
                  "can appear - a `<link rel=\"alternate\">`, an anchor, or a `Link:` response "
-                 "header - and neither carries it: {}.{} {}".format(
+                 "header - and neither carries it: {}.{}{} {}".format(
                      len(codes), ", ".join("/{}/".format(c) for c in codes),
                      plural(len(read), "page was", "pages were"), ", ".join(read),
-                     one_way_note,
+                     linked_note, one_way_note,
                      "The {} this crawl read, holding {}, carry no `<xhtml:link "
                      "rel=\"alternate\">` either, which is the sitemap's way of declaring the "
                      "same thing.".format(

@@ -16,7 +16,8 @@ from audit_common import (
     DISTINCT_PRICE_CEILING, JAPANESE_ERA_DATE_RE, THAI_ERA_YEAR_RE,
     content_soup, counts_as_off_site_profile,
     detect_challenge, detect_page_type, dominant_script,
-    non_gregorian_dates, reads_in_a_buddhist_era_calendar,
+    non_gregorian_dates, read_printed_date, reads_in_a_buddhist_era_calendar,
+    VIETNAMESE_DATE_RE,
     the_address_names_one_item, the_item_grouping_word,
     find_prices, host_name_forms, is_faceted_listing, is_infrastructure_url,
     is_listing_page, is_search_result_page, jsonld_type_names, listing_key,
@@ -194,6 +195,14 @@ SOCIAL_PLATFORMS = {
     "vk.com": "VK",
 }
 
+# A dotted date with a two-digit year, bounded so it cannot be the middle of a
+# longer run of dotted numbers. Kept as text so `DATE_TEXT_RE` can carry it
+# and `_dates` can recognise which shape it matched.
+DAY_FIRST_SHORT_YEAR_RE_TEXT = (
+    r"(?<![0-9.,/])(?:0?[1-9]|[12][0-9]|3[01])\.(?:0?[1-9]|1[0-2])\.[0-9]{2}"
+    r"(?![0-9]|[.,/][0-9])")
+_DAY_FIRST_SHORT_YEAR_RE = re.compile(DAY_FIRST_SHORT_YEAR_RE_TEXT)
+
 # Ordinal suffixes are allowed on the day: "3rd November 2025" is how a great
 # many real sites write a date, and requiring a bare digit reported those pages
 # as carrying no date at all.
@@ -246,7 +255,15 @@ DATE_TEXT_RE = re.compile(
     # the match.
     "|" + BUDDHIST_ERA_DATE_RE.pattern +
     "|" + THAI_ERA_YEAR_RE.pattern +
-    "|" + JAPANESE_ERA_DATE_RE.pattern,
+    "|" + JAPANESE_ERA_DATE_RE.pattern +
+    # Day first with a two-digit year, and the Vietnamese date with its units
+    # written out. A Vietnamese cosmetics shop dates every post "06.05.26",
+    # nothing read it, and its 2026 blog was reported stale on the strength
+    # of three English posts from 2022. The short-year shape is also how a
+    # version number looks, so `_dates` keeps it only where
+    # `read_printed_date` can say which number is the day.
+    "|" + DAY_FIRST_SHORT_YEAR_RE_TEXT +
+    "|" + VIETNAMESE_DATE_RE.pattern,
     re.I,
 )
 COPYRIGHT_YEAR_RE = re.compile(r"(?:©|\(c\)|copyright)\s*(?:\d{4}\s*[-–—]\s*)?((?:19|20)\d{2})", re.I)
@@ -4338,6 +4355,12 @@ def _dates(soup, text, jsonld, lang="", script="", chrome_text=""):
         if (BUDDHIST_ERA_DATE_RE.fullmatch(printed.strip())
                 and not reads_in_a_buddhist_era_calendar(script, lang)):
             continue
+        # "06.05.26" is a date only where the page's language, or a number
+        # over twelve, says which part is the day; "1.10.20" in an English
+        # changelog is a version.
+        if (_DAY_FIRST_SHORT_YEAR_RE.fullmatch(printed.strip())
+                and read_printed_date(printed, lang) is None):
+            continue
         if _only_in_the_chrome(printed, text, chrome_text):
             if printed not in chrome:
                 chrome.append(printed)
@@ -4419,6 +4442,9 @@ def _dates(soup, text, jsonld, lang="", script="", chrome_text=""):
 _DATE_SHAPED_RE = re.compile(
     r"(?:19|20)\d{2}-\d{1,2}-\d{1,2}"
     r"|\d{1,2}[/.]\d{1,2}[/.](?:19|20)\d{2}"
+    # The day-first short-year date `DATE_TEXT_RE` captures, which carries no
+    # four-digit year for the last alternative to find.
+    r"|\d{1,2}\.\d{1,2}\.\d{2}(?!\d)"
     "|(?:19|20)\\d{2}\\s*[\\u5e74\\ub144]"
     r"|\b(?:19|20)\d{2}\b"
 )

@@ -569,6 +569,9 @@ def test_the_guard_runs_on_a_site_whose_name_is_not_written_in_latin_letters():
         "a": "https://civic-notices.test/users/sign_in?ref=sideNav",
         "b": "https://civic-notices.test/tallowandwick",
     }
+    # Both claimed with `rel="me"`, so the host test lets both through and the
+    # sign-in page has to be stopped by the guard itself.
+    pages[0]["declared_profiles"] = dict(pages[0]["social_profiles"])
     same_as = SD._all_same_as(pages, {"name": chr(0x6E29) + chr(0x6CC9)})
     assert same_as == ["https://civic-notices.test/tallowandwick"]
 

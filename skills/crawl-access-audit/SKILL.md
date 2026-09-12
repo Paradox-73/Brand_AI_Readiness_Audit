@@ -45,8 +45,10 @@ verification page instead of the site. Both came out of the same run.
 
 1. **Was a verification page served instead of the content?** A bot manager answering 2xx with
    a challenge script announces itself nowhere in the status line. Detect the vendor by its own
-   scaffolding or its mitigation header; failing both, by a CAPTCHA widget. Challenged pages are
-   excluded from every content check in every skill.
+   scaffolding or its mitigation header; failing both, by a CAPTCHA widget; failing all three,
+   by shape alone — a 2xx body of at least 5,000 bytes, 90% or more of it inline script, with
+   no title, no link and at most 20 characters of text. Challenged pages are excluded from
+   every content check in every skill.
 2. **Is robots.txt resolvable?** A 404 means no restrictions and is not a defect. A persistent
    5xx is read by major crawlers as "disallow everything" for up to thirty days: **high**. A
    file that never answered at all is **medium**, and malformed lines are **low**. Whether the
@@ -100,8 +102,11 @@ verification page instead of the site. Both came out of the same run.
     here is never a finding, only a recommendation.
 14. **Language editions.** A site with one edition per language and no `hreflang` between them
     publishes near-duplicates with no declared relationship, so nothing says which edition
-    answers which reader. One page of each of the first two editions is re-read; **medium**, and
-    it costs nothing at all on the single-edition sites that are most of the web.
+    answers which reader. Editions are path prefixes (`/fr/`) or, failing two of those,
+    hostnames of their own (`ja.<domain>`): at least two such hostnames, each linked from at
+    least half the crawled pages. One page of each of the first two path editions is re-read,
+    or the front page alone for hostname editions; **medium**, and it costs nothing at all on
+    the single-edition sites that are most of the web.
 
 Two rules govern all fourteen, and are what to carry over when working through this by hand.
 

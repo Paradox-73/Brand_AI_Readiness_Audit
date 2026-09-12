@@ -76,6 +76,7 @@ from audit_common import (
     unclassified_note,  # noqa: E402
     as_published, brand_forms, brand_pattern, comparison_key, DEEP_TYPES,
     defining_sentence, detect_site_language, DISTINCT_PRICE_CEILING,
+    claimed_by_the_site, could_be_an_account, cut_at_read_cap,
     dominant_script, example_urls,
     find_prices, is_faceted_listing, is_listing_page, is_multi_location,
     is_question_heading, is_search_result_page, jsonld_type_names, listing_key,
@@ -231,6 +232,20 @@ def run(snapshot):
                       sorted(p["url"] for p in unread)[:10])
         pages = [p for p in pages if not p.get("render_skipped")]
         all_pages = [p for p in all_pages if not p.get("render_skipped")]
+
+    # A page cut off at the crawl's read cap is the first part of a page. Its
+    # JSON-LD, its FAQ answers and its closing markup can sit past the cut, so
+    # every "this page has no X" read off it would be a statement about bytes
+    # nobody fetched - and a JSON-LD block cut in half reads as one that does
+    # not parse. Set aside from every check here and named, the way an
+    # unrendered stub is above.
+    truncated = [p for p in all_pages if cut_at_read_cap(p)]
+    if truncated:
+        result.signal("pages_not_judged_as_truncated_at_the_read_cap",
+                      sorted(p["url"] for p in truncated)[:10])
+        cut = {id(p) for p in truncated}
+        pages = [p for p in pages if id(p) not in cut]
+        all_pages = [p for p in all_pages if id(p) not in cut]
 
     # A page assembled from what somebody typed is not a document this site
     # published, so there is no markup it is failing to carry. Every check here
@@ -780,6 +795,15 @@ def _brand_url(declared, snapshot):
     if isinstance(declared, dict):
         declared = declared.get("url") or declared.get("@id") or ""
     declared = str(declared or "").strip()
+    # Plain http for a site served over https is not the site's address. A
+    # national library's identity markup says `"url": "http://nlai.ir"`, its
+    # canonical tag says the same, and every page is served at
+    # `https://www.<host>/` - so the block pasted the one address a browser is
+    # moved away from as the organisation's home. The address the site is
+    # served at wins, and `_org_snippet_notes` says the canonical is wrong.
+    if declared and origin and urlparse(declared).scheme.lower() == "http" \
+            and urlparse(origin).scheme.lower() == "https" and same_site(declared, origin):
+        return home
     if declared and (not origin or same_site(declared, origin)):
         # On this site, but not necessarily at its front door. A clinic's only
         # identity block sets `url` to the blog it renders on, so the address a
@@ -817,17 +841,18 @@ def _site_logo(snapshot, pages, brand=None):
     An og:image is a social card: the picture a page wants shown when *that
     page* is shared. On an events page, an article or a product page it is a
     picture of the story, not of the publisher, so it can never stand as the
-    brand's mark. Three sources can, in this order:
+    brand's mark. Three sources can, each read off the front door only, in this
+    order - see `_logo_reading`:
 
-      1. a `logo` the site declared in its own identity markup, which is the
-         site saying outright "this is my logo"
-      2. the homepage's own og:image, and only where its own filename calls it
+      1. a `logo` the site declared in the homepage's own identity markup,
+         which is the site saying outright "this is my logo"
+      2. an image the homepage presents as its logo, or whose own filename
+         calls it one, and which the site puts on more than one page, so it is
+         a template asset rather than one illustration inside one article
+      3. the homepage's own og:image, and only where its own filename calls it
          a logo
-      3. an image whose own filename calls it a logo and which the site puts on
-         more than one page, so it is a template asset rather than one
-         illustration inside one article
 
-    The filename test on the second source is not a tightening for its own
+    The filename test on the third source is not a tightening for its own
     sake; it is what that source was found on. The museum case above is a
     homepage og:image whose filename is `site-logo`, and that is what made it
     readable as a mark. Without the test, "the homepage's card is about the
@@ -842,27 +867,100 @@ def _site_logo(snapshot, pages, brand=None):
     placeholder. A placeholder says "not found on the site, fill this in" and
     costs the owner a minute; a confident wrong URL is published.
     """
-    # The content pages first, then the rest of the crawl: a site can declare
-    # its identity on a page this skill's content filter never sees. Deduped by
-    # identity rather than by value, because comparing two whole page records
-    # for equality is a deep comparison of everything the crawl stored.
+    return _logo_reading(snapshot, pages, brand)[0]
+
+
+def _is_a_favicon(url):
+    """Is this address the browser-tab icon rather than a logo?
+
+    A Persian national library's block shipped `"logo":
+    "/uploads/1/2025/Dec/13/favicon_1.ico"` - the 16-pixel tab icon, read off a
+    news article's `publisher` node. A knowledge panel renders `logo` as the
+    brand mark, and an `.ico` is not one.
+    """
+    path = urlparse(str(url or "")).path.lower()
+    return path.endswith(".ico") or "favicon" in path
+
+
+def _is_a_touch_icon(url):
+    """The home-screen icon a phone saves: square, small, and a last resort."""
+    return "touch-icon" in urlparse(str(url or "")).path.lower()
+
+
+def _front_doors(snapshot, pages):
+    """The homepage and its language editions, never a sub-section's own home.
+
+    A national library's block shipped `/brasil/e/common/images/img/logo_site.gif`
+    - the banner of an exhibition site that lives in one folder of the library's
+    site and carries its own logo on its own pages. `_section_depth` sets a
+    leading language segment aside, so `/` and `/en/` are front doors and
+    `/brasil/` is not.
+    """
     seen_pages = {id(p) for p in pages}
     everywhere = list(pages) + [p for p in (snapshot.get("pages") or [])
                                 if id(p) not in seen_pages]
+    return [p for p in everywhere
+            if _is_the_homepage(p, snapshot) and _section_depth(p) == 0], everywhere
 
-    for page in everywhere:
-        for node in _nodes_of(page, ORG_IDENTITY_TYPES):
-            if not _speaks_for_the_site(node, brand):
+
+def _absolute_image(url, page, everywhere=()):
+    """`url` as an absolute address, preferring a spelling the crawl recorded.
+
+    A relative `logo` pasted into a block on another host points nowhere. The
+    crawl usually holds the image's absolute address already, in an image
+    sample or a logo candidate, and that spelling is used where one ends with
+    the same path, so the value stays one the site itself published.
+    """
+    text = str(url or "").strip()
+    if not text or re.match(r"^https?://", text, re.I):
+        return text
+    path = urlparse(text).path
+    for other in everywhere:
+        images = other.get("images") if isinstance(other.get("images"), dict) else {}
+        recorded = ([c.get("src") for c in (images.get("logo_candidates") or [])
+                     if isinstance(c, dict)]
+                    + list(images.get("undescribed_sample") or [])
+                    + list(images.get("missing_alt_sample") or []))
+        for seen in recorded:
+            seen = str(seen or "")
+            if path and re.match(r"^https?://", seen, re.I) and urlparse(seen).path == path:
+                return seen
+    base = str((page or {}).get("final_url") or (page or {}).get("url") or "")
+    return urljoin(base, text) if base else text
+
+
+def _logo_reading(snapshot, pages, brand=None):
+    """(logo URL or None, a sentence for the fix steps or "").
+
+    Read off the front door only, in the order a site states its own mark:
+
+      1. a `logo` on the homepage's own identity markup - not on a node another
+         node names as its publisher or brand, which is a reference
+      2. an image the homepage presents as its logo: the crawl's logo
+         candidates, which are images whose address, alt text, class or
+         container calls them one - a header's home-link image is exactly that
+      3. an image on the homepage whose own filename calls it a logo, the
+         homepage's og:image included
+
+    Never a favicon, and a touch icon only when nothing else qualifies, with
+    the sentence saying so. Always absolute.
+    """
+    homes, everywhere = _front_doors(snapshot, pages)
+
+    def usable(url):
+        return bool(url) and not _is_a_favicon(url)
+
+    touch = None
+    for home in homes:
+        for node in _nodes_of(home, ORG_IDENTITY_TYPES):
+            if not _speaks_for_the_site(node, brand) or _only_referenced(node):
                 continue
             declared = _image_url(node.get("logo"))
-            if declared:
-                return declared
-
-    for page in everywhere:
-        if _is_the_homepage(page, snapshot):
-            og_image = (page.get("og") or {}).get("og:image")
-            if og_image and _LOGO_IN_URL_RE.search(str(og_image)):
-                return og_image
+            if usable(declared):
+                if _is_a_touch_icon(declared):
+                    touch = touch or _absolute_image(declared, home, everywhere)
+                    continue
+                return _absolute_image(declared, home, everywhere), ""
 
     # `page["images"]` is the summary `page_extract` writes, not a list of image
     # elements, so the loop that used to run here iterated a dict and compared
@@ -873,6 +971,11 @@ def _site_logo(snapshot, pages, brand=None):
     brand_key_ = brand_key(str((brand or {}).get("name") or ""))
     seen = defaultdict(set)
     named_by_alt = set()
+    # Which of those the front door itself carries, and which the crawl read
+    # as an image the page presents as its logo rather than one whose filename
+    # happens to say so.
+    home_ids = {id(h) for h in homes}
+    on_front, presented = {}, set()
     for page in everywhere:
         images = page.get("images")
         if not isinstance(images, dict):
@@ -887,12 +990,18 @@ def _site_logo(snapshot, pages, brand=None):
             if url and brand_key_ and alt and (brand_key_ in alt or alt in brand_key_):
                 seen[url].add(page.get("url") or "")
                 named_by_alt.add(url)
+                presented.add(url)
             elif url and _LOGO_IN_URL_RE.search(url):
                 seen[url].add(page.get("url") or "")
+                presented.add(url)
+            if url and id(page) in home_ids:
+                on_front.setdefault(url, page)
         for url in ((images.get("undescribed_sample") or [])
                     + (images.get("missing_alt_sample") or [])):
             if url and _LOGO_IN_URL_RE.search(str(url)):
                 seen[str(url)].add(page.get("url") or "")
+                if id(page) in home_ids:
+                    on_front.setdefault(str(url), page)
     # More than one page, or the whole crawl was one page. A partner strip and
     # an inline diagram both sit on a single page; a header mark is on every
     # page the template renders, and the filename test alone cannot tell those
@@ -906,13 +1015,41 @@ def _site_logo(snapshot, pages, brand=None):
     # sat at `.../logo/logo-top-blue.png` on every English page. Among the rest,
     # the ones the site files as its mark - under a `logo` or `brand` folder, or
     # named for the header - come first, then the ones on the most pages.
+    #
+    # And only an image the front door carries. A sub-site filed in one folder
+    # of the site renders its own banner on every one of its own pages, which
+    # passes the "more than one page" test as easily as the real header mark.
     eligible = [url for url in seen
-                if (len(seen[url]) > 1 or len(everywhere) <= 1)
-                and not _filed_under_somebody_elses_section(url)]
-    if not eligible:
-        return None
-    return min(eligible, key=lambda url: (0 if url in named_by_alt else 1,
-                                          _logo_placement_rank(url), -len(seen[url]), url))
+                if url in on_front
+                and (len(seen[url]) > 1 or len(everywhere) <= 1)
+                and not _filed_under_somebody_elses_section(url)
+                and not _is_a_favicon(url)]
+    marks = [url for url in eligible if not _is_a_touch_icon(url)]
+    if marks:
+        best = min(marks, key=lambda url: (0 if url in presented else 1,
+                                           0 if url in named_by_alt else 1,
+                                           _logo_placement_rank(url), -len(seen[url]), url))
+        return _absolute_image(best, on_front[best], everywhere), ""
+    touch = touch or next((_absolute_image(url, on_front[url], everywhere)
+                           for url in sorted(eligible)), None)
+
+    # The homepage's own social card, only where its filename calls it a logo.
+    # See the docstring of `_site_logo` for the municipality whose card was a
+    # travel-magazine banner.
+    for home in homes:
+        og_image = str((home.get("og") or {}).get("og:image") or "")
+        if og_image and _LOGO_IN_URL_RE.search(og_image) and not _is_a_favicon(og_image):
+            if _is_a_touch_icon(og_image):
+                touch = touch or _absolute_image(og_image, home, everywhere)
+                continue
+            return _absolute_image(og_image, home, everywhere), ""
+
+    if touch:
+        return touch, ("`logo` in the block is the site's touch icon, {} - the small square "
+                       "icon a phone saves to its home screen. It is the only image the "
+                       "homepage presents as its mark, so it is used as a last resort; "
+                       "replace it with the logo file itself.".format(touch))
+    return None, ""
 
 
 # Path words for sections of a site that carry other people's material - a
@@ -1110,7 +1247,32 @@ def _paste_ready_description(value, labels, brand_name=""):
         while parts and not _SENTENCE_END_RE.search(parts[-1]):
             parts.pop()
         text = " ".join(parts)
+    # Page furniture flattened into the tag rather than a sentence. An
+    # Indonesian shop's team page carries the meta description "Our Team
+    # _______________ Meet the people who bring life to our small social
+    # enterprise!", and the snippet published it as the company's own
+    # `description`: a heading, the rule the theme draws under it, and then
+    # the page's first line.
+    if _RULE_LINE_RE.search(text) or _SECTION_LABEL_START_RE.match(text):
+        return ""
     return text
+
+
+# A rule a template draws with characters: a run of underscores, dashes, equals
+# signs, box-drawing lines or asterisks. No sentence contains one.
+_RULE_LINE_RE = re.compile(
+    "_{3,}|-{4,}|={3,}|\\*{3,}|~{3,}|[" + chr(0x2013) + chr(0x2014) + chr(0x2500)
+    + chr(0x2501) + "]{2,}")
+
+# A section label at the very front, followed by something other than a verb:
+# "Our Team Meet the people ...", "About Us We are ...". "Our team is small"
+# is a sentence about the team and is left alone.
+_SECTION_LABEL_START_RE = re.compile(
+    r"^(?:about(?:\s+us)?|our\s+(?:team|story|people|mission|vision|values|history|"
+    r"founders?)|meet\s+(?:the|our)\s+(?:team|founders?|people|makers)|who\s+we\s+are|"
+    r"contact(?:\s+us)?|get\s+in\s+touch)\b"
+    r"(?!\s+(?:is|are|was|were|has|have|began|started|consists|includes)\b)"
+    r"\s*[:|" + chr(0x00B7) + chr(0x2022) + r"-]?\s+[A-Z]", re.I)
 
 
 # --------------------------------------------------------------------------
@@ -1638,6 +1800,21 @@ def _all_same_as(pages, brand=None, declared=()):
     # newsletter issue reached a paste-ready `sameAs`. This test needs no name
     # and no script, so it runs on every site.
     urls = [u for u in urls if _is_an_account_and_not_an_action(u)]
+    # And on a platform where an address is an account at all. An Indonesian
+    # shop's block listed a fashion magazine's feature about the shop,
+    # `<magazine>.test/<brand>/`, beside its Instagram and LinkedIn: the slug is
+    # the brand's name, so the handle test passed, and it sat in a row of
+    # account links on one page, so the crawl called it published. On a
+    # magazine's host the last segment of a path is a story, and `sameAs` says
+    # "this account is me". So a host has to be one where brands keep accounts,
+    # unless the site's own `sameAs` or `rel="me"` claims the address - the
+    # same rule, from the same function, that decides which accounts
+    # `freshness-corroboration-audit` counts, so the block declares no account
+    # that count left out. See `could_be_an_account`.
+    claimed = claimed_by_the_site(
+        [u for page in pages for u in (page.get("declared_profiles") or {}).values()]
+        + [u for u in (declared or []) if isinstance(u, str)])
+    urls = [u for u in urls if could_be_an_account(u, claimed)]
     # A profile the site already declares in its own `sameAs` is the site
     # asserting the account is its own, which is a stronger statement than any
     # test we could apply to the handle. It goes in whatever it looks like -
@@ -2787,6 +2964,7 @@ def _check_organization(result, snapshot, pages, by_type, brand, platform=None):
                 # its evidence, and never drawn a conclusion from.
                 *template_change_steps(platform, "the snippet below"),
                 *_software_entity_step(snapshot),
+                *_org_snippet_steps(snapshot, pages, brand),
                 "Replace the placeholder values with the real logo URL and the profile URLs "
                 "you actually control.",
                 "Keep the `description` identical to the boilerplate you use on LinkedIn and "
@@ -2876,6 +3054,7 @@ def _check_organization(result, snapshot, pages, by_type, brand, platform=None):
                  "A second identity worded differently is worse than one."),
                 where_the_template_is(platform),
                 who_edits_the_template(platform),
+                *_org_snippet_steps(snapshot, pages, brand, node=node),
                 "Confirm the change in View Source on the homepage, not on an inner page.",
             ],
             effort="low", owner="developer",
@@ -2959,7 +3138,7 @@ def _check_organization(result, snapshot, pages, by_type, brand, platform=None):
             mechanism="C", root_cause="schema-text-mismatch",
             summary="Give the identity block the organisation's own name and its own home "
                     "page address.",
-            how_to_fix=steps,
+            how_to_fix=steps + _org_snippet_steps(snapshot, pages, brand, node=node),
             effort="low", owner="developer",
             rationale="Structured data is read as the site owner's own assertion, so a name "
                       "that is really a page title is repeated as the organisation's name, "
@@ -3087,6 +3266,7 @@ def _check_organization(result, snapshot, pages, by_type, brand, platform=None):
                     ", ".join('"{}"'.format(n) for n in academic[2])))
         how_to_fix += [_org_prop_fix(prop, pages, brand, snapshot)
                        for prop in HIGH_VALUE_PROPS["Organization"] if prop in unusable]
+        how_to_fix += _org_snippet_steps(snapshot, pages, brand, node=node)
         how_to_fix.append("Re-validate after the change.")
         said = []
         if absent:
@@ -3623,6 +3803,29 @@ def _software_entity_step(snapshot, declared=None):
                 site_kind(snapshot).why())]
 
 
+def _org_snippet_steps(snapshot, pages, brand, node=None):
+    """The fix steps saying why the block's `logo` or `telephone` is not what it seems.
+
+    `_org_snippet` pastes a touch icon as `logo` when nothing else qualifies,
+    and leaves `telephone` out when a chat link's number has no country code.
+    Both are right, and both are invisible in the block itself: the owner sees
+    a small icon, or no number, and no reason. `_logo_reading` and
+    `_telephone_verdict` each write the reason, and it goes here, beside the
+    block, rather than nowhere.
+    """
+    declared = node if node is not None else _existing_org_node(snapshot, pages, brand)
+    steps = []
+    # A `logo` the site declared wins in the block, so no reading of ours is
+    # used and there is nothing to explain.
+    if not _image_url(_declared(declared, "logo")):
+        steps.append(_logo_reading(snapshot, pages, brand)[1])
+    facts = _contact_facts_for_snippet(pages, is_multi_location(snapshot),
+                                       str((brand or {}).get("name") or ""))
+    steps.append(_telephone_verdict(
+        _declared(declared, "telephone") or facts.get("telephone"), pages)[1])
+    return [step for step in steps if step]
+
+
 # A telephone number as a telephone number is written: an optional leading
 # plus, then digits and the punctuation people group them with. Square
 # brackets, letters and anything else are not in it.
@@ -3685,23 +3888,209 @@ def _publishable_telephone(value, pages):
     dialable number. The callers then omit the property or print their
     placeholder, which is the same discipline `logo` and `description` follow:
     a placeholder costs a minute and a wrong number is published.
+
+    And "" where the number's country code cannot be established. See
+    `_telephone_verdict`, which also says why.
+    """
+    return _telephone_verdict(value, pages)[0]
+
+
+def _telephone_verdict(value, pages):
+    """(number to publish or "", why it was left out or "").
+
+    A chat link's number has to carry its country code, and the crawl writes a
+    plus in front of whatever digits it finds there. An Indian shop's only
+    number is `wa.me/8291579185` - ten digits, the owner's national number
+    with the code left off - and the block published `"telephone":
+    "+8291579185"`, which dials South Korea. So a number whose plus is ours
+    rather than the site's is published only where its country code can be
+    established: it begins with the calling code of the country the site's own
+    signals place it in, or, where no signal says, it is long enough to hold a
+    country code at all.
     """
     text = " ".join(str(value or "").split())
     if not text:
-        return ""
+        return "", ""
     digits = re.sub(r"[^0-9]", "", text)
     if len(digits) < 7:
-        return ""
+        return "", ""
     best, best_digits = "", digits
     for other in _numbers_the_site_writes_into_links(pages):
         other_digits = re.sub(r"[^0-9]", "", other)
         if len(other_digits) > len(best_digits) and other_digits.endswith(digits):
             best, best_digits = " ".join(other.split()), other_digits
     if best and _DIALABLE_RE.match(best):
-        return best
-    if _DIALABLE_RE.match(text):
-        return text
+        chosen = best
+    elif _DIALABLE_RE.match(text):
+        chosen = text
+    else:
+        return "", ""
+    number = re.sub(r"[^0-9]", "", chosen)
+    if not chosen.startswith("+") or not _only_in_a_chat_link(number, pages) \
+            or _written_with_its_country_code(number, pages):
+        return chosen, ""
+    country, how = _site_country(pages)
+    code = _CALLING_CODES.get(country, "")
+    if code:
+        if number.startswith(code):
+            return chosen, ""
+        read_as = _calling_code_of(number)
+        return "", (
+            "`telephone` is left out of the block. The only place the site writes {} is a "
+            "chat link, which has to carry the number's country code, and this one does "
+            "not: {} ({}), where numbers start +{}, and read as it stands it would start {} "
+            "- a number in another country. Add the line yourself with its country code, "
+            "+{} followed by the number, if that is the business's own line.".format(
+                number, "the site is in {}".format(_COUNTRY_NAMES.get(country, country.upper())),
+                how, code,
+                "+{} ({})".format(read_as, _COUNTRY_NAMES.get(
+                    _COUNTRY_OF_CODE.get(read_as, ""), "another country's code"))
+                if read_as else "with a code no country uses", code))
+    if len(number) < _SHORTEST_NUMBER_WITH_A_COUNTRY_CODE:
+        return "", (
+            "`telephone` is left out of the block. The only place the site writes {} is a "
+            "chat link, which has to carry the number's country code, and {} digits is too "
+            "short to hold one; nothing on the site says which country it is in. Add the "
+            "line yourself with its country code.".format(number, len(number)))
+    return chosen, ""
+
+
+# How many digits a number needs before it can hold a country code as well as
+# a subscriber number. Ten is an Indian or a North American number with no
+# code in front; very few countries' full international numbers are that short.
+_SHORTEST_NUMBER_WITH_A_COUNTRY_CODE = 11
+
+# Calling codes by ISO 3166 country. Held as data about numbering plans, the way
+# `_PHONE_IN_LINK_RE` holds messaging hosts: a fact this code has to know, never
+# a site being audited. A country missing here is a country whose sites fall to
+# the length test above, which is the cautious direction.
+_CALLING_CODES = {
+    "in": "91", "id": "62", "jp": "81", "kr": "82", "cn": "86", "tw": "886",
+    "hk": "852", "sg": "65", "my": "60", "th": "66", "vn": "84", "ph": "63",
+    "pk": "92", "bd": "880", "lk": "94", "np": "977", "ae": "971", "sa": "966",
+    "ir": "98", "tr": "90", "il": "972", "eg": "20", "ng": "234", "ke": "254",
+    "za": "27", "gb": "44", "ie": "353", "fr": "33", "de": "49", "es": "34",
+    "it": "39", "nl": "31", "be": "32", "pt": "351", "ch": "41", "at": "43",
+    "se": "46", "no": "47", "dk": "45", "fi": "358", "pl": "48", "cz": "420",
+    "gr": "30", "ru": "7", "ua": "380", "br": "55", "mx": "52", "ar": "54",
+    "cl": "56", "pe": "51", "au": "61", "nz": "64", "us": "1", "ca": "1",
+}
+_COUNTRY_NAMES = {
+    "in": "India", "id": "Indonesia", "jp": "Japan", "kr": "South Korea", "cn": "China",
+    "tw": "Taiwan", "hk": "Hong Kong", "sg": "Singapore", "my": "Malaysia",
+    "th": "Thailand", "vn": "Vietnam", "ph": "the Philippines", "pk": "Pakistan",
+    "bd": "Bangladesh", "lk": "Sri Lanka", "np": "Nepal", "ae": "the UAE",
+    "sa": "Saudi Arabia", "ir": "Iran", "tr": "Turkey", "il": "Israel", "eg": "Egypt",
+    "ng": "Nigeria", "ke": "Kenya", "za": "South Africa", "gb": "the UK",
+    "ie": "Ireland", "fr": "France", "de": "Germany", "es": "Spain", "it": "Italy",
+    "nl": "the Netherlands", "be": "Belgium", "pt": "Portugal", "ch": "Switzerland",
+    "at": "Austria", "se": "Sweden", "no": "Norway", "dk": "Denmark", "fi": "Finland",
+    "pl": "Poland", "cz": "Czechia", "gr": "Greece", "ru": "Russia", "ua": "Ukraine",
+    "br": "Brazil", "mx": "Mexico", "ar": "Argentina", "cl": "Chile", "pe": "Peru",
+    "au": "Australia", "nz": "New Zealand", "us": "the US", "ca": "Canada",
+}
+# The first country listed for a code, for naming the one a number would dial.
+_COUNTRY_OF_CODE = {}
+for _iso, _code in _CALLING_CODES.items():
+    _COUNTRY_OF_CODE.setdefault(_code, _iso)
+
+# Country-code top-level domains sold to anyone as generic words. A `.co` or
+# `.io` address says nothing about where a business is.
+_GENERIC_COUNTRY_DOMAINS = frozenset({
+    "co", "io", "ai", "tv", "me", "fm", "ly", "to", "gg", "cc", "ws", "sh", "ac",
+    "vc", "gd", "so", "la", "im", "is"})
+
+# The one ccTLD whose country code is spelled differently.
+_DOMAIN_COUNTRY = {"uk": "gb"}
+
+
+def _calling_code_of(number):
+    """The calling code a digit string begins with, longest match first, or ""."""
+    for length in (3, 2, 1):
+        if number[:length] in _COUNTRY_OF_CODE:
+            return number[:length]
     return ""
+
+
+def _region_of(tag):
+    """The region subtag of a language tag: `en-IN` and `en_IN` are both "in"."""
+    for part in re.split(r"[-_]", str(tag or ""))[1:]:
+        if len(part) == 2 and part.isalpha():
+            return part.lower()
+    return ""
+
+
+def _site_country(pages):
+    """(country, how this audit knows) from the site's own signals, or ("", "").
+
+    Four signals, each something the site states: its address's country
+    domain, the region on its `lang` attributes, the region on its `og:locale`,
+    and a country declared on its own PostalAddress. Where two of them name
+    different countries the answer is "" - a British shop on a `.in` address
+    is not guessed at.
+    """
+    found = {}
+    for page in pages:
+        host = (urlparse(str(page.get("final_url") or page.get("url") or "")).hostname
+                or "").lower()
+        label = host.rsplit(".", 1)[-1] if "." in host else ""
+        if len(label) == 2 and label.isalpha() and label not in _GENERIC_COUNTRY_DOMAINS:
+            country = _DOMAIN_COUNTRY.get(label, label)
+            found.setdefault(country, "its address ends .{}".format(label))
+        region = _region_of(page.get("lang"))
+        if region:
+            found.setdefault(region, 'its pages declare lang="{}"'.format(page.get("lang")))
+        locale = _region_of((page.get("og") or {}).get("og:locale"))
+        if locale:
+            found.setdefault(locale, 'its og:locale is "{}"'.format(
+                (page.get("og") or {}).get("og:locale")))
+        for node in _nodes_of(page, ORG_IDENTITY_TYPES):
+            address = node.get("address")
+            if isinstance(address, list):
+                address = address[0] if address else None
+            if isinstance(address, dict):
+                declared = str(address.get("addressCountry") or "").strip().lower()
+                if len(declared) == 2 and declared.isalpha():
+                    found.setdefault(declared, "its own markup declares addressCountry "
+                                               "{}".format(declared.upper()))
+    if len(found) != 1:
+        return "", ""
+    return next(iter(found.items()))
+
+
+def _only_in_a_chat_link(number, pages):
+    """Is a messaging link the one place these digits appear with a plus?"""
+    for page in pages:
+        links = page.get("links") or {}
+        for bucket in ("internal", "external", "nav", "footer"):
+            for entry in (links.get(bucket) or []):
+                if not isinstance(entry, dict):
+                    continue
+                match = _PHONE_IN_LINK_RE.search(str(entry.get("url") or ""))
+                if match and match.group(1) == number:
+                    return True
+    return False
+
+
+def _written_with_its_country_code(number, pages):
+    """Does the site itself write these digits after a `+` or an `00`?
+
+    In its visible text, or inside a link address - `wa.me/+91...` is the site
+    writing its own plus, and `tel:+91...` the same.
+    """
+    for page in pages:
+        squeezed = re.sub(r"[\s().\-]", "", str(page.get("text") or ""))
+        if "+" + number in squeezed or "00" + number in squeezed:
+            return True
+        links = page.get("links") or {}
+        for bucket in ("internal", "external", "nav", "footer"):
+            for entry in (links.get(bucket) or []):
+                if not isinstance(entry, dict):
+                    continue
+                address = str(entry.get("url") or "").replace("%2B", "+").replace("%2b", "+")
+                if "+" + number in re.sub(r"[\s().\-]", "", address):
+                    return True
+    return False
 
 
 def _contact_facts_for_snippet(pages, branches=False, brand_name=""):

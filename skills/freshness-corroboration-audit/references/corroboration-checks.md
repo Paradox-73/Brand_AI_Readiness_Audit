@@ -145,6 +145,12 @@ only way a Mastodon account can be found at all, since Mastodon has no fixed dom
 any list. A database whose entire off-site presence besides its code host was a Patreon and two Mastodon
 accounts was told it links one profile, because a list is what the check had.
 
+Any other address counts only on a host where brands keep accounts
+(`audit_common.on_a_profile_platform`). A link to a magazine article about the brand is coverage, not an
+account, and nothing in its shape tells the two apart. The one rule is `audit_common.could_be_an_account`,
+and `structured-data-audit` builds its paste-ready `sameAs` block with it too, so the profile count and the
+`sameAs` block never list different accounts.
+
 When you say what you looked at, name the vocabulary and not only the place: "the platforms this audit
 recognises" is the real limit, and "we looked in the footer" hides it.
 

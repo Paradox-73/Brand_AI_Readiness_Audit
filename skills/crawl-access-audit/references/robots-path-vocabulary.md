@@ -85,6 +85,38 @@ and forth at least four times. A name with a number in it switches once or twice
 `/phone15pro`, `/2024collection`, `/mp3players` — and any separator (`/covid19-update`) means
 somebody chose words, so none of those is excused.
 
+Three more classes came from a Vietnamese cosmetics shop and a museum on Drupal.
+
+**The same routes in the site's own language.** The shop closes `/checkout`, `/profile`,
+`/thanh-toan`, `/tai-khoan` and `/homepage`; the first two were excused and the other three
+led the report as "paths that look like real content" — its checkout and account pages in
+Vietnamese. Account, sign-in, registration, cart, checkout, order, payment, search,
+administration and wishlist routes are now read in Vietnamese, Indonesian and Malay, Thai,
+Spanish, Portuguese, French, German, Italian and Turkish. The rule is percent-decoded,
+lower-cased, stripped of accents and written with hyphens before it is compared, so
+`/tài-khoản`, `/tai-khoan` and its percent-encoded form are one rule, and a Thai path is
+decoded into Thai script. Whole segment only, after an optional language prefix
+(`/vi/gio-hang`): `/daftar-harga` (a price list) is not `/daftar`. Words whose first meaning is
+content are left out — French `recherche` and Italian `ricerca` are a university's research
+section, `administration` a school's governance page, German `Anmeldung` an event's booking
+information.
+
+**A second address for the front page.** `/home`, `/homepage`, `/trang-chu`, `/inicio`,
+`/accueil`, `/startseite`, `/beranda`, `/anasayfa` — only where the rule stops there.
+`/home/garden` and `/home-decor` are sections.
+
+**A publishing platform's stock robots.txt.** The museum serves Drupal's default file word for
+word, and `/includes/`, `/misc/`, `/modules/` and `/themes/` were ranked first. These names do
+not identify the platform the way `wp-` does — `/modules/` is a training company's course list
+elsewhere — so they are excused only when the same group carries the platform's stock set: at
+least four entries of Drupal's, Joomla's, Magento's or PrestaShop's own file (`/misc/`,
+`/profiles/`, `/cron.php`, `/filter/tips/` for Drupal; `/administrator/`, `/installation/`,
+`/libraries/`, `/plugins/` for Joomla). `/sites/` is never excused: `/sites/<site>/files/` holds
+a Drupal site's uploaded documents. A robots.txt rule is a prefix — it closes every address
+that begins with it — so a rule is excused only as far as the stock file's own line reaches, and
+one that would also close addresses beyond that is not. `stock_robots_platform(rules)` names the
+platform.
+
 Two shapes are deliberately **not** in the vocabulary:
 
 - **A path that happens to 404.** One report listed `/latest`, which answers 404. Nothing in

@@ -89,6 +89,7 @@ VENDOR_HEADER = """# -----------------------------------------------------------
 # GENERATED COPY - do not edit.
 #
 # The single source of this file is {source}.
+# {reason}
 # package.py writes a copy into every skill that imports it, so that each skill
 # folder satisfies the brief's portability rule on its own: lift one out of the
 # marketplace and it still runs.
@@ -97,6 +98,17 @@ VENDOR_HEADER = """# -----------------------------------------------------------
 # carries one per skill that needs it.
 # ---------------------------------------------------------------------------
 """
+
+# Every copy states which names the skill beside it imports from it, read off
+# the same parse that decided to copy it.
+#
+# A copy of `compose_report.py` sat in `fact-extractability-audit/scripts/` of
+# the built zip with a header saying only that package.py copies modules "into
+# every skill that imports it", and it read as a stray: nothing in the header
+# said that skill imports it. It does - `page_shaped_urls` and
+# `why_little_was_read`, so that skill measures how much of a crawl was
+# readable by the same rule as the report it feeds - and the header now says
+# so, for that copy and every other.
 
 # Which modules to copy is derived from what each skill imports, never from a
 # list kept here by hand. A hand-kept list said `audit_common.py` and nothing
@@ -147,6 +159,27 @@ def _imports_of(path, available):
     return found & available
 
 
+def _names_imported_from(path, module):
+    """The names `path` imports from `module`, sorted, or [] for a plain import."""
+    with open(path, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read(), filename=path)
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module \
+                and node.module.split(".")[0] == module:
+            names.update(alias.name for alias in node.names)
+    return sorted(names)
+
+
+def why_it_is_copied(importer_path, importer_label, module):
+    """The sentence a generated copy's header carries about why it is there."""
+    names = _names_imported_from(importer_path, module)
+    if not names:
+        return "It is here because {} imports it.".format(importer_label)
+    return "It is here because {} imports {} from it.".format(
+        importer_label, ", ".join("`{}`".format(n) for n in names))
+
+
 def vendored_shared_library(root):
     """One `(archive path, source path, bytes)` triple per module a skill needs.
 
@@ -185,17 +218,24 @@ def vendored_shared_library(root):
         if skill == "audit-orchestrator" or not os.path.isfile(entry):
             continue
 
-        needed, queue = set(), list(_imports_of(entry, available))
+        # `why[name]` is the file that brought `name` in: the skill's own
+        # `check.py`, or a module already being copied for it.
+        why = {}
+        queue = [(name, entry, "this skill's check.py")
+                 for name in sorted(_imports_of(entry, available))]
         while queue:
-            name = queue.pop()
-            if name in needed:
+            name, importer, label = queue.pop(0)
+            if name in why:
                 continue
-            needed.add(name)
-            queue.extend(_imports_of(source_paths[name], available))
+            why[name] = why_it_is_copied(importer, label, name)
+            queue.extend((child, source_paths[name], "{}.py, copied beside it".format(name))
+                         for child in sorted(_imports_of(source_paths[name], available)))
+        needed = set(why)
 
         for name in sorted(needed):
             header = VENDOR_HEADER.format(
-                source="skills/audit-orchestrator/scripts/{}.py".format(name))
+                source="skills/audit-orchestrator/scripts/{}.py".format(name),
+                reason=why[name])
             copies.append(("skills/{}/scripts/{}.py".format(skill, name),
                            source_paths[name],
                            header.encode("utf-8") + sources[name]))

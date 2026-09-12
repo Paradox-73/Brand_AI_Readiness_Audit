@@ -33,13 +33,23 @@ data rather than inferring it from marketing copy.
 so a wrong value is visible to every user of every assistant that reads the markup. A museum's
 block carried the og:image of its `/events` page — a 2.1 MB photograph of a talk — because the
 reader took the first og:image on any page. An og:image is a social card: on every page but
-the front door it pictures the story, not the publisher. Three sources qualify, in this order:
+the front door it pictures the story, not the publisher. Three sources qualify, each read off
+the homepage (or a language edition's front page, such as `/en/`) and never an inner page, in
+this order:
 
-1. a `logo` declared in the site's own identity markup, which is the site saying outright
-   that this is its logo;
-2. the homepage's own og:image, the one page whose social card is about the publisher;
-3. an image whose own filename calls it a logo and which the site puts on more than one page,
-   so it is a template asset rather than one illustration inside one article.
+1. a `logo` declared in the homepage's own identity markup, which is the site saying outright
+   that this is its logo — not one on a node another node only names as its publisher;
+2. an image the homepage presents as its logo — its alt text names the brand, or its filename
+   calls it a logo — which the site puts on more than one page, so it is a template asset
+   rather than one illustration inside one article;
+3. the homepage's own og:image, and only where its filename calls it a logo.
+
+A favicon — an `.ico` file, or any path containing `favicon` — is never used: it is the
+browser-tab icon, and one national library's block shipped a 16-pixel `favicon_1.ico` read off
+a news article's `publisher` node. A touch icon, the small square a phone saves to its home
+screen, is used only when nothing else qualifies, and the fix steps say so. A relative address
+is made absolute, in the spelling the crawl recorded where it has one, because a relative
+`logo` pasted onto another host points nowhere.
 
 Nothing else. Where none of the three exists the snippet carries an admitted placeholder: a
 placeholder costs the owner a minute, and a confident wrong URL gets published.
